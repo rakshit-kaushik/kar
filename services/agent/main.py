@@ -34,6 +34,7 @@ from psycopg.types.json import Jsonb
 
 from services.agent.state import CallState
 from services.agent.faults import faults_from_room_name
+from services.agent.tts import make_tts, tts_vendor
 from services.common.events import PostgresSink
 from services.tools.executor import ToolExecutor
 from services.tools.livekit_tools import build_livekit_tools
@@ -150,7 +151,7 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=deepgram.STT(model="nova-3", language="en-US", interim_results=True, punctuate=True, smart_format=False, filler_words=True),
         # no sampling knobs: the local server defaults to temperature 0.2 (restart.sh) and Claude 5.5's endpoint rejects temperature/top_p
         llm=lk_openai.LLM(model=model_id, client=llm_client, parallel_tool_calls=False),
-        tts=cartesia.TTS(model=os.environ.get("CARTESIA_MODEL", "sonic-3"), voice=os.environ["CARTESIA_VOICE"]),
+        tts=make_tts(),  # services/agent/tts.py: AGENT_TTS=cartesia|deepgram
         vad=ctx.proc.userdata["vad"],
         turn_handling=TurnHandlingOptions(
             turn_detection=EnglishModel(),
@@ -217,7 +218,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def on_shutdown() -> None:
         outcome = "handoff" if state.handoff else ("completed" if state.completed else "abandoned")
-        await emit("call_end", {"outcome": outcome, "turns": data.turn_idx, "structural_leaks": data.structural_leaks, "duration_s": round(time.time() - data.started, 1)})
+        await emit("call_end", {"outcome": outcome, "tts_vendor": tts_vendor(), "turns": data.turn_idx, "structural_leaks": data.structural_leaks, "duration_s": round(time.time() - data.started, 1)})
         await db_exec("update sessions set ended_at = now(), outcome = %s, state = %s where call_id = %s", (outcome, Jsonb(state.to_dict()), call_id))
         # the room dies with the call: a rejoin under the same name must get a fresh room and a fresh agent, never a leftover one
         try:

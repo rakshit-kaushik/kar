@@ -33,7 +33,8 @@ def call_usage(events: list[tuple]) -> dict:
     outcome = next((e[5].get("outcome") for e in events if e[3] == "call_end"), None)
     booked = any(e[3] == "tool_end" and e[5].get("name") in ("book_appointment", "reschedule_appointment", "cancel_appointment", "create_ticket") and e[5].get("ok") for e in events)
     success = outcome == "completed" if outcome in ("completed", "abandoned", "failed", "handoff") else booked
-    return {"duration_min": duration_min, "stt_audio_min": stt_audio_min, "agent_chars": chars, "tokens": {k: dict(v) for k, v in tokens.items()}, "success": bool(success), "outcome": outcome}
+    vendor = next((p.get("tts_vendor") for e, p in ((ev[3], ev[5] or {}) for ev in events) if e == "call_end" and p.get("tts_vendor")), "cartesia")
+    return {"duration_min": duration_min, "stt_audio_min": stt_audio_min, "agent_chars": chars, "tokens": {k: dict(v) for k, v in tokens.items()}, "success": bool(success), "outcome": outcome, "tts_vendor": vendor}
 
 
 def local_llm_seconds(prompt_tokens: float, completion_tokens: float, rates: dict) -> float:
@@ -46,11 +47,16 @@ def mac_hourly_usd(rates: dict, workday: bool = False) -> float:
     return rates["mac.purchase_usd"] / hours + rates["mac.power_kw"] * rates["electricity_usd_per_kwh"]
 
 
+def tts_rate(u: dict, rates: dict) -> float:
+    """USD per spoken character for the vendor that spoke the call (call_end.tts_vendor; Cartesia unless the agent ran with AGENT_TTS=deepgram)."""
+    return rates["deepgram.aura2.usd_per_char"] if u.get("tts_vendor") == "deepgram" else rates["cartesia.sonic.usd_per_char"]
+
+
 def price_call(u: dict, rates: dict, path: str, avg_call_min: float, workday: bool = False) -> dict:
     m = u["duration_min"]
     audio = u.get("stt_audio_min", m) * rates["deepgram.nova3.streaming_usd_per_min"] \
         + m * (rates["livekit.agent_session_usd_per_min"] + 2 * rates["livekit.webrtc_participant_usd_per_min"]) \
-        + u["agent_chars"] * rates["cartesia.sonic.usd_per_char"]
+        + u["agent_chars"] * tts_rate(u, rates)
     if path == "hosted":
         t = u["tokens"].get(HOSTED_MODEL, {"prompt": 0, "completion": 0})
         llm = t["prompt"] / 1e6 * rates[f"anthropic.{HOSTED_MODEL}.input_usd_per_mtok"] + t["completion"] / 1e6 * rates[f"anthropic.{HOSTED_MODEL}.output_usd_per_mtok"]
@@ -60,4 +66,4 @@ def price_call(u: dict, rates: dict, path: str, avg_call_min: float, workday: bo
         calls_per_hour = adm * 60.0 / max(avg_call_min, 1e-6)
         llm = mac_hourly_usd(rates, workday) / calls_per_hour
         basis = f"estimated: Mac hourly cost / calls per hour at admission limit {adm}"
-    return {"audio_usd": audio, "llm_usd": llm, "total_usd": audio + llm, "llm_basis": basis, "audio_basis": "measured minutes and characters at list price"}
+    return {"audio_usd": audio, "tts_usd": u["agent_chars"] * tts_rate(u, rates), "llm_usd": llm, "total_usd": audio + llm, "llm_basis": basis, "audio_basis": f"measured minutes and characters at list price (TTS: {u.get('tts_vendor', 'cartesia')})"}
