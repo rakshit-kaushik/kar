@@ -413,7 +413,10 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
                 caller_starts.append(pump.first_audible_capture_ms)
                 await emit("caller_speech_start", {"turn": turn, "ts_capture_ms": pump.first_audible_capture_ms}, turn)
             transcript.append(("caller", line))
-            await emit("caller_speech_end", {"turn": turn, "text": line, "audio_ms": int(len(pcm) * 1000 / SR)}, turn)
+            reask = getattr(brain, "last_reask", None)
+            await emit("caller_speech_end", {"turn": turn, "text": line, "audio_ms": int(len(pcm) * 1000 / SR), **({"reask": reask} if reask else {})}, turn)
+            if reask:
+                result.setdefault("reasks", []).append({"turn": turn, "fact": reask, "line": line})
             # wait for the agent's first audio (or its state to flip) before the next line; the loop top waits for listening
             t_end = time.perf_counter() + args.reply_timeout
             while time.perf_counter() < t_end and tl.turns[-1].first_audio_ms is None and not tl.agent_is_listening():
@@ -469,6 +472,7 @@ async def main() -> int:
     ap.add_argument("--no-db", action="store_true")
     ap.add_argument("--json", default=None, help="write per-call results to this file")
     ap.add_argument("--lines-file", default=None, help="JSON list of caller lines to speak instead of the fixed Dana script (demo/turns/*.json)")
+    ap.add_argument("--facts", default=None, help="JSON {phone,dob,day,time,branch}: the caller repeats a fact the agent asks for again instead of its next line (services/demo/caller_script.py); rows labelled -adaptive")
     ap.add_argument("--interrupt-turn", type=int, default=0, help="caller turn that cuts into the agent's reply instead of waiting for quiet (0 = never)")
     ap.add_argument("--interrupt-after-ms", type=int, default=2000, help="how long the agent must have been audibly speaking before the caller cuts in")
     ap.add_argument("--listener", action="store_true", help="second participant measures capture->heard delay of the caller's own speech (transport + receive buffer)")
@@ -490,7 +494,10 @@ async def main() -> int:
 
     async def one(i: int) -> dict:
         async with sem:
-            if args.lines_file:
+            if args.lines_file and args.facts:
+                from services.demo.caller_script import AnsweringScript
+                brain = AnsweringScript(json.loads(pathlib.Path(args.lines_file).read_text()), json.loads(pathlib.Path(args.facts).read_text()))
+            elif args.lines_file:
                 brain = FixedScript(json.loads(pathlib.Path(args.lines_file).read_text()))
             else:
                 brain = FixedScript(DANA_FIXED) if args.script == "fixed" else LLMCaller(DANA_GOAL, seed=i)
