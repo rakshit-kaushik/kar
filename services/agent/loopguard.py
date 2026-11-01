@@ -1,0 +1,100 @@
+"""Loop guard for the agent's LLM node (application logic, no retrain).
+
+E's run-1 eval found 6 of 81 episodes repeating one assistant line three or more times (re-asking the day, repeating a claim
+instead of handing off); the first live calls on the candidate showed the same loop in 2 of 4 calls. The guard holds a
+streaming reply only while it is still identical to the previous assistant line (ordinary replies diverge within the first
+words, so they stream untouched); an exact repeat is swallowed and REPHRASE is spoken instead, a second consecutive repeat
+becomes HANDOFF_LINE plus a request_handoff recorded by the agent. The model never sees the guard: what was spoken is what
+enters the chat context. AGENT_LOOP_GUARD=0 turns it off; every intervention is a `loop_guard` turn event."""
+from __future__ import annotations
+
+import inspect
+import os
+import re
+from typing import Any, AsyncIterable, Callable
+
+REPHRASE = os.environ.get("AGENT_LOOP_REPHRASE", "Sorry, I may have missed that. Could you tell me again what you'd like?")
+HANDOFF_LINE = os.environ.get("AGENT_LOOP_HANDOFF_LINE", "I'm sorry, I'm having trouble with this one. Let me get a colleague to help you.")
+
+
+def normalize(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+
+
+class TurnFilter:
+    """One reply: feed() the text deltas as they stream; the state is 'hold' while the text so far still matches the previous
+    line, 'release' once it differs (or outgrows it). finish() at the end of the stream says 'repeat' or 'release'."""
+
+    def __init__(self, prev_norm: str | None) -> None:
+        self.prev = prev_norm
+        self.buf = ""
+        self.state = "hold" if prev_norm else "release"
+
+    def feed(self, delta: str) -> str:
+        self.buf += delta
+        if self.state == "hold":
+            n = normalize(self.buf)
+            if len(n) > len(self.prev) or not self.prev.startswith(n):  # type: ignore[arg-type]
+                self.state = "release"
+        return self.state
+
+    def finish(self) -> str:
+        if self.state == "hold" and self.prev and normalize(self.buf) == self.prev:
+            return "repeat"
+        return "release"
+
+
+class LoopGuard:
+    def __init__(self, enabled: bool = True, rephrase: str = REPHRASE, handoff_line: str = HANDOFF_LINE) -> None:
+        self.enabled = enabled
+        self.rephrase = rephrase
+        self.handoff_line = handoff_line
+        self.prev: str | None = None  # normalized previous model reply (what the model generated, even when swallowed)
+        self.repeats = 0  # consecutive repeats caught
+
+    @classmethod
+    def from_env(cls) -> "LoopGuard":
+        return cls(enabled=os.environ.get("AGENT_LOOP_GUARD", "1") != "0")
+
+
+def _text_of(chunk: Any) -> str | None:
+    if isinstance(chunk, str):
+        return chunk
+    return getattr(getattr(chunk, "delta", None), "content", None)
+
+
+async def guarded_stream(source: AsyncIterable[Any], guard: LoopGuard, on_loop: Callable[[str, str], Any]):
+    """Wrap an LLM node's chunk stream. Tool-call chunks and sentinels pass through at once; text is held only while it is still
+    a prefix of the previous reply. on_loop(action, repeated_text) runs (awaited if async) when a repeat is replaced."""
+    if not guard.enabled:
+        async for chunk in source:
+            yield chunk
+        return
+    turn, held = TurnFilter(guard.prev), []
+    async for chunk in source:
+        text = _text_of(chunk)
+        if not text:
+            yield chunk
+            continue
+        if turn.state == "release":
+            turn.feed(text)  # keep the full text for the next comparison
+            yield chunk
+            continue
+        held.append(chunk)
+        if turn.feed(text) == "release":
+            for c in held:
+                yield c
+            held = []
+    action = turn.finish()
+    guard.prev = normalize(turn.buf)
+    if action == "release":
+        guard.repeats = 0
+        for c in held:
+            yield c
+        return
+    guard.repeats += 1
+    kind = "rephrase" if guard.repeats == 1 else "handoff"
+    res = on_loop(kind, turn.buf.strip())
+    if inspect.isawaitable(res):
+        await res
+    yield guard.rephrase if kind == "rephrase" else guard.handoff_line

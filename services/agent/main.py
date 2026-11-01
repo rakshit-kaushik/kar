@@ -35,6 +35,7 @@ from psycopg.types.json import Jsonb
 from services.agent.state import CallState
 from services.agent.faults import faults_from_room_name
 from services.agent.filler import FillerPolicy, filler_text
+from services.agent.loopguard import LoopGuard, guarded_stream
 from services.agent.tts import make_tts, tts_vendor
 from services.common.events import PostgresSink
 from services.tools.executor import ToolExecutor
@@ -62,9 +63,15 @@ class R3Agent(Agent):
     """Agent with one measurement hook: the moment the first audible TTS frame leaves the TTS node, so the
     agent-side clock has a 'first audio' timestamp to compare with what the caller hears."""
 
-    def __init__(self, *, on_first_audible, **kw) -> None:
+    def __init__(self, *, on_first_audible, guard: LoopGuard, on_loop, **kw) -> None:
         super().__init__(**kw)
         self._on_first_audible = on_first_audible
+        self._guard, self._on_loop = guard, on_loop
+
+    async def llm_node(self, chat_ctx, tools, model_settings):
+        # services/agent/loopguard.py: an exact repeat of the previous line is swallowed (rephrase, then handoff)
+        async for chunk in guarded_stream(Agent.default.llm_node(self, chat_ctx, tools, model_settings), self._guard, self._on_loop):
+            yield chunk
 
     async def tts_node(self, text, model_settings):
         t0, fired, frames = time.perf_counter(), False, 0
@@ -91,6 +98,7 @@ class CallData:
     structural_leaks: int = 0
     started: float = field(default_factory=time.time)
     filler: FillerPolicy = field(default_factory=lambda: FillerPolicy(filler_text()))
+    guard: LoopGuard = field(default_factory=LoopGuard.from_env)
     fire: Callable[..., None] | None = None  # set per call: the turn-event emitter
 
 
@@ -156,6 +164,12 @@ async def entrypoint(ctx: JobContext) -> None:
         asyncio.create_task(emit(event, payload))
 
     data.fire = fire
+
+    async def on_loop(action: str, repeated: str) -> None:
+        """The loop guard replaced a repeated line: log it; on the second repeat record the handoff through the executor."""
+        await emit("loop_guard", {"action": action, "repeated": repeated[:200], "repeats": data.guard.repeats})
+        if action == "handoff":
+            await executor.execute("request_handoff", {"reason": "out_of_scope", "summary": f"agent repeated itself: {repeated[:120]}"})
 
     await db_exec(
         "insert into sessions(call_id, model_id, started_at, state) values (%s, %s, now(), %s) on conflict (call_id) do nothing",
@@ -257,9 +271,9 @@ async def entrypoint(ctx: JobContext) -> None:
             fire("caller_left", {"identity": p.identity})
             ctx.shutdown(reason="caller left")
 
-    await session.start(agent=R3Agent(instructions=SYSTEM_PROMPT, tools=TOOLS, on_first_audible=lambda p: fire("tts_first_audible", p)), room=ctx.room)
+    await session.start(agent=R3Agent(instructions=SYSTEM_PROMPT, tools=TOOLS, on_first_audible=lambda p: fire("tts_first_audible", p), guard=data.guard, on_loop=on_loop), room=ctx.room)
     await ctx.connect()
-    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "turn": TURN})
+    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "loop_guard": data.guard.enabled, "turn": TURN})
     session.say(GREETING, allow_interruptions=True)
 
 
