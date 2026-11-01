@@ -99,7 +99,8 @@ def test_call_summary_reports_guard_interventions_and_the_tts_vendor():
     from services.demo.check import call_summary
     evs = [_ev("loop_guard", 5, {"action": "rephrase"}), _ev("claim_guard", 7, {"claimed": "transferring you", "reason": "out_of_scope"}),
            _ev("call_end", 9, {"outcome": "completed", "tts_vendor": "deepgram"})]
-    assert call_summary(evs) == {"guard": 1, "claim_guard": 1, "retry": 0, "policy": 0, "tts": "deepgram"}
-    assert call_summary([]) == {"guard": 0, "claim_guard": 0, "retry": 0, "policy": 0, "tts": "?"}
+    assert call_summary(evs) == {"guard": 1, "claim_guard": 1, "retry": 0, "policy": 0, "reprompt": 0, "tts": "deepgram"}
+    assert call_summary([]) == {"guard": 0, "claim_guard": 0, "retry": 0, "policy": 0, "reprompt": 0, "tts": "?"}
     assert call_summary([_ev("policy_handoff", 3, {"reason": "suspected_fraud"})])["policy"] == 1  # the contract rule's handoff, counted apart
+    assert call_summary([_ev("stt_timeout_reprompt", 5, {"speech_duration": 1.0})])["reprompt"] == 1  # caller speech with no transcript: the agent asked again
     assert call_summary([_ev("tool_retry", 3, {"name": "book_appointment", "error": "timeout"})])["retry"] == 1  # the executor's retry, counted apart

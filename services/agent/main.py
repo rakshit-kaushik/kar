@@ -52,11 +52,16 @@ SEED = json.loads((ROOT / "eval/sandbox/seed.json").read_text())
 SYSTEM_PROMPT = (ROOT / "schemas/system_prompt.md").read_text().replace("{today}", SEED["clock_spoken"])
 GREETING = "Thanks for calling Marlow Mutual Bank. Can I get the phone number on your account?"
 # Turn-taking knobs (AGENT_* in .env). Defaults are LiveKit's; .env carries the values chosen by measurement.
+REPROMPT_LINE = os.environ.get("AGENT_REPROMPT_LINE", "Sorry, I didn't catch that. Could you say it again?")
+
 TURN = {
     "vad_min_silence_s": float(os.environ.get("AGENT_VAD_MIN_SILENCE", "0.55")),
     "endpoint_min_s": float(os.environ.get("AGENT_ENDPOINT_MIN", "0.5")),
     "endpoint_max_s": float(os.environ.get("AGENT_ENDPOINT_MAX", "3.0")),
     "preemptive": os.environ.get("AGENT_PREEMPTIVE", "0") == "1",
+    # caller speech that VAD heard but STT never transcribed (two rehearsal stalls, Nov 1): after this many seconds the session
+    # emits user_transcription_timeout and the agent asks the caller to say it again; 0 disables (LiveKit docs: "use it to prompt the user")
+    "transcription_timeout_s": float(os.environ.get("AGENT_TRANSCRIPTION_TIMEOUT", "2.5")),
 }
 AUDIBLE_RMS = 300.0
 
@@ -224,6 +229,7 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
         userdata=data,
         max_tool_steps=3,
+        transcription_timeout=TURN["transcription_timeout_s"] or None,
     )
 
     @session.on("user_state_changed")
@@ -234,6 +240,13 @@ async def entrypoint(ctx: JobContext) -> None:
             data.turn_idx += 1
             executor.turn_idx = data.turn_idx
             fire("speech_end")
+
+    @session.on("user_transcription_timeout")
+    def _on_transcription_timeout(ev) -> None:
+        # VAD heard the caller, STT produced nothing final: without this both sides wait (rehearsal interruption calls 3 and 5).
+        # Not in the chat context, so the model and the loop guard never see it; identical for every model; its own event and count.
+        fire("stt_timeout_reprompt", {"speech_duration": round(float(getattr(ev, "speech_duration", 0.0)), 2), "text": REPROMPT_LINE})
+        session.say(REPROMPT_LINE, allow_interruptions=True, add_to_chat_ctx=False)
 
     @session.on("user_input_transcribed")
     def _transcribed(ev) -> None:
@@ -307,7 +320,7 @@ async def entrypoint(ctx: JobContext) -> None:
                                       completed_tools=lambda: {c.get("tool") for c in state.completed}, on_action_claim=on_action_claim,
                                       policy=data.policy, policy_state=lambda: state_view(state), on_policy=on_policy), room=ctx.room)
     await ctx.connect()
-    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "loop_guard": data.guard.enabled, "claim_guard": data.claim_guard.enabled, "policy_handoff": data.policy.enabled, "turn": TURN})
+    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "loop_guard": data.guard.enabled, "claim_guard": data.claim_guard.enabled, "policy_handoff": data.policy.enabled, "transcription_timeout_s": TURN["transcription_timeout_s"], "turn": TURN})
     session.say(GREETING, allow_interruptions=True)
 
 

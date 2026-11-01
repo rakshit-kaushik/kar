@@ -40,7 +40,7 @@ def main() -> int:
         if not calls:
             print(f"no sessions match {args.like}")
             return 1
-        passed, guarded, claimed, retried, policied, vendors, model = 0, 0, 0, 0, 0, set(), calls[0][1]
+        passed, guarded, claimed, retried, policied, reprompted, vendors, model = 0, 0, 0, 0, 0, 0, set(), calls[0][1]
         print(f"scenario {args.scenario}   model {model}   calls {len(calls)}")
         for call_id, _, outcome, state in calls:
             evs = con.execute("select call_id, turn_idx, model_id, event, ts_ms, payload from turn_events where call_id = %s order by ts_ms, id", (call_id,)).fetchall()
@@ -51,13 +51,14 @@ def main() -> int:
             claimed += bool(info["claim_guard"])
             retried += bool(info["retry"])
             policied += bool(info["policy"])
+            reprompted += bool(info["reprompt"])
             vendors.add(info["tts"])
-            print(f"  {call_id:<42} {str(outcome):<10} guard={info['guard']} claim={info['claim_guard']} retry={info['retry']} policy={info['policy']} tts={info['tts']:<9} {'PASS' if not reasons else 'FAIL: ' + '; '.join(reasons)}")
-        print(f"{args.scenario}: {passed}/{len(calls)} passed; loop guard intervened in {guarded} call(s); claim guard in {claimed}; executor retried in {retried}; policy handoff in {policied}; tts {'/'.join(sorted(vendors))}")
+            print(f"  {call_id:<42} {str(outcome):<10} guard={info['guard']} claim={info['claim_guard']} retry={info['retry']} policy={info['policy']} reprompt={info['reprompt']} tts={info['tts']:<9} {'PASS' if not reasons else 'FAIL: ' + '; '.join(reasons)}")
+        print(f"{args.scenario}: {passed}/{len(calls)} passed; loop guard intervened in {guarded} call(s); claim guard in {claimed}; executor retried in {retried}; policy handoff in {policied}; re-prompt after untranscribed speech in {reprompted}; tts {'/'.join(sorted(vendors))}")
         if args.ledger:
             run_id = args.run_id or f"rehearsal-{model}"
             note = f"tts={'/'.join(sorted(vendors))}; scripts/demo_check.py --like {args.like!r}"
-            rows = ((f"rehearsal.{args.scenario}.pass", passed), (f"rehearsal.{args.scenario}.runs", len(calls)), (f"rehearsal.{args.scenario}.guarded", guarded), (f"rehearsal.{args.scenario}.claim_guarded", claimed), (f"rehearsal.{args.scenario}.retried", retried), (f"rehearsal.{args.scenario}.policy", policied))
+            rows = ((f"rehearsal.{args.scenario}.pass", passed), (f"rehearsal.{args.scenario}.runs", len(calls)), (f"rehearsal.{args.scenario}.guarded", guarded), (f"rehearsal.{args.scenario}.claim_guarded", claimed), (f"rehearsal.{args.scenario}.retried", retried), (f"rehearsal.{args.scenario}.policy", policied), (f"rehearsal.{args.scenario}.reprompted", reprompted))
             for item, qty in rows:
                 con.execute("insert into cost_ledger(run_id, model_id, item, qty, unit, measured, note) values (%s,%s,%s,%s,%s,true,%s)",
                             (run_id, model, item, qty, "calls", note))
