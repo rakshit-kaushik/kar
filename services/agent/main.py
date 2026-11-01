@@ -37,6 +37,7 @@ from services.agent.faults import faults_from_room_name
 from services.agent.filler import FillerPolicy, filler_text
 from services.agent.claimguard import ClaimGuard, claim_guarded_stream, handoff_reason, state_view
 from services.agent.loopguard import LoopGuard, loop_guarded
+from services.agent.policy import HandoffPolicy, policy_stream
 from services.agent.tts import make_tts, tts_vendor
 from services.common.events import PostgresSink
 from services.tools.executor import ToolExecutor
@@ -64,12 +65,14 @@ class R3Agent(Agent):
     """Agent with one measurement hook: the moment the first audible TTS frame leaves the TTS node, so the
     agent-side clock has a 'first audio' timestamp to compare with what the caller hears."""
 
-    def __init__(self, *, on_first_audible, guard: LoopGuard, on_loop, claim_guard: ClaimGuard, handoff_done, on_claim, completed_tools=None, on_action_claim=None, **kw) -> None:
+    def __init__(self, *, on_first_audible, guard: LoopGuard, on_loop, claim_guard: ClaimGuard, handoff_done, on_claim, completed_tools=None, on_action_claim=None,
+                 policy: HandoffPolicy | None = None, policy_state=None, on_policy=None, **kw) -> None:
         super().__init__(**kw)
         self._on_first_audible = on_first_audible
         self._guard, self._on_loop = guard, on_loop
         self._claim_guard, self._handoff_done, self._on_claim = claim_guard, handoff_done, on_claim
         self._completed_tools, self._on_action_claim = completed_tools, on_action_claim
+        self._policy, self._policy_state, self._on_policy = policy, policy_state, on_policy
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         # services/agent/claimguard.py: a transfer announced without request_handoff gets the handoff recorded first;
@@ -79,6 +82,8 @@ class R3Agent(Agent):
         self._guard.begin_turn(getattr(last, "text_content", None) if last is not None else None, interrupted=bool(getattr(last, "interrupted", False)))
         source = claim_guarded_stream(Agent.default.llm_node(self, chat_ctx, tools, model_settings), self._claim_guard, self._handoff_done, self._on_claim,
                                       completed_tools=self._completed_tools, on_action_claim=self._on_action_claim)
+        if self._policy is not None and self._policy_state is not None:
+            source = policy_stream(source, self._policy, self._policy_state, self._on_policy)  # contract rule: a fraud ticket ends in a transfer
         async for chunk in loop_guarded(source, self._guard, self._on_loop, self._handoff_done):
             yield chunk
 
@@ -109,6 +114,7 @@ class CallData:
     filler: FillerPolicy = field(default_factory=lambda: FillerPolicy(filler_text()))
     guard: LoopGuard = field(default_factory=LoopGuard.from_env)
     claim_guard: ClaimGuard = field(default_factory=ClaimGuard.from_env)
+    policy: HandoffPolicy = field(default_factory=HandoffPolicy.from_env)
     fire: Callable[..., None] | None = None  # set per call: the turn-event emitter
 
 
@@ -186,6 +192,11 @@ async def entrypoint(ctx: JobContext) -> None:
         reason = handoff_reason(state_view(state))
         await emit("claim_guard", {"kind": "transfer", "claimed": text[:200], "reason": reason})
         await executor.execute("request_handoff", {"reason": reason, "summary": f"agent announced a transfer without calling request_handoff: {text[:120]}"})
+
+    async def on_policy(reason: str) -> None:
+        """The contract requires a transfer the model did not make (fraud-category ticket, no handoff): record it, then the agent says so."""
+        await emit("policy_handoff", {"reason": reason, "rule": "fraud_ticket"})
+        await executor.execute("request_handoff", {"reason": reason, "summary": "policy: a fraud-category ticket requires a transfer; the model closed without one"})
 
     async def on_action_claim(kind: str, tool: str, sentence: str) -> None:
         """The model claimed a finished write (booked, moved, cancelled, ticket) with no successful result of that tool in the call:
@@ -293,9 +304,10 @@ async def entrypoint(ctx: JobContext) -> None:
             ctx.shutdown(reason="caller left")
 
     await session.start(agent=R3Agent(instructions=SYSTEM_PROMPT, tools=TOOLS, on_first_audible=lambda p: fire("tts_first_audible", p), guard=data.guard, on_loop=on_loop, claim_guard=data.claim_guard, handoff_done=lambda: bool(state.handoff), on_claim=on_claim,
-                                      completed_tools=lambda: {c.get("tool") for c in state.completed}, on_action_claim=on_action_claim), room=ctx.room)
+                                      completed_tools=lambda: {c.get("tool") for c in state.completed}, on_action_claim=on_action_claim,
+                                      policy=data.policy, policy_state=lambda: state_view(state), on_policy=on_policy), room=ctx.room)
     await ctx.connect()
-    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "loop_guard": data.guard.enabled, "claim_guard": data.claim_guard.enabled, "turn": TURN})
+    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "loop_guard": data.guard.enabled, "claim_guard": data.claim_guard.enabled, "policy_handoff": data.policy.enabled, "turn": TURN})
     session.say(GREETING, allow_interruptions=True)
 
 

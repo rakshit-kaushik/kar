@@ -160,14 +160,15 @@ def rehearsal_table(con) -> str:
             g = items.get(f"rehearsal.{s}.guarded", (0, ""))[0]
             cg = items.get(f"rehearsal.{s}.claim_guarded", (0, ""))[0]
             rt = items.get(f"rehearsal.{s}.retried", (0, ""))[0]
-            marks = ([f"guard {int(g)}"] if g else []) + ([f"claim {int(cg)}"] if cg else []) + ([f"retry {int(rt)}"] if rt else [])
+            po = items.get(f"rehearsal.{s}.policy", (0, ""))[0]
+            marks = ([f"guard {int(g)}"] if g else []) + ([f"claim {int(cg)}"] if cg else []) + ([f"retry {int(rt)}"] if rt else []) + ([f"policy {int(po)}"] if po else [])
             cells.append(f"{int(p)}/{int(n[0])}" + (f" ({', '.join(marks)})" if marks else ""))
             m = re.search(r"tts=([^;]+)", n[1])
             if m:
                 vendors.add(m.group(1))
         rows.append([run_id] + cells + ["/".join(sorted(vendors)) or "?"])
     note = ("\n\n_pass = expected final state reached with no success claim before its tool result, no ids spoken, no structural text; "
-            "(guard n) = calls in which the agent's loop guard replaced a repeated line; (claim n) = calls in which the agent's claim guard intervened (recorded request_handoff before an announced transfer, or held back an unsupported booked/moved/cancelled/ticket sentence); (retry n) = calls in which the tool executor absorbed a transient fault with one retry on the same idempotency key, the model seeing only the final result "
+            "(guard n) = calls in which the agent's loop guard replaced a repeated line; (claim n) = calls in which the agent's claim guard intervened (recorded request_handoff before an announced transfer, or held back an unsupported booked/moved/cancelled/ticket sentence); (retry n) = calls in which the tool executor absorbed a transient fault with one retry on the same idempotency key, the model seeing only the final result; (policy n) = calls in which the application enforced the contract's fraud-ticket handoff rule after the model's reply, never the model's own transfer "
             "the model announced without the call; both application interventions counted apart from the model. "
             "Recordings per call under $R3_ARTIFACTS/runs/<rehearsal run>/audio; the simulated caller's recordings are labelled recorded, never live._")
     return (md_table(["rehearsal run (model, stamp)"] + list(names) + ["TTS"], rows) + note) if rows else "_no rehearsal yet_"
