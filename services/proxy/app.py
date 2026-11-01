@@ -46,6 +46,20 @@ def sse(obj: dict) -> str:
 HOSTED_DROP = ("temperature", "top_p")
 
 
+class HostedBreaker:
+    """Hosted model availability. A 4xx from the hosted endpoint (bad key, no credit, rejected params) means
+    retrying it is pointless: open for `cooldown_s`, during which the proxy waits on local instead of falling back."""
+
+    def __init__(self, cooldown_s: float = 600.0) -> None:
+        self.cooldown_s, self.until, self.reason = cooldown_s, 0.0, None
+
+    def available(self) -> bool:
+        return time.monotonic() >= self.until
+
+    def trip(self, reason: str) -> None:
+        self.until, self.reason = time.monotonic() + self.cooldown_s, reason
+
+
 class UpstreamStatus(Exception):
     def __init__(self, status: int, body: str) -> None:
         super().__init__(f"upstream status {status}")
@@ -137,6 +151,7 @@ def create_app(
     first_token_timeout: float = 2.0,
 ) -> Starlette:
     turn_counters: dict[str, int] = collections.defaultdict(int)
+    breaker = HostedBreaker()
 
     async def emit(call_id: str, turn_idx: int, model_id: str, event: str, payload: dict | None = None) -> None:
         ev = {"call_id": call_id, "turn_idx": turn_idx, "model_id": model_id, "event": event, "ts_ms": now_ms(), "payload": payload or {}}
@@ -168,22 +183,31 @@ def create_app(
             return JSONResponse(data, status_code=r.status_code)
 
         attempts: list[tuple[httpx.AsyncClient, str, str]] = [(upstream_client, model_id, "local")]
-        if fallback_client is not None and fallback_model:
+        if fallback_client is not None and fallback_model and breaker.available():
             attempts.append((fallback_client, fallback_model, "hosted"))
 
         s: _Stream | None = None
-        for i, (client, mid, source) in enumerate(attempts):
+        i = 0
+        while i < len(attempts):
+            client, mid, source = attempts[i]
             has_next = i + 1 < len(attempts)
             try:
-                sent = {**body, "model": mid} if source == "local" else {k: v for k, v in body.items() if k not in HOSTED_DROP} | {"model": mid}
+                sent = {**body, "model": mid} if source != "hosted" else {k: v for k, v in body.items() if k not in HOSTED_DROP} | {"model": mid}
                 s = await open_stream(client, sent, mid, first_token_timeout if has_next else None)
                 break
             except (httpx.HTTPError, UpstreamStatus, asyncio.TimeoutError) as e:
                 reason = "first_token_timeout" if isinstance(e, asyncio.TimeoutError) else "upstream_error"
                 detail = {"status": e.status, "body": e.body[:500]} if isinstance(e, UpstreamStatus) else {"error": repr(e)}
                 await emit(call_id, turn_idx, mid, "llm_error", {"reason": reason, "source": source, **detail})
+                if source == "hosted" and isinstance(e, UpstreamStatus) and 400 <= e.status < 500:
+                    # the hosted side rejects us outright: stop trying it, and give the local turn back its time
+                    breaker.trip(f"{e.status}: {e.body[:160]}")
+                    await emit(call_id, turn_idx, mid, "fallback_unavailable", {"status": e.status, "cooldown_s": breaker.cooldown_s, "body": e.body[:300]})
+                    attempts.append((upstream_client, model_id, "local_retry"))
+                    has_next = True
                 if has_next:
                     await emit(call_id, turn_idx, mid, "fallback", {"reason": reason, "from_model": mid, "to_model": attempts[i + 1][1], "ms": now_ms() - t0})
+                    i += 1
                     continue
                 if isinstance(e, UpstreamStatus):
                     return Response(e.body, status_code=e.status, media_type="application/json")
@@ -222,7 +246,7 @@ def create_app(
             up = f"down: {type(e).__name__}"
         return JSONResponse({
             "status": "ok", "upstream": up, "upstream_base_url": str(upstream_client.base_url),
-            "fallback": {"model": fallback_model, "first_token_timeout_s": first_token_timeout} if fallback_client is not None else None,
+            "fallback": {"model": fallback_model, "first_token_timeout_s": first_token_timeout, "available": breaker.available(), "unavailable_reason": breaker.reason} if fallback_client is not None else None,
         })
 
     return Starlette(routes=[

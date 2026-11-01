@@ -42,3 +42,44 @@ def test_summary_gives_p50_p95_over_turns_and_skips_turns_without_audio():
     assert s["turns"] == 4 and s["turns_with_audio"] == 3
     assert s["eos_to_first_audio_ms"]["p50"] == 800 and s["eos_to_first_audio_ms"]["p95"] == 1160
     assert s["eos_to_first_audio_ms"]["max"] == 1200
+
+
+def test_agent_quiet_requires_listening_state_and_no_recent_audio():
+    """The caller must not talk over the agent: 'listening' alone is not enough, the agent's audio must have stopped."""
+    tl = CallerTimeline()
+    tl.agent_state(0, "speaking")
+    tl.agent_audio(100, rms=900)
+    tl.agent_state(150, "listening")        # state flipped while audio frames are still arriving
+    tl.agent_audio(200, rms=900)
+    assert tl.agent_quiet(now_ms=400, quiet_ms=500) is False   # 200 ms since the last audible frame
+    assert tl.agent_quiet(now_ms=750, quiet_ms=500) is True    # 550 ms of silence after 'listening'
+    tl.caller_speech_end(800)
+    assert tl.agent_quiet(now_ms=2000, quiet_ms=500) is False  # awaiting a reply: not quiet, waiting
+
+
+
+def test_reply_resolves_when_listening_arrives_without_an_observed_speaking_state():
+    """Attribute updates can coalesce: thinking -> listening with no 'speaking' seen. If audio was heard,
+    the reply is over when the agent reports listening again."""
+    tl = CallerTimeline()
+    tl.agent_state(0, "listening")
+    tl.caller_speech_end(1000)
+    tl.agent_state(1300, "thinking")
+    tl.agent_audio(2200, rms=900)
+    tl.agent_state(4000, "listening")
+    assert tl.agent_is_listening() is True
+    [t] = tl.latencies()
+    assert t["eos_to_first_audio_ms"] == 1200
+
+
+def test_agent_audible_for_reports_how_long_the_current_reply_has_been_heard():
+    """For the interruption test: the caller cuts in once the agent has been audibly speaking for N ms."""
+    tl = CallerTimeline()
+    tl.agent_state(0, "listening")
+    tl.caller_speech_end(1000)
+    assert tl.agent_audible_for_ms(now_ms=1500) == 0          # nothing heard yet
+    tl.agent_audio(2000, rms=900)
+    tl.agent_audio(2500, rms=900)
+    assert tl.agent_audible_for_ms(now_ms=2600) == 600        # since the reply's first audible frame
+    tl.agent_audio(2700, rms=0)
+    assert tl.agent_audible_for_ms(now_ms=3400) == 0          # 900 ms without an audible frame: the agent stopped

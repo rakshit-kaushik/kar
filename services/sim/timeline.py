@@ -35,6 +35,7 @@ class CallerTimeline:
         self.silence_rms = silence_rms
         self._state = "unknown"
         self._awaiting_reply = False
+        self.last_audible_ms: int | None = None
 
     # -- events --------------------------------------------------------------------------------------
     def caller_speech_end(self, ts_ms: int) -> Turn:
@@ -51,20 +52,42 @@ class CallerTimeline:
                 t.thinking_ms = ts_ms
             elif state == "speaking" and t.speaking_ms is None:
                 t.speaking_ms = ts_ms
-            elif state == "listening" and prev == "speaking" and (t.speaking_ms is not None or t.first_audio_ms is not None):
+            elif state == "listening" and (t.speaking_ms is not None or t.first_audio_ms is not None):
                 t.agent_speech_end_ms = ts_ms
                 self._awaiting_reply = False
 
     def agent_audio(self, ts_ms: int, rms: float) -> None:
-        if rms < self.silence_rms or not self.turns or not self._awaiting_reply:
+        audible = rms >= self.silence_rms
+        if audible:
+            self.last_audible_ms = ts_ms
+        if not self.turns or not self._awaiting_reply:
             return
         t = self.turns[-1]
-        if t.first_audio_ms is None and ts_ms > t.caller_speech_end_ms:
+        if ts_ms <= t.caller_speech_end_ms:
+            return
+        if audible and t.first_audio_ms is None:
             t.first_audio_ms = ts_ms
 
     # -- queries -------------------------------------------------------------------------------------
     def agent_is_listening(self) -> bool:
         return self._state == "listening" and not self._awaiting_reply
+
+    def agent_audible_for_ms(self, now_ms: int, gap_ms: int = 400) -> int:
+        """How long the agent's current reply has been audible, or 0 if nothing is heard (no audible frame
+        in the last gap_ms, or no reply pending)."""
+        if not self.turns or not self._awaiting_reply:
+            return 0
+        t = self.turns[-1]
+        if t.first_audio_ms is None or self.last_audible_ms is None or now_ms - self.last_audible_ms > gap_ms:
+            return 0
+        return now_ms - t.first_audio_ms
+
+    def agent_quiet(self, now_ms: int, quiet_ms: int = 600) -> bool:
+        """Safe to speak: the agent reports listening, no reply is pending, and no audible agent frame
+        arrived in the last quiet_ms (the state flips before the audio buffer has drained)."""
+        if not self.agent_is_listening():
+            return False
+        return self.last_audible_ms is None or now_ms - self.last_audible_ms >= quiet_ms
 
     def latencies(self) -> list[dict]:
         out = []

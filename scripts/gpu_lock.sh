@@ -15,10 +15,10 @@ holder() { set -- $(read_lock); if [ -n "${1:-}" ] && [ "$(now)" -lt "${2:-0}" ]
 case "${1:-status}" in
   status)
     h=$(holder); if [ -z "$h" ]; then echo "gpu: free"; exit 0; fi
-    set -- $(read_lock); echo "gpu: held by $1 until $(date -r "$2" '+%H:%M:%S') ($3)"; exit 1 ;;
+    set -- $(read_lock); echo "gpu: held by $1 for another $(( ($2 - $(now)) / 60 )) min ($3)"; exit 1 ;;
   acquire)
     owner="${2:?owner}"; mins="${3:?minutes}"; purpose="${4:-}"; h=$(holder)
-    if [ -n "$h" ] && [ "$h" != "$owner" ]; then set -- $(read_lock); echo "gpu: held by $1 until $(date -r "$2" '+%H:%M:%S') ($3)"; exit 1; fi
+    if [ -n "$h" ] && [ "$h" != "$owner" ]; then set -- $(read_lock); echo "gpu: held by $1 for another $(( ($2 - $(now)) / 60 )) min ($3)"; exit 1; fi
     printf '{"owner":"%s","since":%s,"until":%s,"purpose":"%s"}\n' "$owner" "$(now)" "$(( $(now) + mins*60 ))" "$purpose" > "$LOCK"
     echo "gpu: acquired by $owner for ${mins} min ($purpose)"; exit 0 ;;
   release)
