@@ -38,6 +38,7 @@ from eval.simulator.scenario import (
     load_scenarios,
     validate_against_seed,
 )
+from eval.simulator.stt_shape import cardinal, ordinal, spell_digits, year_words
 
 ROOT = Path(__file__).resolve().parents[1]
 Result = tuple[Episode, list[ScorerResult]]
@@ -583,9 +584,86 @@ DATA_SCORERS = {
 }
 
 
+_DIGIT_WORDS = {
+    "zero": "0",
+    "oh": "0",
+    "o": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+}
+_MONTHS = (
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+)
+
+
+def _spoken_digits(text: str) -> str:
+    """Every digit the caller spoke, in order; filler words between digits are dropped."""
+    toks = re.findall(r"[a-z0-9]+", text.lower())
+    return "".join(_DIGIT_WORDS.get(t, t if t.isdigit() else "") for t in toks)
+
+
+def _dob_spoken(text: str, iso: str) -> bool:
+    """True when month, day and year of `iso` all appear in `text` in some spoken form."""
+    y, m, d = (int(x) for x in iso.split("-"))
+    t = " " + re.sub(r"[^a-z0-9]+", " ", text.lower()) + " "
+    month = _MONTHS[m - 1]
+    days = {ordinal(d), cardinal(d), str(d), f"{d:02d}", spell_digits(f"{d:02d}")}
+    years = {year_words(y), spell_digits(str(y)), str(y), cardinal(y)}
+    if 2001 <= y <= 2009:  # "twenty one" is 2021, not 2001
+        years |= {f"two thousand and {cardinal(y - 2000)}", f"twenty oh {cardinal(y - 2000)}"}
+    has = lambda w: f" {w} " in t
+    return (
+        (has(month) or has(month[:3])) and any(has(w) for w in days) and any(has(w) for w in years)
+    )
+
+
+def caller_fault(ep: dict) -> str | None:
+    """Why the simulated caller, not the agent, sank verification. None when the caller stated the
+    true credentials (then a failed lookup is the agent's fault), when no lookup was attempted,
+    when one succeeded, or when the scenario never expected verification to succeed."""
+    sc = ep.get("scenario") or {}
+    expected = (sc.get("expect") or {}).get("tool_calls") or []
+    if not any(c.get("tool") == "lookup_account" and c.get("ok", True) for c in expected):
+        return None
+    lookups = [t for t in ep.get("tool_log") or [] if t.get("tool") == "lookup_account"]
+    if not lookups or any(t.get("ok") for t in lookups):
+        return None
+    knows = (sc.get("caller") or {}).get("knows") or {}
+    said = " ".join(
+        m.get("content") or "" for m in ep.get("messages") or [] if m.get("role") == "user"
+    )
+    phone = re.sub(r"\D", "", str(knows.get("phone") or ""))
+    if phone and phone not in _spoken_digits(said):
+        return "caller never stated the true phone number"
+    dob = knows.get("date_of_birth")
+    if dob and not _dob_spoken(said, str(dob)):
+        return "caller never stated the true date of birth"
+    return None
+
+
 def bucket_for(score: dict, ep_info: dict, target_counts: dict | None) -> str:
     """First-pass label for one failing scorer of one episode, from scorer evidence alone."""
     if ep_info.get("outcome") == "error":
+        return "harness"
+    if ep_info.get("caller_fault"):
         return "harness"
     name, d = score["scorer"], score.get("detail", {}) or {}
     if ep_info.get("long_context") and name in ("tool_calls", "final_state", "corrections_hold"):
@@ -624,6 +702,7 @@ def buckets_report(
     if dataset_dir is not None and target_counts is None:
         target_counts = target_counts_from_dataset(dataset_dir)
     rows = []
+    caller_faults: list[tuple[str, str]] = []
     counts: Counter[str] = Counter()
     for p in sorted((Path(run_dir) / "episodes").glob("*.json")):
         ep = json.loads(p.read_text())
@@ -640,7 +719,10 @@ def buckets_report(
                 (sc["passed"] for sc in scores if sc["scorer"] == "tool_calls"), False
             ),
             "long_context": bool(fail_turn and fail_turn >= 8),
+            "caller_fault": caller_fault(ep),
         }
+        if info["caller_fault"]:
+            caller_faults.append((ep["episode_id"], info["caller_fault"]))
         labelled = [
             (sc["scorer"], bucket_for(sc, info, target_counts), sc.get("turn_idx")) for sc in fails
         ]
@@ -651,6 +733,10 @@ def buckets_report(
         f"# Failure buckets — `{Path(run_dir).name}` (first pass by session E from scorer evidence; the human's labels win)",
         "",
         f"Failing episodes: {len(rows)}. Target counts per tool from the training set: {target_counts or 'n/a'}",
+        "",
+        f"Caller faults (the simulated caller mis-stated its own phone or date of birth, so verification failed "
+        f"before the agent could be judged; bucketed as harness): {len(caller_faults)}"
+        + ("".join(f"\n- {eid}: {why}" for eid, why in caller_faults) if caller_faults else ""),
         "",
         "## Bucket counts",
         "",

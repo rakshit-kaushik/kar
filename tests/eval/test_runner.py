@@ -530,3 +530,81 @@ async def test_buckets_report_counts_and_verdict(tmp_path):
     assert "Verdict" in md and ("run 2 is justified" in md or "run 2 is not justified" in md)
     p = build_parser().parse_args(["buckets", str(tmp_path), "--dataset", "/tmp/ds"])
     assert p.command == "buckets" and p.directory == str(tmp_path) and p.dataset == "/tmp/ds"
+
+
+def _ep_for_caller_fault(user_turns, lookups, knows=None, expected_ok=True):
+    knows = knows or {"phone": "5550198823", "date_of_birth": "1975-07-04"}
+    return {
+        "scenario": {
+            "caller": {"knows": knows},
+            "expect": {"tool_calls": [{"tool": "lookup_account", "ok": expected_ok}]},
+        },
+        "messages": [{"role": "user", "content": u} for u in user_turns],
+        "tool_log": [{"tool": "lookup_account", "args": a, "ok": ok} for a, ok in lookups],
+    }
+
+
+def test_caller_fault_detects_misstated_credentials():
+    from eval.runner import caller_fault
+
+    failed = [({"phone": "5550198823", "date_of_birth": "1975-03-04"}, False)]
+    phone = "five five five zero one nine eight eight two three"
+    wrong_dob = _ep_for_caller_fault([phone, "nineteen seventy five march fourth"], failed)
+    assert caller_fault(wrong_dob) == "caller never stated the true date of birth"
+    # the caller said it right (fillers between digits are STT noise, not a fault): agent fault
+    right = _ep_for_caller_fault(
+        [
+            "five five five zero one nine like eight eight two three",
+            "july fourth nineteen seventy five",
+        ],
+        failed,
+    )
+    assert caller_fault(right) is None
+    # verification succeeded, or was not expected to: nothing to blame on the caller
+    assert caller_fault(_ep_for_caller_fault([phone, "nineteen sixty"], [({}, True)])) is None
+    assert (
+        caller_fault(_ep_for_caller_fault([phone, "nineteen sixty"], failed, expected_ok=False))
+        is None
+    )
+    # no lookup attempted at all: the agent's problem
+    assert caller_fault(_ep_for_caller_fault([phone, "nineteen sixty"], [])) is None
+    bad_phone = _ep_for_caller_fault(
+        [
+            "five five five zero one eight ate eight zero zero one",
+            "july fourth nineteen seventy five",
+        ],
+        [({"phone": "5550188001", "date_of_birth": "1975-07-04"}, False)],
+    )
+    assert caller_fault(bad_phone) == "caller never stated the true phone number"
+    # day as a cardinal, year as "two thousand one"
+    knows = {"phone": "5550155678", "date_of_birth": "2001-09-09"}
+    ok2 = _ep_for_caller_fault(
+        ["five five five zero one five five six seven eight", "september nine two thousand one"],
+        [({}, False)],
+        knows=knows,
+    )
+    assert caller_fault(ok2) is None
+    garbled = _ep_for_caller_fault(
+        ["five five five zero one five five six seven eight", "twenty one september ninth"],
+        [({}, False)],
+        knows=knows,
+    )
+    assert caller_fault(garbled) == "caller never stated the true date of birth"
+
+
+def test_bucket_for_caller_fault_is_harness():
+    from eval.runner import bucket_for
+
+    score = {"scorer": "tool_calls", "detail": {"first_missing": {"tool": "check_availability"}}}
+    assert (
+        bucket_for(
+            score,
+            {"caller_fault": "caller never stated the true date of birth"},
+            {"check_availability": 3},
+        )
+        == "harness"
+    )
+    assert (
+        bucket_for(score, {"caller_fault": None}, {"check_availability": 3})
+        == "missing example type"
+    )
