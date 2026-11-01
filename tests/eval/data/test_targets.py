@@ -211,3 +211,29 @@ async def test_extra_length_check_is_pluggable():
     chosen, dropped = select_targets(ep, fits=lambda ex: ex["meta"]["kind"] != "closing")
     assert [t.kind for t in chosen] == ["tool_call", "clarification"]
     assert dropped[0].reason == "length"
+
+
+@pytest.mark.asyncio
+async def test_clarification_that_reasks_a_given_slot_is_dropped_and_the_next_candidate_taken():
+    script = VERIFY + [
+        say("Which branch would you like?"),  # legitimate: nothing given yet
+        tools(tc("check_availability", AVAIL)),
+        say("Which time works for you on Tuesday?"),  # re-ask: the caller just said nine thirty
+        tools(tc("book_appointment", BOOK)),
+        say("Booked. Anything else?"),
+        say("Thanks Dana, goodbye."),
+    ]
+    lines = VERIFY_LINES + [
+        "a mortgage consultation on tuesday at nine thirty",
+        "market street",
+        "nine thirty",
+        "yes",
+        ("no that's it", True),
+    ]
+    ep = await make_episode(scenario(), script, lines)
+    chosen, dropped = select_targets(ep)
+    assert [t.kind for t in chosen] == ["tool_call", "clarification", "closing"]
+    assert chosen[1].text == "Which branch would you like?"
+    assert [(t.reason, t.text) for t in dropped] == [
+        ("reask", "Which time works for you on Tuesday?")
+    ]

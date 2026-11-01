@@ -75,7 +75,7 @@ async def test_build_filters_failed_episodes_and_writes_dataset(tmp_path):
         stats["targets"]["by_kind"]["tool_call"]["kept"] == 4
         and stats["targets"]["by_kind"]["closing"]["kept"] == 4
     )
-    assert stats["targets"]["dropped"] == {"brevity": 0, "length": 0}
+    assert stats["targets"]["dropped"] == {"brevity": 0, "length": 0, "reask": 0}
     assert stats["targets_per_conversation"] == {"mean": 3.0, "histogram": {"3": 4}}
     train = [json.loads(line) for line in (out / "train.jsonl").read_text().splitlines()]
     valid = [json.loads(line) for line in (out / "valid.jsonl").read_text().splitlines()]
@@ -110,6 +110,7 @@ async def test_build_filters_failed_episodes_and_writes_dataset(tmp_path):
         "scorer_failed_episodes": 2,
         "brevity_targets": 0,
         "over_2048_targets": 0,
+        "reask_targets": 0,
     }
     report = (out / "yield.md").read_text()
     assert "tool_call" in report and "kept" in report and "smoke" in report
@@ -152,6 +153,7 @@ async def test_length_filter_is_applied_per_target_and_counted(tmp_path):
         "kept": 0,
         "brevity": 0,
         "length": 1,
+        "reask": 0,
     }
 
 

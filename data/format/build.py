@@ -74,7 +74,9 @@ def build_dataset(
     results = [r for d in run_dirs for r in _load_run(d)]
     batches: dict[str, dict] = {}
     by_kind = {
-        k: {"generated": 0, "kept": 0, "brevity": 0, "length": 0} for k in KINDS if k != "other"
+        k: {"generated": 0, "kept": 0, "brevity": 0, "length": 0, "reask": 0}
+        for k in KINDS
+        if k != "other"
     }
     verdicts: dict[str, dict] = {}
     rows: dict[str, list[dict]] = {"train": [], "valid": []}
@@ -115,6 +117,7 @@ def build_dataset(
     dropped = {
         "brevity": sum(v["brevity"] for v in by_kind.values()),
         "length": sum(v["length"] for v in by_kind.values()),
+        "reask": sum(v["reask"] for v in by_kind.values()),
     }
     tpc_stats = {
         "mean": round(sum(k * v for k, v in tpc.items()) / kept_eps, 2) if kept_eps else 0.0,
@@ -146,6 +149,7 @@ def build_dataset(
             "scorer_failed_episodes": n_failed,
             "brevity_targets": dropped["brevity"],
             "over_2048_targets": dropped["length"],
+            "reask_targets": dropped["reask"],
         },
         "yield": stats["targets"],
         "provenance": {
@@ -186,20 +190,21 @@ def yield_report(name: str, stats: dict, manifest: dict) -> str:
         ),
         (
             f"Targets: {t['generated']} generated, {t['kept']} kept ({round(100 * t['kept'] / t['generated']) if t['generated'] else 0}%); "
-            f"dropped for brevity {t['dropped']['brevity']}, for length {t['dropped']['length']}."
+            f"dropped for brevity {t['dropped']['brevity']}, for length {t['dropped']['length']}, "
+            f"as a re-ask of a given slot {t['dropped'].get('reask', 0)}."
         ),
         (
             f"Targets per kept conversation: mean {stats['targets_per_conversation']['mean']}, "
             f"histogram {stats['targets_per_conversation']['histogram']}."
         ),
         "",
-        "| kind | generated | kept | dropped: brevity | dropped: length | kept % |",
-        "|---|---|---|---|---|---|",
+        "| kind | generated | kept | dropped: brevity | dropped: length | dropped: re-ask | kept % |",
+        "|---|---|---|---|---|---|---|",
     ]
     for k, v in t["by_kind"].items():
         pct = round(100 * v["kept"] / v["generated"]) if v["generated"] else 0
         lines.append(
-            f"| {k} | {v['generated']} | {v['kept']} | {v['brevity']} | {v['length']} | {pct}% |"
+            f"| {k} | {v['generated']} | {v['kept']} | {v['brevity']} | {v['length']} | {v.get('reask', 0)} | {pct}% |"
         )
     lines += [
         "",

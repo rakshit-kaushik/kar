@@ -5,10 +5,12 @@ including that turn (the prefix is masked by the trainer, the loss falls on the 
 three targets per episode, chosen to cover a tool call (the handoff decision beats a write; a write
 beats the latest read; the lookup only when nothing else was called), a clarification (a question or
 read-back; when the episode has both a handoff and a write, the write takes this slot instead), and
-the closing line. Two per-target filters, applied to
+the closing line. Three per-target filters, applied to
 the target alone so the episode's other targets survive: the contract's brevity rule (at most two
-sentences and 35 spoken words, CONTRACT §2 rule 4) and an optional `fits` callback (the 2,048-token
-check, see data/format/length.py). Targets are dropped, never truncated.
+sentences and 35 spoken words, CONTRACT §2 rule 4), an optional `fits` callback (the 2,048-token
+check, see data/format/length.py), and for clarifications the re-ask rule (a question about a branch,
+day, time or service the caller had already given earlier in the prefix teaches over-asking; see
+eval.scorers.scorers.reask_slots). Targets are dropped, never truncated.
 """
 
 from __future__ import annotations
@@ -19,6 +21,7 @@ from dataclasses import dataclass
 
 from eval.sandbox import TOOL_SCHEMAS
 from eval.scorers.normalize import WRITE_TOOLS
+from eval.scorers.scorers import reask_slots, slot_truth
 from eval.simulator.episode import Episode
 
 MAX_WORDS = 35
@@ -47,7 +50,7 @@ class Target:
     tool_names: list[str]
     words: int = 0
     sentences: int = 0
-    reason: str | None = None  # set when dropped: "brevity" | "length"
+    reason: str | None = None  # set when dropped: "brevity" | "length" | "reask"
 
 
 def _message_turn(ep: Episode) -> dict[int, int]:
@@ -114,6 +117,24 @@ def to_example(ep: Episode, target: Target) -> dict:
     }
 
 
+def _expected_slots(ep: Episode) -> dict[str, str]:
+    """Branch / service / date / time the scenario expects to be booked (the caller's truth)."""
+    sc = ep.scenario
+    if isinstance(sc, dict):
+        steps = (sc.get("expect") or {}).get("tool_calls") or []
+    else:
+        steps = [{"tool": st.tool, "args": st.args} for st in sc.expect.tool_calls]
+    return slot_truth(steps)
+
+
+def _caller_texts_before(ep: Episode, message_idx: int) -> list[str]:
+    return [
+        m.get("content") or ""
+        for m in ep.messages[:message_idx]
+        if m.get("role") == "user" and isinstance(m.get("content"), str)
+    ]
+
+
 def _pick_tool_call(cands: list[Target]) -> Target | None:
     writes = [t for t in cands if any(n in WRITE_TOOLS for n in t.tool_names)]
     if writes:
@@ -173,6 +194,7 @@ def select_targets(
     if tool_order and _is_handoff(tool_order[0]) and write_idx is not None:
         second_slot = [t for t in tool_order[1:] if _is_write(t)] + clar_order
     slots: list[list[Target]] = [tool_order, second_slot, by_kind["closing"]]
+    truth = _expected_slots(ep)
     chosen: list[Target] = []
     dropped: list[Target] = []
     for cands in slots:
@@ -182,6 +204,14 @@ def select_targets(
             ok, _, _ = brevity_ok(t.text) if t.text else (True, 0, 0)
             if not ok:
                 t.reason = "brevity"
+                dropped.append(t)
+                continue
+            if (
+                t.kind == "clarification"
+                and truth
+                and reask_slots(truth, _caller_texts_before(ep, t.message_idx), t.text)
+            ):
+                t.reason = "reask"
                 dropped.append(t)
                 continue
             if fits is not None and not fits(to_example(ep, t)):

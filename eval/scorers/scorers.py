@@ -698,13 +698,18 @@ _MONTH_NAMES = [
 ]
 
 
-def _slot_truth(sc: Scenario) -> dict[str, str]:
-    """Expected branch / service / date / time, merged over the booking-type expected steps."""
+def slot_truth(steps: list[dict]) -> dict[str, str]:
+    """Expected branch / service / date / time, merged over the booking-type expected steps
+    (`steps` are plain {"tool", "args"} dicts, e.g. a scenario file's expect.tool_calls)."""
     truth: dict[str, str] = {}
-    for step in sc.expect.tool_calls:
-        if step.tool not in ("book_appointment", "check_availability", "reschedule_appointment"):
+    for step in steps:
+        if step.get("tool") not in (
+            "book_appointment",
+            "check_availability",
+            "reschedule_appointment",
+        ):
             continue
-        a = step.args or {}
+        a = step.get("args") or {}
         slot = a.get("slot_start") or a.get("new_slot_start") or ""
         if a.get("branch_id"):
             truth["branch"] = a["branch_id"]
@@ -742,15 +747,19 @@ def _spoken_forms(slot: str, value: str) -> set[str]:
     h12 = h % 12 or 12
     part = "morning" if h < 12 else "afternoon"
     base = time_words(h, m)
-    forms = {base, base.replace(" o'clock", ""), f"{cardinal(h12)} {'a m' if h < 12 else 'p m'}"}
+    # never a bare hour word ("nine"): it would match the digits of a phone number
     if m == 0:
-        forms |= {
-            f"{cardinal(h12)} o'clock",
-            f"{cardinal(h12)} in the {part}",
-            f"{cardinal(h12)} {'am' if h < 12 else 'pm'}",
+        hour = cardinal(h12)
+        return {
+            f"{hour} o'clock",
+            f"{hour} in the {part}",
+            f"{hour} {'a m' if h < 12 else 'p m'}",
+            f"{hour} {'am' if h < 12 else 'pm'}",
         }
+    stem = base.replace(" o'clock", "")
+    forms = {stem, f"{stem} in the {part}", f"{stem} {'a m' if h < 12 else 'p m'}"}
     if m == 30:
-        forms |= {f"{cardinal(h12)} thirty", f"half past {cardinal(h12)}"}
+        forms.add(f"half past {cardinal(h12)}")
     return forms
 
 
@@ -779,28 +788,43 @@ def _is_disambiguation(slot: str, question: str, truth_value: str) -> bool:
     return False
 
 
+def reask_slots(truth: dict[str, str], caller_texts: list[str], question: str) -> list[str]:
+    """Slots the agent's `question` asks for although one of the caller's earlier (STT-shaped)
+    `caller_texts` already stated the expected value. Questions offering two or more candidates
+    are clarifications, not re-asks. Shared by the advisory scorer and the data pipeline's filter."""
+    out = []
+    for slot, rx in _SLOT_QUESTIONS.items():
+        if slot not in truth or not rx.search(question):
+            continue
+        forms = _spoken_forms(slot, truth[slot])
+        if any(_mentions(c, forms) for c in caller_texts) and not _is_disambiguation(
+            slot, question, truth[slot]
+        ):
+            out.append(slot)
+    return out
+
+
 def reasked_given_slot(ep: Episode, sc: Scenario) -> ScorerResult:
     """Advisory: the agent asked for a booking detail (branch, day, time, service) that the caller had
     already stated in an earlier or the same turn. Over-asking otherwise only shows up as max_turns or a
     missing check_availability call. Questions offering two or more candidates are clarifications."""
-    truth = _slot_truth(sc)
+    truth = slot_truth([{"tool": st.tool, "args": st.args} for st in sc.expect.tool_calls])
     if not truth:
         return ScorerResult("reasked_given_slot", True, {"applicable": False}, advisory=True)
     forms = {slot: _spoken_forms(slot, v) for slot, v in truth.items()}
     given: dict[str, int] = {}
+    said: list[str] = []
     violations = []
     for t in ep.turns:
+        said.append(t.get("caller_text") or "")
         for slot, fs in forms.items():
-            if slot not in given and _mentions(t.get("caller_text") or "", fs):
+            if slot not in given and _mentions(said[-1], fs):
                 given[slot] = t["idx"]
         reply = t.get("assistant_text") or ""
-        for slot, rx in _SLOT_QUESTIONS.items():
-            if slot in given and slot in truth and rx.search(reply):
-                if _is_disambiguation(slot, reply, truth[slot]):
-                    continue
-                violations.append(
-                    {"turn": t["idx"], "slot": slot, "given_turn": given[slot], "text": reply[:120]}
-                )
+        for slot in reask_slots(truth, said, reply):
+            violations.append(
+                {"turn": t["idx"], "slot": slot, "given_turn": given[slot], "text": reply[:120]}
+            )
     return ScorerResult(
         "reasked_given_slot",
         not violations,

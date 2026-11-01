@@ -845,3 +845,43 @@ async def test_reasked_given_slot_not_applicable_without_a_booking_expectation()
     )
     r = results(ep, scen)["reasked_given_slot"]
     assert r.passed is True and r.detail["applicable"] is False
+
+
+def test_reask_slots_helper_does_not_mistake_phone_digits_for_a_time():
+    from eval.scorers.scorers import reask_slots, slot_truth
+
+    truth = slot_truth(
+        [
+            {
+                "tool": "book_appointment",
+                "args": {
+                    "branch_id": "market_st",
+                    "service_type": "notary",
+                    "slot_start": "2026-11-05T09:00",
+                },
+            }
+        ]
+    )
+    assert truth == {
+        "branch": "market_st",
+        "service": "notary",
+        "date": "2026-11-05",
+        "time": "09:00",
+    }
+    callers = [
+        "five five five zero one nine eight eight two three",
+        "march twelfth nineteen eighty eight",
+    ]
+    assert reask_slots(truth, callers, "What time works for you on Thursday?") == []
+    assert reask_slots(
+        truth, callers + ["nine in the morning please"], "What time works for you?"
+    ) == ["time"]
+    assert reask_slots(
+        truth, ["a notary at market street tomorrow"], "Which branch would you like?"
+    ) == ["branch"]
+    assert (
+        reask_slots(
+            truth, ["a notary at market street"], "Which branch: Market Street or Marker Street?"
+        )
+        == []
+    )
