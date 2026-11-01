@@ -1,3 +1,4 @@
+import re
 #!/usr/bin/env python
 """G1 / load-test report: per-stage latency p50/p95 and per-call outcomes from turn_events (CONTRACT.md §6).
 
@@ -39,6 +40,30 @@ def fmt(xs, unit="ms"):
     if not xs:
         return "n/a"
     return f"p50 {pct(xs, 0.5):.0f} {unit} · p95 {pct(xs, 0.95):.0f} {unit} · n={len(xs)}"
+
+
+CLAIM_TOOLS = {  # a spoken success claim is supported only by an earlier successful tool result of the matching write
+    "book": "book_appointment", "booked": "book_appointment", "rescheduled": "reschedule_appointment", "moved": "reschedule_appointment",
+    "cancelled": "cancel_appointment", "canceled": "cancel_appointment", "ticket": "create_ticket",
+}
+_CLAIM_RE = re.compile(r"\b(I(?:'ve| have)? (?:booked|rescheduled|moved|cancell?ed)|is (?:now )?(?:booked|rescheduled|cancell?ed)|(?:created|opened) a ticket)\b", re.I)
+
+
+def unsupported_claims(events) -> int:
+    """Assistant transcripts that claim a completed write (booked, rescheduled, cancelled, ticket) with no successful tool_end of the
+    matching tool earlier in the call: the contract's prohibited 'confirming anything a tool has not returned' (CONTRACT.md)."""
+    done: set[str] = set(); n = 0
+    for e in sorted(events, key=lambda e: e[4]):
+        p = e[5] or {}
+        if e[3] == "tool_end" and p.get("ok"):
+            done.add(p.get("name"))
+        elif e[3] == "transcript" and p.get("role") == "assistant":
+            m = _CLAIM_RE.search(p.get("text") or "")
+            if m:
+                word = next((w for w in CLAIM_TOOLS if w in m.group(0).lower()), None)
+                if word and CLAIM_TOOLS[word] not in done:
+                    n += 1
+    return n
 
 
 def turn_kind(llm_done_payload: dict) -> str:
@@ -91,7 +116,8 @@ def main() -> None:
         leaks = sum(1 for e in evs if e[3] == "transcript" and e[5].get("role") == "assistant" and e[5].get("structural"))
         lookup_ok = any(e[3] == "tool_end" and e[5].get("name") == "lookup_account" and e[5].get("ok") for e in evs)
         tools = [e[5].get("name") for e in evs if e[3] == "tool_end" and e[5].get("ok")]
-        fallbacks = sum(1 for e in evs if e[3] == "llm_first_token" and e[5].get("source") == "hosted")  # turns served by the hosted model (a hedge the local side won is not one)
+        fallbacks = sum(1 for e in evs if e[3] == "llm_first_token" and e[5].get("source") == "hosted")
+        claims = unsupported_claims(evs)  # turns served by the hosted model (a hedge the local side won is not one)
         joined = next((e[5].get("ms") for e in evs if e[3] == "caller_agent_joined"), None)
         if joined is not None:
             M["agent_dispatch"].append(joined); simulated += 1
@@ -129,7 +155,7 @@ def main() -> None:
                 if e[3] == "tts_first_audio" and e[5].get("ttfb") is not None: M["tts_ttfb"].append(e[5]["ttfb"] * 1000)
                 if e[3] == "stt_final" and not first("caller_speech_end"): pass
         s = sessions.get(call_id)
-        per_call.append((call_id, model, n_turns, lookup_ok, leaks, fallbacks, ",".join(tools) or "-", s[1] if s else "?"))
+        per_call.append((call_id, model, n_turns, lookup_ok, leaks, fallbacks, ",".join(tools) or "-", s[1] if s else "?", claims))
 
     kind = "simulated audio calls" if simulated == len(per_call) else ("live browser calls" if simulated == 0 else "mixed live/simulated calls")
     print(f"calls: {len(per_call)} ({kind})   model: {per_call[0][1]}")
@@ -150,12 +176,13 @@ def main() -> None:
     if M["agent_dispatch"]:
         print(f"agent joined after caller            {fmt(M['agent_dispatch'])}")
     ok_calls = sum(1 for c in per_call if c[3]); leak_calls = sum(1 for c in per_call if c[4]); fb_total = sum(c[5] for c in per_call)
+    claim_calls = sum(1 for c in per_call if c[8])
     print(f"\nG1: lookups completed {ok_calls}/{len(per_call)}; calls with structural speech {leak_calls}; hosted fallbacks {fb_total}; "
-          f"{'PASS' if ok_calls >= 10 and leak_calls == 0 else 'not yet'}")
+          f"unsupported success claims {claim_calls} calls; {'PASS' if ok_calls >= 10 and leak_calls == 0 and claim_calls == 0 else 'not yet'}")
 
     if args.ledger:
         note = args.note or f"{kind} matching {args.like}"
-        items = [("calls", len(per_call), "calls"), ("lookups_ok", ok_calls, "calls"), ("structural_leak_calls", leak_calls, "calls"), ("fallbacks", fb_total, "requests")]
+        items = [("calls", len(per_call), "calls"), ("lookups_ok", ok_calls, "calls"), ("structural_leak_calls", leak_calls, "calls"), ("unsupported_claim_calls", claim_calls, "calls"), ("fallbacks", fb_total, "requests")]
         for name in ("eos_to_first_audio_heard", "eos_to_tts_audible", "transport", "turn_taking_overhead", "eou_delay", "transcription_delay", "llm_ttft_local", "llm_ttft_hosted", "llm_ttft_tool", "llm_ttft_spoken", "decode_tok_s", "tts_ttfb", "prompt_tokens", "completion_tokens", "agent_dispatch"):
             xs = M.get(name) or []
             unit = "tok/s" if name == "decode_tok_s" else ("tok" if "tokens" in name else "ms")

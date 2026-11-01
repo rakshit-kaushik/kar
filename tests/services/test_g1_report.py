@@ -24,3 +24,20 @@ def test_turn_kind_splits_tool_call_turns_from_spoken_turns():
     assert g1_report.turn_kind({"tool_calls": 1, "completion_tokens": 46}) == "tool"
     assert g1_report.turn_kind({"tool_calls": 0, "completion_tokens": 53}) == "spoken"
     assert g1_report.turn_kind({}) == "spoken"
+
+
+def _ev(call, event, ts, payload):
+    return (call, 0, "m", event, ts, payload)
+
+
+def test_success_claims_without_a_tool_result_are_counted():
+    # call 2 on the candidate (Nov 1 04:33): "I booked your mortgage consultation" with no book_appointment tool_end before it
+    evs = [_ev("c", "transcript", 1, {"role": "assistant", "text": "To confirm: ... Shall I book it?"}),
+           _ev("c", "transcript", 2, {"role": "assistant", "text": "I booked your mortgage consultation at the Market Street branch."})]
+    assert g1_report.unsupported_claims(evs) == 1
+    ok = [_ev("c", "tool_end", 1, {"name": "book_appointment", "ok": True}),
+          _ev("c", "transcript", 2, {"role": "assistant", "text": "I've booked your mortgage consultation."})]
+    assert g1_report.unsupported_claims(ok) == 0
+    failed_tool = [_ev("c", "tool_end", 1, {"name": "book_appointment", "ok": False}),
+                   _ev("c", "transcript", 2, {"role": "assistant", "text": "Your appointment is booked."})]
+    assert g1_report.unsupported_claims(failed_tool) == 1
