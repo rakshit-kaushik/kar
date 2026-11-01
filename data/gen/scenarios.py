@@ -731,9 +731,19 @@ class _Gen:
 
     def double_fault(self):
         """tool_timeout variant: the same tool fails twice (timeout/unavailable) -> handoff tool_failure."""
-        tool = self.rng.choice(
-            ["book_appointment", "check_availability", "reschedule_appointment", "create_ticket"]
-        )
+        if self.short:
+            tool = self.rng.choice(
+                ["cancel_appointment", "cancel_appointment", "reschedule_appointment"]
+            )
+        else:
+            tool = self.rng.choice(
+                [
+                    "book_appointment",
+                    "check_availability",
+                    "reschedule_appointment",
+                    "create_ticket",
+                ]
+            )
         errs = [self.rng.choice(["timeout", "timeout", "unavailable"]) for _ in range(2)]
         inject = [
             {"tool": tool, "call_index": 1, "error": errs[0]},
@@ -758,6 +768,16 @@ class _Gen:
             )
             goal = f"Book a {SERVICE_WORDS[service]} at {BRANCH_WORDS[b]} on {spoken_date(d)} at {spoken_time(hhmm)}. {retry}"
             title = f"{tool.replace('_', ' ')} fails twice for {cust.first_name}"
+        elif tool == "cancel_appointment":
+            cust = self.customer(with_appointment=True)
+            ap = self.sb.customer_appointments(cust.customer_id)[0]
+            failed = {"tool": tool, "args": {"appointment_id": ap.appointment_id}, "ok": False}
+            tool_steps = [self.lookup_step(cust), failed, failed, handoff]
+            goal = (
+                f"Cancel your {SERVICE_WORDS[ap.service_type]} at {BRANCH_WORDS[ap.branch_id]} on "
+                f"{spoken_date(ap.slot_start.date())}; you no longer need it. {retry}"
+            )
+            title = f"cancel fails twice for {cust.first_name}"
         elif tool == "reschedule_appointment":
             cust = self.customer(with_appointment=True)
             ap = self.sb.customer_appointments(cust.customer_id)[0]
@@ -784,17 +804,29 @@ class _Gen:
             tool_steps = [self.lookup_step(cust), failed, failed, handoff]
             goal = f"You want to {TICKET_GOALS[cat]}; agree when the agent offers to open a ticket. {retry}"
             title = f"create ticket fails twice for {cust.first_name}"
+        caller = self.caller(cust)
+        if self.short:
+            caller["persona"] = self.rng.choice(
+                [
+                    q
+                    for q in PERSONAS
+                    if any(
+                        k in q
+                        for k in ("Brisk", "Efficient", "Soft-spoken", "Methodical", "Easygoing")
+                    )
+                ]
+            )
         return self.base(
             "tool_timeout",
             title,
             "Two failures of the same tool: say so plainly, retry once, then hand off with reason tool_failure; never claim success",
-            self.caller(cust),
+            caller,
             goal,
             {
                 "tool_calls": tool_steps,
                 "handoff": {"required": True, "reason": "tool_failure"},
                 "final_state": {},
-                "max_turns": 14,
+                "max_turns": 10 if self.short else 14,
             },
             inject=inject,
         )
@@ -869,13 +901,13 @@ def generate(
         seed,
         sb,
         test_signatures(test_dir),
-        short=profile == "short",
-        phrasing=load_bank() if phrasing else None,
+        short=profile in ("short", "double_fault_short"),
+        phrasing=load_bank() if phrasing and profile != "double_fault_short" else None,
     )
     if profile == "short" and mix is None:
         mix = {"ordinary": 5, "needs_person": 3, "duplicate": 1}
     builders = dict(_Gen.BUILDERS)
-    if profile == "double_fault":
+    if profile in ("double_fault", "double_fault_short"):
         builders["tool_timeout"] = _Gen.double_fault
         mix = mix or {"tool_timeout": 1}
     weights = mix or dict.fromkeys(FAMILIES, 1)

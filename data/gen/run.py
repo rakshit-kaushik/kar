@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--profile",
         default="default",
-        choices=["default", "short", "double_fault"],
+        choices=["default", "short", "double_fault", "double_fault_short"],
         help="short = status/cancel/handoff calls only",
     )
     p.add_argument(

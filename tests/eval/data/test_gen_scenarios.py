@@ -128,3 +128,17 @@ def test_double_fault_profile_expects_tool_failure_handoffs():
         assert steps.count((inj[0]["tool"], False)) == 2
         assert not validate_against_seed(parse_scenario(s, s["id"]), sb)
     assert any(i["error"] == "unavailable" for s in out for i in s["inject"])
+
+
+def test_double_fault_short_profile_uses_cancel_and_reschedule_only():
+    out = generate(50, seed=31, profile="double_fault_short")
+    assert len(out) == 50
+    tools_used = Counter(s["inject"][0]["tool"] for s in out)
+    assert set(tools_used) == {"cancel_appointment", "reschedule_appointment"}
+    sb = Sandbox()
+    for s in out:
+        assert s["expect"]["handoff"] == {"required": True, "reason": "tool_failure"}
+        assert s["expect"]["max_turns"] <= 10 and "Phrasing seeds" not in s["caller"]["persona"]
+        assert [i["call_index"] for i in s["inject"]] == [1, 2]
+        assert not s.get("script")
+        assert not validate_against_seed(parse_scenario(s, s["id"]), sb)
