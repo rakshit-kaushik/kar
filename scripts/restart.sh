@@ -8,6 +8,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 # values given on the command line win over .env (MODEL_DIR=... LLM_MODEL=... LOCAL_LLM_MODEL=... scripts/restart.sh)
 _OVR_LLM_MODEL="${LLM_MODEL:-}"; _OVR_LOCAL_LLM_MODEL="${LOCAL_LLM_MODEL:-}"; _OVR_LLM_BASE_URL="${LLM_BASE_URL:-}"; _OVR_MODEL_DIR="${MODEL_DIR:-}"
+for _n in ${R3_OVERRIDES:-}; do eval "[ -n \"\${$_n+x}\" ] && _OVR_$_n=\"\${$_n}\""; done
 set -a; source .env; set +a
 # Nov 1 08:02 incident: .env had gained a MODEL_DIR line (deploy_model.sh writes one), so sourcing it clobbered the deploy's
 # MODEL_DIR override while the served name kept the override; run 1's weights were served under run 2's name for two hours.
@@ -15,6 +16,9 @@ set -a; source .env; set +a
 [ -n "$_OVR_LLM_MODEL" ] && export LLM_MODEL="$_OVR_LLM_MODEL"
 [ -n "$_OVR_LOCAL_LLM_MODEL" ] && export LOCAL_LLM_MODEL="$_OVR_LOCAL_LLM_MODEL"
 [ -n "$_OVR_LLM_BASE_URL" ] && export LLM_BASE_URL="$_OVR_LLM_BASE_URL"
+# opt-in overrides for agent switches, for labelled A/B rows: R3_OVERRIDES="AGENT_TOOL_RETRY AGENT_POLICY_HANDOFF" AGENT_TOOL_RETRY=0 ...
+# (opt-in, so the watchdog or a shell that sourced an older .env cannot override the current .env by accident)
+for _n in ${R3_OVERRIDES:-}; do eval "_v=\${_OVR_$_n-__unset__}"; [ "$_v" != "__unset__" ] && export "$_n=$_v"; done
 ART=${R3_ARTIFACTS:-$HOME/r3-artifacts}; LOG=$ART/logs; mkdir -p "$LOG"
 MODEL_DIR=${MODEL_DIR:-$ART/models/Qwen3-4B-8bit}
 SERVED=${LOCAL_LLM_MODEL:-r3-voice-base}

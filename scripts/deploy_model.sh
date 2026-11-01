@@ -22,20 +22,14 @@ ID="$(basename "$TARGET")"; [ "$ID" = "Qwen3-4B-8bit" ] && ID="r3-voice-base"
 PREV="$(cur)"
 echo "$NOTE: $ID from $TARGET (previous: $PREV)"
 MODEL_DIR="$TARGET" LOCAL_LLM_MODEL="$ID" LLM_MODEL="$ID" R3_OWNER="$OWNER" scripts/restart.sh
-# Prove the weights, not the name: the server process must be serving exactly $TARGET (Nov 1 08:02 incident: the name said
-# run 2, the process served run 1). /v1/models only echoes --served-model-name, so it cannot catch this.
-SERVING="$(ps -o command= -p "$(lsof -ti:8000 -sTCP:LISTEN | head -1)" 2>/dev/null | sed -n 's/.*vllm_mlx_serve.py serve \([^ ]*\) .*/\1/p')"
-if [ "$SERVING" != "$TARGET" ]; then
-  echo "DEPLOY FAILED: :8000 is serving '$SERVING', not '$TARGET'. State files and .env left unchanged." >&2
-  uv run python - "$ID" "$TARGET" "$SERVING" <<'PY'
-import os, sys, psycopg
-mid, mdir, serving = sys.argv[1:4]
-with psycopg.connect(os.environ["DATABASE_URL"]) as con:
-    con.execute("insert into cost_ledger(run_id, model_id, item, qty, unit, measured, note) values ('deploy', %s, 'deploy.failed_path_check', 1, 'model', true, %s)", (mid, f"wanted={mdir}; serving={serving}"))
-PY
+# Prove the weights, not the name (Nov 1 08:02 incident: the name said run 2, the process served run 1; /v1/models only echoes
+# --served-model-name). scripts/serving_proof.py prints and records the process's model path, /v1/models and a behavioural
+# fingerprint under $R3_RUN_ID, and fails when the path is not $TARGET or the name is not the directory's.
+PROOF_RUN="${R3_RUN_ID:-deploy-$ID-$(date +%m%d-%H%M)}"
+if ! uv run python scripts/serving_proof.py --run-id "$PROOF_RUN" --expect-dir "$TARGET" --expect-name-from-dir; then
+  echo "DEPLOY FAILED: :8000 is not serving $TARGET as $ID (proof rows under $PROOF_RUN). State files and .env left unchanged." >&2
   exit 1
 fi
-echo "  serving path verified: $SERVING"
 uv run python scripts/probe_dispatch.py --timeout 40 || uv run python scripts/probe_dispatch.py --timeout 40
 # make the choice durable: .env carries the live model id so later plain restarts keep serving it
 python3 - "$ID" "$TARGET" <<'PY'

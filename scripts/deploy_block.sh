@@ -13,7 +13,7 @@ run() { "$@" 2>&1 | tee -a "$LOG"; }
 scripts/gpu_lock.sh wait S "$LOCK_MINUTES" "$RUN" | tee -a "$LOG"
 trap 'scripts/gpu_lock.sh release S | tee -a "$LOG"' EXIT
 step "deploy $ID"
-R3_OWNER=S run scripts/deploy_model.sh "$DIR"
+R3_OWNER=S R3_RUN_ID="$RUN" run scripts/deploy_model.sh "$DIR" || { step "DEPLOY FAILED (serving proof): block stops, nothing measured"; exit 1; }
 run uv run python scripts/probe_dispatch.py --timeout 40
 step "prefix trie: 2-turn request pair straight to :8000 (second request must log a trie HIT)"
 uv run python - "$ID" "$OUT" <<'PY' 2>&1 | tee -a "$LOG"

@@ -12,13 +12,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; set -a; . ./.env; set +a
 ART="${R3_ARTIFACTS:-$HOME/r3-artifacts}"; RUNS="${RUNS:-5}"; INT_TURN="${INT_TURN:-5}"
 SCENARIOS="${SCENARIOS:-ordinary correction timeout interruption handoff handoff_person}"
 ID="$(curl -s -m 5 http://127.0.0.1:8000/v1/models | uv run python -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null || echo unknown)"
-STAMP="$(date +%m%d-%H%M)"; RUN="rehearsal-$ID-$STAMP"; OUT="$ART/runs/$RUN"; mkdir -p "$OUT/audio"; LOG="$OUT/block.log"
+STAMP="$(date +%m%d-%H%M)${SUFFIX:+-$SUFFIX}"; RUN="rehearsal-$ID-$STAMP"; OUT="$ART/runs/$RUN"; mkdir -p "$OUT/audio"; LOG="$OUT/block.log"
+# SUFFIX labels a variant run (rules = the demo configuration, guards = executor retry, policy rule and re-prompt off); the rooms
+# carry it too, so demo_check / g1_report / cost_report select exactly this block's calls
 N_SC=$(echo $SCENARIOS | wc -w | tr -d ' '); MINUTES=$(( RUNS * N_SC * 2 + 8 ))   # ~1.5-2 min per call + reports
 step() { echo; echo "=== $(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
 run() { "$@" 2>&1 | tee -a "$LOG"; }
 scripts/gpu_lock.sh wait S "$MINUTES" "$RUN" | tee -a "$LOG"
 trap 'scripts/gpu_lock.sh release S | tee -a "$LOG"' EXIT
 step "rehearsal on $ID: $N_SC scenarios x $RUNS, TTS=${AGENT_TTS:-cartesia}, filler=${AGENT_FILLER:-}, loop guard=${AGENT_LOOP_GUARD:-1}; probe"
+step "serving proof (rows are labelled by the served name, so the name must be the weights'; Nov 1 08:02 incident)"
+run uv run python scripts/serving_proof.py --run-id "$RUN" --expect-name-from-dir || { step "SERVING PROOF FAILED: the served name is not the weights; block stops, nothing measured"; exit 1; }
 run uv run python scripts/probe_dispatch.py --timeout 40
 for SC in $SCENARIOS; do
   PREFIX="demo-$SC-$STAMP"; EXTRA=""
@@ -31,6 +35,8 @@ for SC in $SCENARIOS; do
   run uv run python scripts/demo_check.py --like "demo-$SC-$STAMP%" --scenario "$SC" --ledger --run-id "$RUN" | tee "$OUT/$SC.check.txt"
   run uv run python scripts/g1_report.py --like "demo-$SC-$STAMP%" --ledger --run-id "$RUN-$SC" --note "rehearsal $SC x$RUNS on $ID, TTS ${AGENT_TTS:-cartesia}" | tee "$OUT/$SC.latency.txt"
 done
+step "serving proof at the end (the weights must not have changed under the block)"
+run uv run python scripts/serving_proof.py --run-id "$RUN" --expect-name-from-dir || step "SERVING PROOF FAILED AT THE END: the rows above may mix weights"
 step "cost"
 run uv run python scripts/cost_report.py --like "demo-%-$STAMP%" --ledger --run-id "cost-$RUN"
 step "summary"
