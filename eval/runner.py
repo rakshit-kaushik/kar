@@ -31,6 +31,7 @@ from eval.sandbox import Sandbox
 from eval.scorers import ADVISORY, WEIGHTS, ScorerResult, all_pass, score_episode
 from eval.simulator.clients import LLMCaller, OpenAIAgent, make_client
 from eval.simulator.episode import AgentUnderTest, Caller, Episode, run_episode
+from eval.simulator.farewell import is_farewell
 from eval.simulator.scenario import (
     SCENARIO_SUFFIXES,
     Scenario,
@@ -686,11 +687,32 @@ def caller_fault(ep: dict) -> str | None:
     return None
 
 
+def caller_stuck(ep: dict) -> str | None:
+    """A simulated caller that keeps saying goodbye without hanging up, or repeats one line three or
+    more times in a row, makes the turn cap the harness's doing rather than the agent's."""
+    lines = [
+        (m.get("content") or "").strip().lower()
+        for m in ep.get("messages") or []
+        if m.get("role") == "user"
+    ]
+    if sum(1 for line in lines if is_farewell(line)) >= 2:
+        return "caller said goodbye without hanging up"
+    best = run = 1
+    for a, b in zip(lines, lines[1:]):
+        run = run + 1 if a and a == b else 1
+        best = max(best, run)
+    if best >= 3:
+        return f"caller repeated the same line {best} times in a row"
+    return None
+
+
 def bucket_for(score: dict, ep_info: dict, target_counts: dict | None) -> str:
     """First-pass label for one failing scorer of one episode, from scorer evidence alone."""
     if ep_info.get("outcome") == "error":
         return "harness"
     if ep_info.get("caller_fault"):
+        return "harness"
+    if ep_info.get("caller_stuck") and score["scorer"] == "max_turns":
         return "harness"
     name, d = score["scorer"], score.get("detail", {}) or {}
     if ep_info.get("long_context") and name in ("tool_calls", "final_state", "corrections_hold"):
@@ -730,6 +752,7 @@ def buckets_report(
         target_counts = target_counts_from_dataset(dataset_dir)
     rows = []
     caller_faults: list[tuple[str, str]] = []
+    stuck_callers: list[tuple[str, str]] = []
     counts: Counter[str] = Counter()
     for p in sorted((Path(run_dir) / "episodes").glob("*.json")):
         ep = json.loads(p.read_text())
@@ -747,7 +770,10 @@ def buckets_report(
             ),
             "long_context": bool(fail_turn and fail_turn >= 8),
             "caller_fault": caller_fault(ep),
+            "caller_stuck": caller_stuck(ep),
         }
+        if info["caller_stuck"] and any(sc["scorer"] == "max_turns" for sc in fails):
+            stuck_callers.append((ep["episode_id"], info["caller_stuck"]))
         if info["caller_fault"]:
             caller_faults.append((ep["episode_id"], info["caller_fault"]))
         labelled = [
@@ -764,6 +790,10 @@ def buckets_report(
         f"Caller faults (the simulated caller mis-stated its own phone or date of birth, so verification failed "
         f"before the agent could be judged; bucketed as harness): {len(caller_faults)}"
         + ("".join(f"\n- {eid}: {why}" for eid, why in caller_faults) if caller_faults else ""),
+        "",
+        f"Stuck callers (the simulated caller kept saying goodbye without hanging up, or repeated one line three or more "
+        f"times in a row; their max_turns failure is bucketed as harness): {len(stuck_callers)}"
+        + ("".join(f"\n- {eid}: {why}" for eid, why in stuck_callers) if stuck_callers else ""),
         "",
         "## Bucket counts",
         "",

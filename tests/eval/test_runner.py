@@ -666,3 +666,42 @@ def test_compare_can_exclude_caller_fault_episodes_across_runs(tmp_path):
     assert "ordinary_01-s0" in md and "1 scenario" in md
     p = build_parser().parse_args(["compare", str(a), str(b), "--exclude-caller-faults"])
     assert p.command == "compare" and p.exclude_caller_faults is True
+
+
+def _ep_with_caller_lines(lines, farewell_hangup=False):
+    msgs = []
+    for u in lines:
+        msgs.append({"role": "user", "content": u})
+        msgs.append({"role": "assistant", "content": "I've opened your ticket. Goodbye."})
+    return {
+        "messages": msgs,
+        "outcome": "turn_cap",
+        "scenario": {"caller": {"knows": {}}, "expect": {}},
+    }
+
+
+def test_caller_stuck_detects_repeated_or_farewell_only_caller_lines():
+    from eval.runner import caller_stuck
+
+    assert (
+        caller_stuck(_ep_with_caller_lines(["goodbye"] * 4))
+        == "caller said goodbye without hanging up"
+    )
+    assert (
+        caller_stuck(_ep_with_caller_lines(["yes please try again"] * 5))
+        == "caller repeated the same line 5 times in a row"
+    )
+    assert (
+        caller_stuck(_ep_with_caller_lines(["book a notary", "thursday", "four pm", "yes"])) is None
+    )
+    # two identical answers in a row are normal conversation, three are a stuck caller
+    assert caller_stuck(_ep_with_caller_lines(["marker street", "marker street", "yes"])) is None
+
+
+def test_bucket_for_max_turns_with_stuck_caller_is_harness():
+    from eval.runner import bucket_for
+
+    stuck = {"caller_stuck": "caller said goodbye without hanging up"}
+    assert bucket_for({"scorer": "max_turns", "detail": {}}, stuck, None) == "harness"
+    # only the turn-cap failure is the caller's doing; other scorers keep their own labels
+    assert bucket_for({"scorer": "no_jargon", "detail": {}}, stuck, None) == "missing example type"
