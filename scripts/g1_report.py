@@ -41,6 +41,17 @@ def fmt(xs, unit="ms"):
     return f"p50 {pct(xs, 0.5):.0f} {unit} · p95 {pct(xs, 0.95):.0f} {unit} · n={len(xs)}"
 
 
+def decode_rate(completion_tokens, first_ms, done_ms, min_window_ms: int = 250) -> float | None:
+    """Tokens after the first over the streaming window, tok/s. None when the window is too short to measure: a
+    tool-call turn (vllm-mlx emits the call only when complete, so first token = done) or a one-token reply."""
+    if not completion_tokens or completion_tokens < 2 or first_ms is None or done_ms is None:
+        return None
+    window = done_ms - first_ms
+    if window < min_window_ms:
+        return None
+    return (completion_tokens - 1) / (window / 1000)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--like", default="r3-call-%")
@@ -94,7 +105,8 @@ def main() -> None:
             if ft: M["llm_ttft"].append(first("llm_first_token", "ms")); M[f"llm_ttft_{first('llm_first_token', 'source') or 'local'}"].append(first("llm_first_token", "ms"))
             if done and first("llm_done", "completion_tokens") and first("llm_first_token", "ms") is not None:
                 ct = first("llm_done", "completion_tokens"); total = first("llm_done", "ms"); f0 = first("llm_first_token", "ms")
-                if ct and ct > 1 and total and total > f0: M["decode_tok_s"].append((ct - 1) / ((total - f0) / 1000))
+                rate = decode_rate(ct, f0, total)
+                if rate is not None: M["decode_tok_s"].append(rate)
             if first("llm_done", "prompt_tokens"): M["prompt_tokens"].append(first("llm_done", "prompt_tokens"))
             if first("llm_done", "completion_tokens"): M["completion_tokens"].append(first("llm_done", "completion_tokens"))
             if audible: M["eos_to_tts_audible"].append(audible - t)
