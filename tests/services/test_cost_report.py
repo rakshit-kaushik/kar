@@ -67,3 +67,12 @@ def test_local_llm_seconds_from_measured_throughput():
     from services.cost.report import local_llm_seconds
     rates = {**RATES, "mac.prefill_tok_s": 4700.0, "mac.decode_tok_s": 78.0}
     assert round(local_llm_seconds(prompt_tokens=470_000, completion_tokens=7_800, rates=rates), 1) == 100.0 + 100.0
+
+
+def test_tts_characters_priced_by_the_vendor_that_spoke_them():
+    rates = {**RATES, "deepgram.aura2.usd_per_char": 0.00003}
+    u = {"duration_min": 1.0, "stt_audio_min": 1.0, "agent_chars": 1000, "tokens": {}, "success": True, "tts_vendor": "deepgram"}
+    p = price_call(u, rates, path="local", avg_call_min=1.0)
+    assert round(p["tts_usd"], 4) == 0.03
+    u["tts_vendor"] = "cartesia"
+    assert round(price_call(u, rates, path="local", avg_call_min=1.0)["tts_usd"], 4) == round(1000 * RATES["cartesia.sonic.usd_per_char"], 4)
