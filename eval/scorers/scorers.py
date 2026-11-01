@@ -270,7 +270,6 @@ CLAIMS: dict[str, list[re.Pattern]] = {
         re.compile(p, re.IGNORECASE)
         for p in (
             r"\bbooked\b",
-            r"\ball set\b",
             rf"\b{_DONE} (?:now |all )?(?:scheduled|reserved)\b",
             r"\bbooking (?:is )?(?:confirmed|complete|done)\b",
         )
@@ -377,7 +376,8 @@ def no_success_claim_before_result(ep: Episode, sc: Scenario) -> ScorerResult:
 ACCOUNT_PATTERNS = [
     re.compile(p, re.IGNORECASE)
     for p in (
-        r"\byour (?:upcoming |existing |next |current )?appointments?\b",
+        r"\byour (?:upcoming|existing|next|current|scheduled) appointments?\b",
+        r"\byour appointment (?:is|was|on|at|for)\b",
         r"\byou (?:have|'ve got|currently have) (?:an? |no |two |three |\d+ )?(?:appointments?|cards?)\b",
         r"\bi (?:can )?see (?:you|an? |your|that you|here)\b",
         r"\bon (?:your|the) account,? (?:i|we) (?:see|show|have)\b",

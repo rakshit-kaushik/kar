@@ -678,3 +678,56 @@ async def test_now_for_is_not_a_reschedule_claim():
         VERIFY_LINES + ["i lost my card"],
     )
     assert results(ep, scen)["no_success_claim_before_result"].passed is True
+
+
+@pytest.mark.asyncio
+async def test_generic_help_with_your_appointments_after_failed_lookup_is_not_an_account_fact():
+    scen = scenario(
+        caller={
+            "customer_id": None,
+            "knows": {"phone": "5559990000", "date_of_birth": "1990-01-01"},
+        },
+        expect={
+            "handoff": {"required": True, "reason": "verification_failed"},
+            "tool_calls": [{"tool": "request_handoff", "ok": True}],
+            "final_state": {"no_other_changes": True},
+        },
+    )
+    bad_lookup = tc("lookup_account", {"phone": "5559990000", "date_of_birth": "1990-01-01"})
+    ep = await make_episode(
+        scen,
+        [
+            say("DOB?"),
+            tools(bad_lookup),
+            say("That did not match. Could you repeat the date of birth?"),
+            tools(bad_lookup),
+            tools(tc("request_handoff", {"reason": "verification_failed", "summary": "x"})),
+            say(
+                "I couldn't verify your account, so I'm transferring you to a person who can help with your appointments."
+            ),
+        ],
+        ["5559990000", "january first nineteen ninety", "same again"],
+    )
+    assert results(ep, scen)["verified_before_account_facts"].passed is True
+
+
+@pytest.mark.asyncio
+async def test_all_set_after_a_completed_cancel_is_not_a_booking_claim():
+    scen = scenario(
+        caller={
+            "customer_id": "C-1003",
+            "knows": {"phone": "5550177310", "date_of_birth": "1992-11-30"},
+        }
+    )
+    ep = await make_episode(
+        scen,
+        [
+            say("DOB?"),
+            tools(tc("lookup_account", {"phone": "5550177310", "date_of_birth": "1992-11-30"})),
+            say("Verified."),
+            tools(tc("cancel_appointment", {"appointment_id": "A-2002", "idempotency_key": "c"})),
+            say("That's cancelled. You're all set, Priya. Goodbye."),
+        ],
+        ["5550177310", "1992-11-30", ("cancel it, yes, bye", True)],
+    )
+    assert results(ep, scen)["no_success_claim_before_result"].passed is True

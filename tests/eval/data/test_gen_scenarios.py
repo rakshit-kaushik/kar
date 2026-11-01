@@ -96,3 +96,10 @@ def test_phrasing_bank_is_clean_and_seeds_personas():
     assert all(len(s["caller"]["persona"]) < 400 for s in out)
     plain = generate(5, seed=4, phrasing=False)
     assert all("Phrasing seeds:" not in s["caller"]["persona"] for s in plain)
+
+
+def test_catalog_question_mentions_are_robust_substrings():
+    out = generate(60, seed=12, profile="short")
+    mentions = [tuple(s["expect"]["must_mention"]) for s in out if s["expect"].get("must_mention")]
+    assert mentions and all("nine to five" not in m for m in mentions)
+    assert all(all(len(x) <= 14 for x in m) for m in mentions)  # single words or short amounts

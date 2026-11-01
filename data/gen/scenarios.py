@@ -360,11 +360,11 @@ class _Gen:
             cust = self.customer()
             q, mention = self.rng.choice(
                 [
-                    ("what the Saturday opening hours are", "nine"),
-                    ("how much a notary appointment costs", "ten dollars"),
-                    ("how much a safe deposit box costs", "sixty dollars"),
-                    ("whether a financial review costs anything", "free"),
-                    ("what the weekday hours are", "nine to five"),
+                    ("what the Saturday opening hours are", ["nine", "one"]),
+                    ("how much a notary appointment costs", ["ten dollars"]),
+                    ("how much a safe deposit box costs", ["sixty dollars"]),
+                    ("whether a financial review costs anything", ["free"]),
+                    ("what the weekday hours are", ["nine", "five"]),
                 ]
             )
             return self.base(
@@ -376,7 +376,7 @@ class _Gen:
                 {
                     "tool_calls": [self.lookup_step(cust)],
                     "forbidden_tools": WRITE_TOOLS,
-                    "must_mention": [mention],
+                    "must_mention": list(mention),
                     "final_state": {},
                     "max_turns": 8,
                 },
