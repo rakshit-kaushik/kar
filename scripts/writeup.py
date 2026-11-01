@@ -79,7 +79,7 @@ def eval_table(con, run_ids: list[str]) -> str:
     return md_table(header, out) + ("\n\n_Cells: episodes passing every non-advisory scorer / episodes. Source: eval_results (E's runner). "
             "Runs marked 'caller: local base model' were scored with Qwen3-4B playing the caller while the hosted account was out of credits; "
             "that caller mis-states its own DOB or phone in about 20% of episodes, so the comparable numbers for those runs are E's "
-            "`r3-eval compare --exclude-caller-faults` (same scenario x seed dropped from every run; Nov 1: run 1 21%, base 8%, hosted 100%), "
+            "`r3-eval compare --exclude-caller-faults` (same scenario x seed dropped from every run; Nov 1 run 1: 24% vs base 15% with the same local caller, 9% with the hosted caller, hosted 100%), "
             "never a raw row against a hosted-caller row._")
 
 
