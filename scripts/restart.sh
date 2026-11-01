@@ -17,7 +17,7 @@ MODEL_DIR=${MODEL_DIR:-$ART/models/Qwen3-4B-8bit}
 SERVED=${LOCAL_LLM_MODEL:-r3-voice-base}
 PSQL=${PSQL:-/opt/homebrew/opt/postgresql@15/bin/psql}
 NO_AGENT=0; NO_SERVER=0; NO_PROXY=0
-for a in "$@"; do case "$a" in --no-agent) NO_AGENT=1;; --no-server) NO_SERVER=1;; --agent-only) NO_SERVER=1; NO_PROXY=1;; --server-only) NO_PROXY=1; NO_AGENT=1;; esac; done
+for a in "$@"; do case "$a" in --no-agent) NO_AGENT=1;; --no-server) NO_SERVER=1;; --agent-only) NO_SERVER=1; NO_PROXY=1;; --server-only) NO_PROXY=1; NO_AGENT=1;; --proxy-only) NO_SERVER=1; NO_AGENT=1;; esac; done
 
 wait_for() { # url seconds label
   for _ in $(seq 1 "$2"); do curl -sf -m 2 "$1" >/dev/null 2>&1 && { echo "  $3 ok"; return 0; }; sleep 1; done
@@ -26,8 +26,8 @@ wait_for() { # url seconds label
 
 # --- shared-stack guard: never restart under a session that holds the GPU/server lock (scripts/gpu_lock.sh)
 OWNER="${R3_OWNER:-S}"
-if [ "$NO_PROXY" = 1 ] && [ "$NO_SERVER" = 1 ] && [ "$NO_AGENT" = 0 ]; then
-  LOCK_WAS_MINE=1  # agent-only: nothing shared is touched
+if [ "$NO_SERVER" = 1 ] && { [ "$NO_PROXY" = 1 ] || [ "$NO_AGENT" = 1 ]; } && ! { [ "$NO_PROXY" = 1 ] && [ "$NO_AGENT" = 1 ]; }; then
+  LOCK_WAS_MINE=1  # agent-only or proxy-only: the GPU/server is not touched
 elif ! "$(dirname "$0")/gpu_lock.sh" status >/dev/null 2>&1; then
   holder="$("$(dirname "$0")/gpu_lock.sh" status 2>/dev/null || true)"
   if ! echo "$holder" | grep -q "held by $OWNER "; then
@@ -46,8 +46,11 @@ echo "[1/5] postgres"
 if [ "$NO_SERVER" = 0 ]; then
   echo "[2/5] model server :8000  ($MODEL_DIR as $SERVED)"
   lsof -ti:8000 -sTCP:LISTEN | xargs kill 2>/dev/null || true; sleep 1
-  VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION=wait nohup .venv/bin/vllm-mlx serve "$MODEL_DIR" --host 127.0.0.1 --port 8000 --served-model-name "$SERVED" \
-    --prefix-trie-cache --default-chat-template-kwargs '{"enable_thinking": false}' \
+  # scripts/vllm_mlx_serve.py = vllm-mlx CLI + services/server/trie_keyfix.py (vllm-mlx 0.5.0 keys the prompt trie by the
+  # unhashable MLX module: without the fix the trie never hits and every turn prefills the whole prompt). Trie capped at
+  # 8 entries / 2 GB: one entry is the KV of a whole call (~150 KB per token on Qwen3-4B, ~300 MB at 2K tokens).
+  VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION=wait nohup .venv/bin/python scripts/vllm_mlx_serve.py serve "$MODEL_DIR" --host 127.0.0.1 --port 8000 --served-model-name "$SERVED" \
+    --prefix-trie-cache --prefix-trie-cache-size 8 --prefix-trie-cache-memory-mb 2048 --default-chat-template-kwargs '{"enable_thinking": false}' \
     --default-temperature 0.2 --max-tokens 256 > "$LOG/server.log" 2>&1 &
   wait_for http://127.0.0.1:8000/v1/models 180 "server"
 else
@@ -60,7 +63,7 @@ lsof -ti:8001 -sTCP:LISTEN | xargs kill 2>/dev/null || true; sleep 1
 nohup uv run python -m services.proxy.main > "$LOG/proxy.log" 2>&1 &
 wait_for http://127.0.0.1:8001/health 60 "proxy"
 else
-  echo "[3/5] proxy: skipped (--agent-only)"
+  echo "[3/5] proxy: skipped (--agent-only / --server-only)"
 fi
 
 echo "[4/5] prewarm (always: a changed prompt or tool set means a cold system cache, and the first cold request exceeds the proxy's fallback timeout)"

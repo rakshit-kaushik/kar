@@ -17,7 +17,7 @@ import os
 import pathlib
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import psycopg
@@ -26,13 +26,18 @@ from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProc
 from livekit.agents import EndpointingOptions, PreemptiveGenerationOptions, TurnHandlingOptions
 import numpy as np
 from livekit.agents.metrics import EOUMetrics, LLMMetrics, STTMetrics, TTSMetrics
-from livekit.plugins import cartesia, deepgram, silero
+from livekit.plugins import deepgram, silero
 from livekit.plugins import openai as lk_openai
 from livekit.plugins.turn_detector.english import EnglishModel
 from openai import AsyncOpenAI
 from psycopg.types.json import Jsonb
 
 from services.agent.state import CallState
+from services.agent.faults import faults_from_room_name
+from services.agent.filler import FillerPolicy, filler_text
+from services.agent.claimguard import ClaimGuard, claim_guarded_stream, handoff_reason, state_view
+from services.agent.loopguard import LoopGuard, guarded_stream
+from services.agent.tts import make_tts, tts_vendor
 from services.common.events import PostgresSink
 from services.tools.executor import ToolExecutor
 from services.tools.livekit_tools import build_livekit_tools
@@ -59,9 +64,18 @@ class R3Agent(Agent):
     """Agent with one measurement hook: the moment the first audible TTS frame leaves the TTS node, so the
     agent-side clock has a 'first audio' timestamp to compare with what the caller hears."""
 
-    def __init__(self, *, on_first_audible, **kw) -> None:
+    def __init__(self, *, on_first_audible, guard: LoopGuard, on_loop, claim_guard: ClaimGuard, handoff_done, on_claim, **kw) -> None:
         super().__init__(**kw)
         self._on_first_audible = on_first_audible
+        self._guard, self._on_loop = guard, on_loop
+        self._claim_guard, self._handoff_done, self._on_claim = claim_guard, handoff_done, on_claim
+
+    async def llm_node(self, chat_ctx, tools, model_settings):
+        # services/agent/claimguard.py: a transfer announced without request_handoff gets the handoff recorded first;
+        # services/agent/loopguard.py: an exact repeat of the previous line is swallowed (rephrase, then handoff)
+        source = claim_guarded_stream(Agent.default.llm_node(self, chat_ctx, tools, model_settings), self._claim_guard, self._handoff_done, self._on_claim)
+        async for chunk in guarded_stream(source, self._guard, self._on_loop):
+            yield chunk
 
     async def tts_node(self, text, model_settings):
         t0, fired, frames = time.perf_counter(), False, 0
@@ -87,6 +101,10 @@ class CallData:
     turn_idx: int = 0
     structural_leaks: int = 0
     started: float = field(default_factory=time.time)
+    filler: FillerPolicy = field(default_factory=lambda: FillerPolicy(filler_text()))
+    guard: LoopGuard = field(default_factory=LoopGuard.from_env)
+    claim_guard: ClaimGuard = field(default_factory=ClaimGuard.from_env)
+    fire: Callable[..., None] | None = None  # set per call: the turn-event emitter
 
 
 server = AgentServer(num_idle_processes=1)  # a warm job process: the agent joins ~1 s sooner
@@ -99,7 +117,20 @@ def prewarm(proc: JobProcess) -> None:
 
 
 server.setup_fnc = prewarm
-TOOLS = build_livekit_tools(lambda ctx: ctx.userdata.executor)
+def _tool_start(ctx, tool_name: str) -> None:
+    """The moment a tool starts: speak the filler (services/agent/filler.py) and log it as `filler_start`. Not added to
+    the chat context, so the model never sees it. Never lets an error reach the tool call."""
+    d: CallData = ctx.userdata
+    try:
+        text = d.filler.decide(d.turn_idx, str(ctx.session.agent_state), tool_name)
+        if text and d.fire is not None:
+            d.fire("filler_start", {"tool": tool_name, "text": text})
+            ctx.session.say(text, allow_interruptions=True, add_to_chat_ctx=False)
+    except Exception as e:  # a filler must never cost the tool call
+        log.warning("filler skipped: %r", e)
+
+
+TOOLS = build_livekit_tools(lambda ctx: ctx.userdata.executor, on_tool_start=_tool_start)
 
 
 async def db_exec(sql: str, params: tuple) -> None:
@@ -122,6 +153,9 @@ async def entrypoint(ctx: JobContext) -> None:
     sink = PostgresSink(dsn) if dsn else None
     state = CallState(call_id=call_id, model_id=model_id)
     sandbox = Sandbox(SEED)
+    faults = faults_from_room_name(call_id)  # live demo: room name '...--fault-check_availability-timeout' (services/agent/faults.py)
+    if faults:
+        sandbox.inject(faults)
     executor = ToolExecutor(sandbox=sandbox, state=state, event_sink=sink)
     data = CallData(call_id=call_id, model_id=model_id, state=state, sandbox=sandbox, executor=executor, sink=sink)
 
@@ -133,6 +167,20 @@ async def entrypoint(ctx: JobContext) -> None:
 
     def fire(event: str, payload: dict[str, Any] | None = None) -> None:
         asyncio.create_task(emit(event, payload))
+
+    data.fire = fire
+
+    async def on_loop(action: str, repeated: str) -> None:
+        """The loop guard replaced a repeated line: log it; on the second repeat record the handoff through the executor."""
+        await emit("loop_guard", {"action": action, "repeated": repeated[:200], "repeats": data.guard.repeats})
+        if action == "handoff":
+            await executor.execute("request_handoff", {"reason": "out_of_scope", "summary": f"agent repeated itself: {repeated[:120]}"})
+
+    async def on_claim(text: str) -> None:
+        """The model announced a transfer with no request_handoff in the call: record the handoff first, then let it speak."""
+        reason = handoff_reason(state_view(state))
+        await emit("claim_guard", {"claimed": text[:200], "reason": reason})
+        await executor.execute("request_handoff", {"reason": reason, "summary": f"agent announced a transfer without calling request_handoff: {text[:120]}"})
 
     await db_exec(
         "insert into sessions(call_id, model_id, started_at, state) values (%s, %s, now(), %s) on conflict (call_id) do nothing",
@@ -146,7 +194,7 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=deepgram.STT(model="nova-3", language="en-US", interim_results=True, punctuate=True, smart_format=False, filler_words=True),
         # no sampling knobs: the local server defaults to temperature 0.2 (restart.sh) and Claude 5.5's endpoint rejects temperature/top_p
         llm=lk_openai.LLM(model=model_id, client=llm_client, parallel_tool_calls=False),
-        tts=cartesia.TTS(model=os.environ.get("CARTESIA_MODEL", "sonic-3"), voice=os.environ["CARTESIA_VOICE"]),
+        tts=make_tts(),  # services/agent/tts.py: AGENT_TTS=cartesia|deepgram
         vad=ctx.proc.userdata["vad"],
         turn_handling=TurnHandlingOptions(
             turn_detection=EnglishModel(),
@@ -213,7 +261,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def on_shutdown() -> None:
         outcome = "handoff" if state.handoff else ("completed" if state.completed else "abandoned")
-        await emit("call_end", {"outcome": outcome, "turns": data.turn_idx, "structural_leaks": data.structural_leaks, "duration_s": round(time.time() - data.started, 1)})
+        await emit("call_end", {"outcome": outcome, "tts_vendor": tts_vendor(), "turns": data.turn_idx, "structural_leaks": data.structural_leaks, "duration_s": round(time.time() - data.started, 1)})
         await db_exec("update sessions set ended_at = now(), outcome = %s, state = %s where call_id = %s", (outcome, Jsonb(state.to_dict()), call_id))
         # the room dies with the call: a rejoin under the same name must get a fresh room and a fresh agent, never a leftover one
         try:
@@ -234,9 +282,9 @@ async def entrypoint(ctx: JobContext) -> None:
             fire("caller_left", {"identity": p.identity})
             ctx.shutdown(reason="caller left")
 
-    await session.start(agent=R3Agent(instructions=SYSTEM_PROMPT, tools=TOOLS, on_first_audible=lambda p: fire("tts_first_audible", p)), room=ctx.room)
+    await session.start(agent=R3Agent(instructions=SYSTEM_PROMPT, tools=TOOLS, on_first_audible=lambda p: fire("tts_first_audible", p), guard=data.guard, on_loop=on_loop, claim_guard=data.claim_guard, handoff_done=lambda: bool(state.handoff), on_claim=on_claim), room=ctx.room)
     await ctx.connect()
-    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": os.environ.get("CARTESIA_MODEL", "sonic-3"), "turn": TURN})
+    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "loop_guard": data.guard.enabled, "claim_guard": data.claim_guard.enabled, "turn": TURN})
     session.say(GREETING, allow_interruptions=True)
 
 

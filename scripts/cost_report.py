@@ -19,7 +19,7 @@ import sys
 from collections import defaultdict
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from services.cost.report import HOSTED_MODEL, call_usage, mac_hourly_usd, price_call  # noqa: E402
+from services.cost.report import HOSTED_MODEL, call_usage, local_llm_seconds, mac_hourly_usd, price_call  # noqa: E402
 
 
 def load_rates(con) -> dict:
@@ -32,7 +32,7 @@ def path_of(model_id: str) -> str:
 
 def live_calls(con, like: str | None) -> dict[str, list[dict]]:
     """Per served model (sessions.model_id): priced usage per call that reached call_end."""
-    q = "select call_id, model_id from sessions where ended_at is not null or call_id in (select call_id from turn_events where event='call_end')"
+    q = "select call_id, model_id from sessions where (ended_at is not null or call_id in (select call_id from turn_events where event='call_end'))"
     args: tuple = ()
     if like:
         q += " and call_id like %s"; args = (like,)
@@ -81,8 +81,9 @@ def eval_runs(con, run_ids: list[str], rates: dict) -> list[dict]:
         if model == HOSTED_MODEL:
             llm = pt / 1e6 * rates[f"anthropic.{HOSTED_MODEL}.input_usd_per_mtok"] + ct / 1e6 * rates[f"anthropic.{HOSTED_MODEL}.output_usd_per_mtok"]; basis = "measured tokens at list price"
         else:
-            hours = (float(span) if span else 0.0) / 3600.0
-            llm = mac_hourly_usd(rates) * hours; basis = f"estimated: Mac hourly cost x {hours:.2f} h run wall time"
+            secs = local_llm_seconds(pt, ct, rates) if "mac.prefill_tok_s" in rates else (float(span) if span else 0.0)
+            llm = mac_hourly_usd(rates) * secs / 3600.0
+            basis = f"estimated: Mac hourly cost x {secs / 60:.1f} min of GPU time from tokens at measured prefill/decode rates"
         out.append({"run_id": run_id, "model": model, "episodes": n, "passed": passed, "prompt_tokens": pt, "completion_tokens": ct, "llm_usd": llm,
                     "per_episode_usd": llm / n if n else None, "per_success_usd": (llm / passed) if passed else None, "basis": basis})
     return out

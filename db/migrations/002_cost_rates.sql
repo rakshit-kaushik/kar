@@ -25,3 +25,8 @@ insert into cost_rates (key, value, unit, kind, source, note) values
   ('electricity_usd_per_kwh', 0.15, 'USD/kWh', 'assumption', null, 'US average residential'),
   ('admission.concurrent_calls', 1, 'calls', 'measured', null, 'placeholder until the load test sets it (scripts/cost_report.py --set-admission N)')
 on conflict (key) do nothing;
+
+-- Nov 1 04:24: Cartesia quota exhausted (402 quota_exceeded); Deepgram Aura-2 is the fallback TTS (AGENT_TTS=deepgram)
+insert into cost_rates(key, value, unit, kind, source, as_of, note) values
+  ('deepgram.aura2.usd_per_char', 0.00003, 'usd/char', 'assumption', 'https://deepgram.com/pricing (Aura-2 TTS pay-as-you-go $0.030 per 1K characters)', '2026-11-01',
+   'fallback TTS after Cartesia quota_exceeded at 04:24; override if the account is on a different plan') on conflict (key) do nothing;

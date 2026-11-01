@@ -49,3 +49,11 @@ def test_label_tickets_maps_generator_output_to_validated_rows_with_source():
         {"ticket_id": "T-2", "label": "fee_dispute", "raw": "fee_dispute.", "label_source": "r3-route-test"},
         {"ticket_id": "T-3", "label": NEEDS_REVIEW, "raw": "I think this is spam", "label_source": "r3-route-test"},
     ]
+
+
+def test_routing_prompt_is_the_one_the_adapter_was_trained_with():
+    """train/routing_format.py (T) and services/routing/batch.py (S) must stay byte-identical: the adapter learned this exact
+    system turn. The sha is the system_prompt_sha256 recorded in $R3_ARTIFACTS/datasets/routing-v1/manifest.json."""
+    import hashlib
+    from services.routing.batch import ROUTING_SYSTEM_PROMPT
+    assert hashlib.sha256(ROUTING_SYSTEM_PROMPT.encode()).hexdigest() == "be3b34cafbef512daa4ea4d1dba2c9ce30ca862f703d4d908f215fe029b4d65f"

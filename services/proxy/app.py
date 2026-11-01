@@ -4,10 +4,12 @@
   deltas, strips `<think>`, converts leaked raw `<tool_call>` text).
 - Emits `llm_request`, `llm_first_token`, `llm_done` turn events (CONTRACT.md §6), keyed by the
   `X-R3-Call-Id` header the agent sets; turn index increments per call id.
-- Hosted fallback at a turn boundary (plan T+13.5): if the local server errors or produces no first
-  token within `first_token_timeout` seconds, the same request is re-issued to `fallback_client` as
-  `fallback_model` before any byte has reached the client, and a `fallback` event is logged. The agent
-  never notices; its chat context is the same, so call state is preserved.
+- Hosted fallback at a turn boundary (plan T+13.5): if the local server errors, the same request goes to
+  `fallback_client` as `fallback_model`; if it merely has no first token after `first_token_timeout`
+  seconds, the hosted request is started beside the still-running local one (a hedge) and the first
+  stream to produce a token is served, the other cancelled (`fallback`, `fallback_cancelled` events).
+  Nothing reaches the client before that decision, so the agent never notices; its chat context is the
+  same, so call state is preserved. Turns above `admission_limit` concurrent local generations go hosted directly.
 - Passes everything else through (`/v1/models`, non-streaming completions).
 """
 from __future__ import annotations
@@ -42,8 +44,9 @@ def sse(obj: dict) -> str:
 
 
 # Claude 5.5's OpenAI-compatible endpoint returns 400 for sampling knobs ("`temperature` is deprecated for this model"),
-# so a request re-issued to the hosted model goes without them; the local server keeps its own defaults.
-HOSTED_DROP = ("temperature", "top_p")
+# and its hidden reasoning consumes the token budget (a max_tokens=96 request ended with finish_reason=length and no
+# visible token), so a request re-issued to the hosted model goes without them; the local server keeps its own defaults.
+HOSTED_DROP = ("temperature", "top_p", "max_tokens", "max_completion_tokens")
 
 
 class HostedBreaker:
@@ -143,15 +146,35 @@ async def open_stream(client: httpx.AsyncClient, body: dict, model_id: str, time
     return await asyncio.wait_for(go(), timeout)
 
 
+async def _cancel(t: asyncio.Task) -> None:
+    """Cancel a pending attempt; if it finished anyway, close its response. Our own cancellation still propagates."""
+    if not t.done():
+        t.cancel()
+    try:
+        s = await t
+    except asyncio.CancelledError:
+        cur = asyncio.current_task()
+        if cur is not None and cur.cancelling():
+            raise
+        return
+    except Exception:
+        return
+    await s.resp.aclose()
+
+
 def create_app(
     upstream_client: httpx.AsyncClient,
     event_sink: EventSink | None = None,
     fallback_client: httpx.AsyncClient | None = None,
     fallback_model: str | None = None,
     first_token_timeout: float = 2.0,
+    admission_limit: int = 0,
 ) -> Starlette:
+    """admission_limit: concurrent local generations the engine serves within budget (load test); a streamed turn
+    arriving above it is routed to the hosted model when that is available, instead of queueing. 0 disables."""
     turn_counters: dict[str, int] = collections.defaultdict(int)
     breaker = HostedBreaker()
+    inflight = {"local": 0}
 
     async def emit(call_id: str, turn_idx: int, model_id: str, event: str, payload: dict | None = None) -> None:
         ev = {"call_id": call_id, "turn_idx": turn_idx, "model_id": model_id, "event": event, "ts_ms": now_ms(), "payload": payload or {}}
@@ -182,46 +205,90 @@ def create_app(
             await emit(call_id, turn_idx, model_id, "llm_done", {"ms": now_ms() - t0, "prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens"), "stream": False})
             return JSONResponse(data, status_code=r.status_code)
 
-        attempts: list[tuple[httpx.AsyncClient, str, str]] = [(upstream_client, model_id, "local")]
-        if fallback_client is not None and fallback_model and breaker.available():
-            attempts.append((fallback_client, fallback_model, "hosted"))
+        hosted_ok = fallback_client is not None and bool(fallback_model) and breaker.available()
+        tasks: dict[asyncio.Task, tuple[str, str]] = {}  # running attempts -> (source, model id)
+        started: set[str] = set()
+
+        async def attempt(client: httpx.AsyncClient, mid: str, source: str) -> _Stream:
+            sent = {**body, "model": mid} if source == "local" else {k: v for k, v in body.items() if k not in HOSTED_DROP} | {"model": mid}
+            return await open_stream(client, sent, mid, None)
+
+        def start(source: str) -> None:
+            started.add(source)
+            if source == "local":
+                inflight["local"] += 1
+                tasks[asyncio.create_task(attempt(upstream_client, model_id, "local"))] = ("local", model_id)
+            else:
+                tasks[asyncio.create_task(attempt(fallback_client, fallback_model, "hosted"))] = ("hosted", fallback_model)
+
+        if admission_limit and hosted_ok and inflight["local"] >= admission_limit:
+            # above the measured concurrency limit: this turn goes to the hosted model instead of waiting a full turn
+            await emit(call_id, turn_idx, model_id, "admission", {"in_flight": inflight["local"], "limit": admission_limit, "routed_to": fallback_model})
+            start("hosted")
+        else:
+            start("local")
 
         s: _Stream | None = None
-        i = 0
-        while i < len(attempts):
-            client, mid, source = attempts[i]
-            has_next = i + 1 < len(attempts)
-            try:
-                sent = {**body, "model": mid} if source != "hosted" else {k: v for k, v in body.items() if k not in HOSTED_DROP} | {"model": mid}
-                s = await open_stream(client, sent, mid, first_token_timeout if has_next else None)
-                break
-            except (httpx.HTTPError, UpstreamStatus, asyncio.TimeoutError) as e:
-                reason = "first_token_timeout" if isinstance(e, asyncio.TimeoutError) else "upstream_error"
-                detail = {"status": e.status, "body": e.body[:500]} if isinstance(e, UpstreamStatus) else {"error": repr(e)}
-                await emit(call_id, turn_idx, mid, "llm_error", {"reason": reason, "source": source, **detail})
-                if source == "hosted" and isinstance(e, UpstreamStatus) and 400 <= e.status < 500:
-                    # the hosted side rejects us outright: stop trying it, and give the local turn back its time
-                    breaker.trip(f"{e.status}: {e.body[:160]}")
-                    await emit(call_id, turn_idx, mid, "fallback_unavailable", {"status": e.status, "cooldown_s": breaker.cooldown_s, "body": e.body[:300]})
-                    attempts.append((upstream_client, model_id, "local_retry"))
-                    has_next = True
-                if has_next:
-                    await emit(call_id, turn_idx, mid, "fallback", {"reason": reason, "from_model": mid, "to_model": attempts[i + 1][1], "ms": now_ms() - t0})
-                    i += 1
+        served_source = "local"
+        last_error: Exception | None = None
+        while tasks and s is None:
+            # The hedge: a local turn with no first token after first_token_timeout gets a hosted attempt started beside it.
+            # The local request is never cancelled at that point: the engine finishes a dropped request anyway, so re-issuing
+            # it later only queues behind the orphan (Nov 1: 5-8 s turns). The first stream with a token is served, the other cancelled.
+            hedge = first_token_timeout if ("local" in started and "hosted" not in started and hosted_ok) else None
+            done, _ = await asyncio.wait(set(tasks), timeout=hedge, return_when=asyncio.FIRST_COMPLETED)
+            if not done:
+                await emit(call_id, turn_idx, model_id, "fallback", {"reason": "first_token_timeout", "from_model": model_id, "to_model": fallback_model, "ms": now_ms() - t0, "hedged": True})
+                start("hosted")
+                continue
+            for t in done:
+                source, mid = tasks.pop(t)
+                try:
+                    cand = t.result()
+                except (httpx.HTTPError, UpstreamStatus, asyncio.TimeoutError) as e:
+                    if source == "local":
+                        inflight["local"] -= 1
+                    last_error = e
+                    detail = {"status": e.status, "body": e.body[:500]} if isinstance(e, UpstreamStatus) else {"error": repr(e)}
+                    await emit(call_id, turn_idx, mid, "llm_error", {"reason": "upstream_error", "source": source, **detail})
+                    if source == "hosted" and isinstance(e, UpstreamStatus) and 400 <= e.status < 500:
+                        # the hosted side rejects us outright (bad key, no credit, rejected params): stop trying it for a while
+                        breaker.trip(f"{e.status}: {e.body[:160]}")
+                        await emit(call_id, turn_idx, mid, "fallback_unavailable", {"status": e.status, "cooldown_s": breaker.cooldown_s, "body": e.body[:300]})
+                    other = "hosted" if source == "local" else "local"
+                    if not tasks and other not in started and (other == "local" or hosted_ok):
+                        to_model = fallback_model if other == "hosted" else model_id
+                        await emit(call_id, turn_idx, mid, "fallback", {"reason": "upstream_error", "from_model": mid, "to_model": to_model, "ms": now_ms() - t0})
+                        start(other)
                     continue
-                if isinstance(e, UpstreamStatus):
-                    return Response(e.body, status_code=e.status, media_type="application/json")
-                return JSONResponse({"error": {"message": f"upstream unavailable: {e}", "type": "upstream_error"}}, status_code=502)
+                if s is None:
+                    s, served_source = cand, source
+                else:  # both produced a first token in the same tick: the first one stays, the other is dropped
+                    await cand.resp.aclose()
+                    if source == "local":
+                        inflight["local"] -= 1
+        for t, (source, mid) in tasks.items():  # the loser of the hedge
+            await _cancel(t)
+            if source == "local":
+                inflight["local"] -= 1
+            await emit(call_id, turn_idx, mid, "fallback_cancelled", {"lost_to": served_source, "ms": now_ms() - t0})
+        if s is None:
+            e = last_error
+            if isinstance(e, UpstreamStatus):
+                return Response(e.body, status_code=e.status, media_type="application/json")
+            return JSONResponse({"error": {"message": f"upstream unavailable: {e}", "type": "upstream_error"}}, status_code=502)
         assert s is not None
         served = s
         if served.first_token_ms is not None:
-            await emit(call_id, turn_idx, served.model_id, "llm_first_token", {"ms": served.first_token_ms - t0, "source": attempts[len(attempts) - 1][2] if served.model_id != model_id else "local"})
+            await emit(call_id, turn_idx, served.model_id, "llm_first_token", {"ms": served.first_token_ms - t0, "source": served_source})
 
         async def stream():
             try:
                 async for piece in served.rest():
                     yield piece
             finally:
+                if served_source != "hosted":
+                    inflight["local"] -= 1
                 await served.resp.aclose()
                 await emit(call_id, turn_idx, served.model_id, "llm_done", {
                     "ms": now_ms() - t0, "prompt_tokens": served.usage.get("prompt_tokens"), "completion_tokens": served.usage.get("completion_tokens"),

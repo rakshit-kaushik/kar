@@ -22,10 +22,8 @@ import json
 import math
 import os
 import pathlib
-import statistics
 import sys
 import time
-import uuid
 from typing import Any
 
 import httpx
@@ -34,6 +32,8 @@ from dotenv import load_dotenv
 from livekit import api, rtc
 
 from services.common.events import PostgresSink
+from services.sim.naming import room_name as make_room_name
+from services.sim.recorder import CallRecorder
 from services.sim.timeline import CallerTimeline, pct
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -133,6 +133,8 @@ class MicPump:
             frame = rtc.AudioFrame(data=chunk.tobytes(), sample_rate=SR, num_channels=1, samples_per_channel=len(chunk))
             if chunk is not silence and getattr(self, "first_audible_capture_ms", None) is None and float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2))) >= 300:
                 self.first_audible_capture_ms = now_ms()
+            if chunk is not silence and getattr(self, "on_frame", None) is not None:
+                self.on_frame(now_ms(), chunk)
             await self.source.capture_frame(frame)
             if is_last:
                 self.last_speech_capture_ms = now_ms()
@@ -179,9 +181,16 @@ class LLMCaller:
             msgs.append({"role": "assistant" if role == "caller" else "user", "content": text})
         if not transcript:
             msgs.append({"role": "user", "content": "(the line is ringing; the agent will greet you)"})
-        r = await self.client.chat.completions.create(model=self.model, messages=msgs, max_tokens=60, seed=self.seed)
+        # the hosted model's hidden reasoning consumes the token budget (a 60-token budget returned finish_reason=length
+        # and empty content on Nov 1), so the budget is generous and an empty reply is retried once with a larger one
+        line = ""
+        for budget in (400, 1500):
+            r = await self.client.chat.completions.create(model=self.model, messages=msgs, max_tokens=budget, seed=self.seed)
+            line = (r.choices[0].message.content or "").strip().strip('"')
+            if line:
+                break
         self.turns += 1
-        return (r.choices[0].message.content or "").strip().strip('"')
+        return line or None
 
 
 # ---- one call ------------------------------------------------------------------------------------------------
@@ -198,6 +207,7 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
     audio_tasks: list[asyncio.Task] = []
     t_connect = now_ms()
     result: dict[str, Any] = {"call_id": room_name, "ok": False, "turns": 0, "notes": []}
+    rec = CallRecorder(SR) if getattr(args, "record_dir", None) else None
     frames_dump: list | None = [] if args.dump_frames else None
     caller_starts: list[int] = []
 
@@ -232,6 +242,8 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
                     rms = float(math.sqrt(np.mean(x * x))) if len(x) else 0.0
                     ts = now_ms()
                     tl.agent_audio(ts, rms)
+                    if rec is not None:
+                        rec.add("agent", ts, np.frombuffer(ev.frame.data, dtype=np.int16))
                     if frames_dump is not None:
                         frames_dump.append((ts, len(x), int(rms)))
             audio_tasks.append(asyncio.create_task(listen()))
@@ -281,6 +293,8 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
     track = rtc.LocalAudioTrack.create_audio_track("mic", source)
     await room.local_participant.publish_track(track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
     pump = MicPump(source)
+    if rec is not None:
+        pump.on_frame = lambda ts, chunk: rec.add("caller", ts, chunk)
     pump.start()
     try:
         try:
@@ -309,20 +323,51 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
         if tl.last_audible_ms is None:
             result["notes"].append("no greeting heard"); return result
         while True:
-            # quiet -> human pause -> still quiet (the agent may have started a new sentence meanwhile)
-            while True:
-                if not await wait_listening(args.reply_timeout):
-                    result["notes"].append(f"turn {turn}: agent never finished speaking / never replied"); return result
-                await asyncio.sleep(args.pause)
-                if tl.agent_quiet(now_ms(), quiet_ms=args.quiet_ms):
-                    break
+            interrupt_info = None
+            if args.interrupt_turn and turn + 1 == args.interrupt_turn:
+                # cut into the agent's reply once it has been audibly speaking for interrupt_after_ms
+                t_end = time.perf_counter() + args.reply_timeout
+                while tl.agent_audible_for_ms(now_ms()) < args.interrupt_after_ms and time.perf_counter() < t_end:
+                    await asyncio.sleep(0.02)
+                spoke_before = tl.agent_audible_for_ms(now_ms())
+                interrupt_info = {"turn": turn + 1, "agent_spoke_ms_before": spoke_before, "transcript_idx": len(transcript)}
+                if spoke_before < args.interrupt_after_ms:
+                    result["notes"].append(f"turn {turn + 1}: agent reply too short to interrupt ({spoke_before} ms)")
+            else:
+                # quiet -> human pause -> still quiet (the agent may have started a new sentence meanwhile)
+                while True:
+                    if not await wait_listening(args.reply_timeout):
+                        result["notes"].append(f"turn {turn}: agent never finished speaking / never replied"); return result
+                    await asyncio.sleep(args.pause)
+                    if tl.agent_quiet(now_ms(), quiet_ms=args.quiet_ms):
+                        break
             line = await brain.next_line(transcript)
             if line is None:
                 break
             turn += 1
             result["turns"] = turn
             pcm = await asyncio.to_thread(tts_cached, line)
+
+            async def watch_stop() -> int | None:
+                """ms from the caller's first audible frame to the agent's last audible frame (a 400 ms gap = stopped)."""
+                while pump.first_audible_capture_ms is None:
+                    await asyncio.sleep(0.01)
+                onset = pump.first_audible_capture_ms
+                t_end = time.perf_counter() + 20
+                while time.perf_counter() < t_end:
+                    la = tl.last_audible_ms
+                    if la is not None and now_ms() - la > 400:
+                        return max(0, la - onset)
+                    await asyncio.sleep(0.02)
+                return None
+
+            stop_task = asyncio.create_task(watch_stop()) if interrupt_info else None
             eos = await pump.speak(pcm)
+            if stop_task is not None:
+                interrupt_info["agent_stop_ms"] = await stop_task
+                interrupt_info["line"] = line
+                result["interruption"] = interrupt_info
+                await emit("caller_interrupted", {k: v for k, v in interrupt_info.items() if k != "transcript_idx"}, turn)
             tl.caller_speech_end(eos)
             if pump.first_audible_capture_ms is not None:
                 caller_starts.append(pump.first_audible_capture_ms)
@@ -351,12 +396,19 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
         result["summary"] = summary
         result["latencies"] = tl.latencies()
         result["transcript"] = transcript
+        if result.get("interruption"):
+            idx = result["interruption"].pop("transcript_idx", 0)
+            result["interruption"]["transcript_after"] = transcript[idx:]
         if listener is not None:
             pairs = list(zip(caller_starts, heard_by_listener))
             result["loopback_ms"] = [h - s for s, h in pairs]
             await listener.disconnect()
         if frames_dump is not None:
             result["frames"] = frames_dump
+        if rec is not None:
+            wav = pathlib.Path(args.record_dir) / f"{room_name}.wav"
+            rec.save(wav)
+            result["recording"] = str(wav)
         await emit("caller_summary", {**summary, "turns_spoken": result["turns"], "dispatch_ms": result.get("dispatch_ms"), "notes": result["notes"]})
         await room.disconnect()
     return result
@@ -376,7 +428,11 @@ async def main() -> int:
     ap.add_argument("--quiet-ms", type=int, default=700, help="agent audio must be silent this long before the caller speaks")
     ap.add_argument("--no-db", action="store_true")
     ap.add_argument("--json", default=None, help="write per-call results to this file")
+    ap.add_argument("--lines-file", default=None, help="JSON list of caller lines to speak instead of the fixed Dana script (demo/turns/*.json)")
+    ap.add_argument("--interrupt-turn", type=int, default=0, help="caller turn that cuts into the agent's reply instead of waiting for quiet (0 = never)")
+    ap.add_argument("--interrupt-after-ms", type=int, default=2000, help="how long the agent must have been audibly speaking before the caller cuts in")
     ap.add_argument("--listener", action="store_true", help="second participant measures capture->heard delay of the caller's own speech (transport + receive buffer)")
+    ap.add_argument("--record-dir", default=None, help="write a two-channel wav per call (left caller, right agent) into this directory")
     ap.add_argument("--dump-frames", action="store_true", help="record (ts_ms, samples, rms) of every agent audio frame into the JSON")
     args = ap.parse_args()
 
@@ -393,10 +449,16 @@ async def main() -> int:
 
     async def one(i: int) -> dict:
         async with sem:
-            brain = FixedScript(DANA_FIXED) if args.script == "fixed" else LLMCaller(DANA_GOAL, seed=i)
-            room_name = f"{args.prefix}-{batch}-{i + 1}"
+            if args.lines_file:
+                brain = FixedScript(json.loads(pathlib.Path(args.lines_file).read_text()))
+            else:
+                brain = FixedScript(DANA_FIXED) if args.script == "fixed" else LLMCaller(DANA_GOAL, seed=i)
+            room_name = make_room_name(args.prefix, batch, i + 1)  # keeps a --fault-... spec at the end, where the agent parses it
             t0 = time.perf_counter()
-            r = await run_call(room_name, brain, args, sink, model_id)
+            try:
+                r = await run_call(room_name, brain, args, sink, model_id)
+            except Exception as e:  # e.g. the LLM caller's hosted model refusing (credits): end this call, keep the batch
+                r = {"call_id": room_name, "ok": False, "turns": 0, "notes": [f"call aborted: {e!r}"[:200]], "transcript": []}
             r["wall_s"] = round(time.perf_counter() - t0, 1)
             s = r.get("summary", {}).get("eos_to_first_audio_ms")
             print(f"[{room_name}] ok={r['ok']} turns={r['turns']} dispatch={r.get('dispatch_ms')} ms  first-audio p50={s['p50']:.0f} max={s['max']:.0f} ms" + (f"  notes={r['notes']}" if r['notes'] else "") if s else f"[{room_name}] ok={r['ok']} turns={r['turns']} notes={r['notes']}", flush=True)
@@ -407,6 +469,11 @@ async def main() -> int:
     print(f"\ncalls={len(results)} ok={sum(r['ok'] for r in results)} concurrency={args.concurrency} script={args.script}")
     if all_lat:
         print(f"end of caller speech -> agent first audio: p50 {pct(all_lat, 0.5):.0f} ms  p95 {pct(all_lat, 0.95):.0f} ms  max {max(all_lat):.0f} ms  n={len(all_lat)}  (target p50 ≤ 1000, p95 ≤ 1600)")
+    for r in results:
+        if r.get("interruption"):
+            i = r["interruption"]
+            print(f"interruption [{r['call_id']}]: caller cut in after the agent had spoken {i['agent_spoke_ms_before']} ms; agent audio stopped {i.get('agent_stop_ms')} ms after the caller's onset; "
+                  f"heard after it: {[t for role, t in i.get('transcript_after', []) if role == 'caller'][:3]}")
     disp = [r["dispatch_ms"] for r in results if r.get("dispatch_ms") is not None]
     if disp:
         print(f"agent joined after: p50 {pct(disp, 0.5):.0f} ms  max {max(disp):.0f} ms")
