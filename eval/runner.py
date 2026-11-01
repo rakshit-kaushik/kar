@@ -499,6 +499,67 @@ def compare_runs(run_dirs: list[str | Path]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# ----- failures dump (analysis loop: every failing episode, the scorer, the turn, the context) -----
+
+
+def _render_turns(ep: dict, turns: list[int]) -> list[str]:
+    lines = []
+    for t in ep.get("turns", []):
+        if t["idx"] not in turns:
+            continue
+        lines.append(f"C: {t['caller_text']}")
+        for c in t.get("tool_calls", []):
+            err = c["result"].get("error") if isinstance(c.get("result"), dict) else None
+            lines.append(
+                f"  -> {c['name']}({json.dumps(c['args'])[:160]})"
+                + (f"  <- error {err}" if err else "  <- ok")
+            )
+        if t.get("assistant_text"):
+            lines.append(f"A: {t['assistant_text']}")
+    return lines
+
+
+def failures_report(run_dir: str | Path) -> str:
+    """Markdown: for each failing episode, the non-advisory scorers that failed with their turn, the
+    detail, and the transcript around the first failing turn."""
+    out = [f"# Failing episodes in `{Path(run_dir).name}`", ""]
+    n = 0
+    for p in sorted((Path(run_dir) / "episodes").glob("*.json")):
+        ep = json.loads(p.read_text())
+        fails = [sc for sc in ep.get("scores", []) if not sc["passed"] and not sc.get("advisory")]
+        if not fails:
+            continue
+        n += 1
+        header = f"family {ep['family']} · outcome {ep['outcome']}" + (
+            f" · error {ep['error']}" if ep.get("error") else ""
+        )
+        out += [
+            f"## {ep['episode_id']}",
+            header,
+            f"goal: {ep.get('scenario', {}).get('goal', '')[:200]}",
+            "",
+        ]
+        first = None
+        for sc in fails:
+            turn = sc.get("turn_idx")
+            if first is None and turn is not None:
+                first = turn
+            detail = json.dumps(sc.get("detail", {}), ensure_ascii=False)
+            out.append(
+                f"- **{sc['scorer']}** at turn {turn if turn is not None else '-'}: {detail[:300]}"
+            )
+        out.append("")
+        if first:
+            window = sorted({t for t in (first - 1, first, first + 1) if t > 0})
+        else:
+            window = [t["idx"] for t in ep.get("turns", [])][-3:]
+        out += _render_turns(ep, window) or ["(no turns)"]
+        out.append("")
+    if n == 0:
+        out.append("no failing episodes")
+    return "\n".join(out) + "\n"
+
+
 # ----- CLI -----------------------------------------------------------------------------------
 
 
@@ -561,6 +622,11 @@ def build_parser() -> argparse.ArgumentParser:
         "compare", help="side-by-side all-pass rates per family for several run directories"
     )
     c.add_argument("runs", nargs="+")
+    f = sub.add_parser(
+        "failures", help="dump every failing episode with scorer, turn and transcript context"
+    )
+    f.add_argument("directory")
+    f.add_argument("--out", default=None, help="write the markdown here (default: stdout)")
     return p
 
 
@@ -664,6 +730,14 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_validate(a)
     if a.command == "compare":
         print(compare_runs(a.runs))
+        return 0
+    if a.command == "failures":
+        md = failures_report(a.directory)
+        if a.out:
+            Path(a.out).write_text(md)
+            print(f"failures -> {a.out}")
+        else:
+            print(md)
         return 0
     if a.command == "rescore":
         if a.db:

@@ -412,3 +412,40 @@ async def test_rescore_with_db_replaces_the_runs_ledger_rows(tmp_path, rollback_
         ).fetchall()
     )
     assert ledger["episodes"] == 2 and ledger["episodes_passed"] == 1 and len(ledger) == 6
+
+
+@pytest.mark.asyncio
+async def test_failures_dump_lists_failing_episodes_with_scorer_turn_and_context(tmp_path):
+    from eval.runner import failures_report
+
+    bad_agent = lambda: ScriptedAgent(
+        VERIFY + [say("Done, you're booked for Tuesday at nine thirty."), say("Goodbye.")]
+    )
+    await run_scenarios(
+        two_scenarios()[:1],
+        bad_agent,
+        caller_factory,
+        out_dir=tmp_path,
+        run_id="r",
+        model_id="m",
+        parallel=1,
+        repeats=1,
+    )
+    md = failures_report(tmp_path)
+    assert "## ordinary_01-s0" in md and "no_success_claim_before_result" in md and "turn 3" in md
+    assert "C: " in md and "A: Done, you're booked" in md
+    assert md.count("## ") == 1  # one failing episode
+    good = tmp_path / "good"
+    await run_scenarios(
+        two_scenarios()[:1],
+        agent_factory,
+        caller_factory,
+        out_dir=good,
+        run_id="g",
+        model_id="m",
+        parallel=1,
+        repeats=1,
+    )
+    assert "no failing episodes" in failures_report(good)
+    p = build_parser().parse_args(["failures", str(tmp_path)])
+    assert p.command == "failures" and p.directory == str(tmp_path)
