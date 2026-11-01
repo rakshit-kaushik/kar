@@ -101,6 +101,25 @@ and column, with `kind` (transfer | booked | moved | rescheduled | cancelled | t
 so the claims counter does not count the swallowed claim; the claim_guard column does. Both scenario checks were re-run on the
 fixed build before the rehearsal (results below).
 
+### Nov 1 08:23-08:45: verification calls, a scoring race, two scenario changes
+Verification on the fixed build (~/r3-artifacts/runs/verify-r3-voice-730f8ba68e-1101-0823): the widened claim guard fired live once,
+correctly (the model said "I've booked your mortgage consultation" after the caller declined; held, replaced by the question; no
+claim spoken; the sentence hold cost no latency: first audible TTS p50 1124 ms vs 1318 in the deploy block). Loop guard 0 in both
+scenario calls; the ordinary call exposed the second variant of the regeneration bug (fixed 3a3b5c7, above).
+
+Scoring race: the agent writes `sessions.state` once, at call end, about 3 s after the caller leaves; `scripts/demo_check.py` ran
+right after the simulated caller returned and read the opening checkpoint ("0 bookings" for a booked call, "tickets []" for an
+opened ticket). It now waits for `ended_at` (DEMO_CHECK_WAIT_S, default 45 s) before scoring. The deploy block's scenario verdicts
+were affected the same way; its calls were anyway broken by the loop-guard bug. Re-scored on the final state, the verification
+calls fail for one reason each: timeout "fault not injected" (the model never called check_availability), handoff "no handoff
+requested" (ticket opened, no transfer).
+
+Scenario changes (8ce45bf, demo/scenarios.md): the timeout fault moved from check_availability to book_appointment, because run 2
+books directly once the caller has named a time (0 check_availability calls in 7 live bookings), so the old fault was never
+consumed; and 5b `handoff_person` (Dana asks for a person, then insists; expected request_handoff with reason caller_requested,
+nothing written) was added as the reviewer's alternative handoff flow, since the direct fraud report (5) opened the ticket but did
+not transfer in its one live call on run 2. The rehearsal runs six scenarios; the demo uses whichever handoff flow passes.
+
 ### Nov 1 07:58: gate-fail fallback ready
 If run 2's fused 8-bit artifact fails the precision gate, `scripts/serve_unfused.sh $R3_ARTIFACTS/models/r3-voice-730f8ba68e`
 (under lock S) replaces the vllm-mlx server with mlx_lm.server 0.32.2 serving the unfused adapter on the trained base
