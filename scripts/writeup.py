@@ -148,7 +148,10 @@ def routing_table(con) -> str:
             source = run_id[len("routing-"):] if run_id.startswith("routing-") else run_id
             kind = "base zero-shot" if "base" in source else "adapter"
             rows.append([f"{source} ({kind}, batch job)", fmt(m["routing.accuracy"], 3), fmt(m["routing.macro_f1"], 3), fmt(m["routing.coverage"], 3), fmt(m["routing.weighted_error"]), "services/routing/batch.py"])
-    return md_table(["model", "accuracy", "macro F1", "coverage", "weighted error", "source"], rows) if rows else "_no routing results yet_"
+    note = ("\n\n_Two decoding methods, compare rows within one: E's runner rows decode with a 64-token budget and a retry, parsed to one label; "
+            "the batch-job rows (services/routing/batch.py) decode greedily with at most 8 tokens, validated against the taxonomy, invalid → needs_review. "
+            "Same 100 hand-checked test tickets in both._")
+    return md_table(["model", "accuracy", "macro F1", "coverage", "weighted error", "source"], rows) + note if rows else "_no routing results yet_"
 
 
 def targets_table(con) -> str:
