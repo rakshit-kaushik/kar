@@ -142,3 +142,40 @@ def test_evaluate_model_dir_scores_through_the_real_proxy(tmp_path, monkeypatch)
     assert table["server"]["base_url"] == f"http://127.0.0.1:{port + 1}/v1"  # scored through the proxy
     rows = collect_results("eval-t3", "r3-voice-abc", tmp_path / "eval", None)
     assert rows[0]["detail"]["ms"] > 0
+
+
+def test_side_proxy_runs_with_fallback_off_and_the_model_server_is_warmed_first(tmp_path, monkeypatch):
+    from train.eval_hook import proxy_env
+
+    env = proxy_env(upstream_port=8010, proxy_port=8011)
+    assert env["PROXY_FALLBACK"] == "0" and env["PROXY_UPSTREAM"] == "http://127.0.0.1:8010" and env["PROXY_PORT"] == "8011"
+    monkeypatch.setenv("R3_EVAL_FORCE_STUB", "1")
+    monkeypatch.setenv("R3_EVAL_SERVER_CMD", f"{sys.executable} {HERE / 'fake_server.py'} {{port}} {{name}}")
+    port = _free_port()
+    table = evaluate_model_dir(tmp_path / "m", model_name="m", run_id="eval-t4", scenarios=_scenarios(tmp_path),
+                               out_dir=tmp_path / "eval", port=port, database_url=None, timeout=60, through_proxy=True)
+    assert table["server"]["warmup"]["ok"] is True and table["server"]["warmup"]["ms"] >= 0
+    assert table["server"]["warmup"]["url"] == f"http://127.0.0.1:{port}/v1"  # straight at the model server, not the proxy
+
+
+def test_external_runner_command_template_and_cwd_are_honoured(tmp_path, monkeypatch):
+    """E's runner lives on e/sim, not on main: $R3_EVAL_RUNNER runs it from E's worktree
+    ($R3_EVAL_RUNNER_CWD) with the contract's arguments."""
+    runner = tmp_path / "fake_r3_eval.py"
+    runner.write_text(
+        "import json, os, sys, pathlib\n"
+        "args = dict(zip(sys.argv[1::2], sys.argv[2::2]))\n"
+        "out = pathlib.Path(args['--out']); out.mkdir(parents=True, exist_ok=True)\n"
+        "row = {'run_id': args['--run-id'], 'model_id': args['--model'], 'scenario_id': 's', 'family': 'ordinary', 'scorer': 'final_state', 'pass': True,\n"
+        "       'detail': {'cwd': os.getcwd(), 'no_db': '--no-db' in sys.argv}}\n"
+        "(out / 'eval_results.jsonl').write_text(json.dumps(row) + '\\n')\n")
+    cwd = tmp_path / "e-worktree"
+    cwd.mkdir()
+    monkeypatch.setenv("R3_EVAL_RUNNER", f"{sys.executable} {runner}")
+    monkeypatch.setenv("R3_EVAL_RUNNER_CWD", str(cwd))
+    monkeypatch.delenv("R3_EVAL_FORCE_STUB", raising=False)
+    res = run_r3_eval(base_url="http://127.0.0.1:1/v1", model="r3-voice-x", scenarios=tmp_path / "scen", out_dir=tmp_path / "out",
+                      run_id="rid", database_url=None)
+    assert res["runner"] == "r3-eval" and res["returncode"] == 0 and res["cwd"] == str(cwd)
+    rows = collect_results("rid", "r3-voice-x", tmp_path / "out", None)
+    assert rows[0]["pass"] is True and rows[0]["detail"] == {"cwd": str(cwd), "no_db": True}

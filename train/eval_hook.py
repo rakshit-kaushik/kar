@@ -14,8 +14,9 @@ Servers (installed versions, flags read from their argparse and from scripts/res
                       --chat-template-args '{"enable_thinking": false}'` (vllm-mlx has no adapter flag);
                       requests must name the model `default_model`, so the runner is given that name
 By default session S's proxy (services.proxy.main) runs on port+1 in front of the model server
-(PROXY_UPSTREAM / PROXY_PORT) and the runner scores through it, exactly like the live :8000/:8001
-stack, on side ports. Override the model server with $R3_EVAL_SERVER_CMD, a template with {model}
+(PROXY_UPSTREAM / PROXY_PORT, PROXY_FALLBACK=0 so no turn is silently answered by the hosted model)
+and the runner scores through it, exactly like the live :8000/:8001 stack, on side ports; the model
+server gets one warm-up request straight first (cold start ~19 s). Override the model server with $R3_EVAL_SERVER_CMD, a template with {model}
 {port} {name} {adapter} placeholders. Results come from Postgres `eval_results` (run_id, else model_id
 since the start) when the runner wrote there, else from <out>/eval_results.jsonl. Selection is by this
 table on the test set, never by loss.
@@ -105,10 +106,25 @@ def stop_server(proc: subprocess.Popen, timeout: float = 20.0) -> None:
 def runner_available() -> bool:
     if os.environ.get("R3_EVAL_FORCE_STUB"):
         return False
+    if os.environ.get("R3_EVAL_RUNNER"):
+        return True
     try:
         return importlib.util.find_spec("eval.runner") is not None
     except (ImportError, ValueError):
         return False
+
+
+def runner_command() -> tuple[list[str], Path]:
+    """The r3-eval executable and the directory to run it from. $R3_EVAL_RUNNER (a command, e.g.
+    `/path/to/e-worktree/.venv/bin/r3-eval`) with $R3_EVAL_RUNNER_CWD (default: that checkout) lets
+    the hook drive session E's runner from E's worktree before e/sim reaches main."""
+    custom = os.environ.get("R3_EVAL_RUNNER")
+    if custom:
+        cmd = shlex.split(custom)
+        cwd = Path(os.environ.get("R3_EVAL_RUNNER_CWD") or REPO_ROOT)
+        return cmd, cwd
+    exe = Path(sys.executable).with_name("r3-eval")
+    return [str(exe) if exe.exists() else "r3-eval"], REPO_ROOT
 
 
 def run_r3_eval(base_url: str, model: str, scenarios: str | Path, out_dir: str | Path, run_id: str,
@@ -120,20 +136,21 @@ def run_r3_eval(base_url: str, model: str, scenarios: str | Path, out_dir: str |
     common = ["--base-url", base_url, "--model", model, "--scenarios", str(scenarios), "--out", str(out_dir), "--run-id", run_id]
     if not database_url:
         common.append("--no-db")
+    cwd = REPO_ROOT
     if runner_available():
-        exe = Path(sys.executable).with_name("r3-eval")
-        cmd = [str(exe) if exe.exists() else "r3-eval", *common]
+        exe, cwd = runner_command()
+        cmd = [*exe, *common]
         runner = "r3-eval"
     else:
         cmd = [sys.executable, "-m", "train.eval_stub", *common]
         runner = "stub"
     log = out_dir / "eval.log"
-    print(f"[eval] {runner}: {' '.join(cmd)}", flush=True)
+    print(f"[eval] {runner} (cwd {cwd}): {' '.join(cmd)}", flush=True)
     with log.open("a") as f:
         f.write(f"$ {' '.join(cmd)}\n")
         f.flush()
-        proc = subprocess.run(cmd, cwd=REPO_ROOT, stdout=f, stderr=subprocess.STDOUT, timeout=timeout)
-    return {"runner": runner, "command": cmd, "returncode": proc.returncode, "log": str(log)}
+        proc = subprocess.run(cmd, cwd=cwd, stdout=f, stderr=subprocess.STDOUT, timeout=timeout)
+    return {"runner": runner, "command": cmd, "cwd": str(cwd), "returncode": proc.returncode, "log": str(log)}
 
 
 def collect_results(run_id: str, model_id: str, out_dir: str | Path, database_url: str | None, since: float | None = None) -> list[dict]:
@@ -160,9 +177,26 @@ def collect_results(run_id: str, model_id: str, out_dir: str | Path, database_ur
     return rows
 
 
+def proxy_env(upstream_port: int, proxy_port: int) -> dict:
+    """Environment for a side proxy: upstream = the side model server, hosted fallback OFF (an eval
+    that silently fell back to the hosted model would not be scoring the candidate)."""
+    return {**os.environ, "PROXY_UPSTREAM": f"http://127.0.0.1:{upstream_port}", "PROXY_PORT": str(proxy_port), "PROXY_FALLBACK": "0"}
+
+
+def warm_up(model_url: str, request_model: str, timeout: float = 180.0) -> dict:
+    """One chat completion with the contract tools straight at the model server before scoring: the
+    first request after a start takes ~19 s (engine warmup + system-prompt cache) and would otherwise
+    hit the runner's first turn."""
+    from train.eval_stub import probe
+
+    t0 = time.time()
+    ok, detail = probe(model_url, request_model, timeout=timeout)
+    return {"ok": ok, "ms": round(1000 * (time.time() - t0)), "url": model_url, **({} if ok else {"error": detail.get("error")})}
+
+
 def start_proxy(upstream_port: int, proxy_port: int, log_path: Path) -> subprocess.Popen:
     """Session S's proxy (services/proxy) on a side port, fronting the side model server."""
-    env = {**os.environ, "PROXY_UPSTREAM": f"http://127.0.0.1:{upstream_port}", "PROXY_PORT": str(proxy_port)}
+    env = proxy_env(upstream_port, proxy_port)
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("a")
     log.write(f"$ PROXY_UPSTREAM={env['PROXY_UPSTREAM']} PROXY_PORT={proxy_port} python -m services.proxy.main\n")
@@ -250,6 +284,11 @@ def evaluate_model_dir(model_dir: str | Path, model_name: str, run_id: str, scen
             raise RuntimeError(f"server did not become healthy within {timeout:.0f}s; see {out_dir / 'server.log'}")
         server["health_seconds"] = round(time.time() - t0, 1)
         print(f"[eval] healthy after {server['health_seconds']}s", flush=True)
+        server["warmup"] = warm_up(model_url, request_model)
+        print(f"[eval] warm-up straight at the server: {'ok' if server['warmup']['ok'] else 'FAILED'} in {server['warmup']['ms']} ms", flush=True)
+        if not server["warmup"]["ok"]:
+            stop_server(proc)
+            raise RuntimeError(f"warm-up request failed: {server['warmup'].get('error')}; see {out_dir / 'server.log'}")
         base_url = model_url
         if through_proxy:
             proxy_port = port + 1
