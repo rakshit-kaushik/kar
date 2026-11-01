@@ -825,6 +825,13 @@ def reasked_given_slot(ep: Episode, sc: Scenario) -> ScorerResult:
             violations.append(
                 {"turn": t["idx"], "slot": slot, "given_turn": given[slot], "text": reply[:120]}
             )
+        if any(
+            c.get("name") in WRITE_TOOLS
+            and isinstance(c.get("result"), dict)
+            and not c["result"].get("error")
+            for c in t.get("tool_calls") or []
+        ):
+            given, said = {}, []  # a completed write ends the request; the next one starts fresh
     return ScorerResult(
         "reasked_given_slot",
         not violations,

@@ -885,3 +885,36 @@ def test_reask_slots_helper_does_not_mistake_phone_digits_for_a_time():
         )
         == []
     )
+
+
+@pytest.mark.asyncio
+async def test_reasked_given_slot_resets_after_a_completed_write():
+    # a second booking request after the first is booked starts fresh: its branch was never given
+    scen = scenario()
+    ep = await make_episode(
+        scen,
+        VERIFY
+        + [
+            tools(tc("check_availability", AVAIL)),
+            say("Nine thirty is open at Market Street, shall I book it?"),
+            tools(
+                tc(
+                    "book_appointment",
+                    {**AVAIL, "customer_id": "C-1001", "slot_start": "2026-11-03T09:30"},
+                )
+            ),
+            say("Booked. Anything else?"),
+            say("Which branch would you like for the second one?"),
+            say("Bye."),
+        ],
+        VERIFY_LINES
+        + [
+            "a mortgage consultation at market street on tuesday at nine thirty",
+            "yes",
+            "oh and can you book me another one wednesday at ten",
+            "market street",
+            ("bye", True),
+        ],
+    )
+    r = results(ep, scen)["reasked_given_slot"]
+    assert r.passed is True, r.detail

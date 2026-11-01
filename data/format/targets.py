@@ -128,9 +128,22 @@ def _expected_slots(ep: Episode) -> dict[str, str]:
 
 
 def _caller_texts_before(ep: Episode, message_idx: int) -> list[str]:
+    """The caller's turns since the last completed write before `message_idx` (a booking or ticket
+    ends a request; a second request starts with nothing given)."""
+    start = 0
+    msgs = ep.messages[:message_idx]
+    for i, m in enumerate(msgs):
+        if m.get("role") != "assistant" or not m.get("tool_calls"):
+            continue
+        names = {(c.get("function") or {}).get("name") for c in m["tool_calls"]}
+        if not names & set(WRITE_TOOLS):
+            continue
+        results = [x for x in msgs[i + 1 : i + 1 + len(m["tool_calls"])] if x.get("role") == "tool"]
+        if results and all('"error"' not in (x.get("content") or "") for x in results):
+            start = i
     return [
         m.get("content") or ""
-        for m in ep.messages[:message_idx]
+        for m in msgs[start:]
         if m.get("role") == "user" and isinstance(m.get("content"), str)
     ]
 
