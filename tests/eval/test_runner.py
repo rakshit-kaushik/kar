@@ -608,3 +608,61 @@ def test_bucket_for_caller_fault_is_harness():
         bucket_for(score, {"caller_fault": None}, {"check_availability": 3})
         == "missing example type"
     )
+
+
+def _write_run(d, model, episodes):
+    """A minimal run dir: scores.jsonl rows for two scorers plus one episode file per episode."""
+    (d / "episodes").mkdir(parents=True)
+    with open(d / "scores.jsonl", "w") as f:
+        for sid, seed, fails, ep in episodes:
+            eid = f"{sid}-s{seed}-abc"
+            for scorer in ("tool_calls", "handoff"):
+                row = {
+                    "run_id": "r",
+                    "model_id": model,
+                    "scenario_id": sid,
+                    "episode_id": eid,
+                    "repeat_seed": seed,
+                    "family": sid.rsplit("_", 1)[0],
+                    "scorer": scorer,
+                    "pass": scorer not in fails,
+                    "advisory": False,
+                }
+                f.write(json.dumps(row) + "\n")
+            (d / "episodes" / f"{eid}.json").write_text(
+                json.dumps({**ep, "episode_id": eid, "scenario_id": sid, "repeat_seed": seed})
+            )
+
+
+def test_compare_can_exclude_caller_fault_episodes_across_runs(tmp_path):
+    from eval.runner import compare_runs
+
+    phone = "five five five zero one nine eight eight two three"
+    bad = _ep_for_caller_fault([phone, "nineteen sixty"], [({}, False)])
+    good = _ep_for_caller_fault([phone, "july fourth nineteen seventy five"], [({}, True)])
+    a, b = tmp_path / "a", tmp_path / "b"
+    _write_run(
+        a,
+        "A",
+        [
+            ("ordinary_01", 0, {"tool_calls"}, bad),
+            ("ordinary_01", 1, set(), good),
+            ("ordinary_02", 0, set(), good),
+        ],
+    )
+    _write_run(
+        b,
+        "B",
+        [
+            ("ordinary_01", 0, set(), good),
+            ("ordinary_01", 1, set(), good),
+            ("ordinary_02", 0, {"handoff"}, good),
+        ],
+    )
+    assert "| all | 67% | 67% |" in compare_runs([a, b])
+    md = compare_runs([a, b], exclude_caller_faults=True)
+    # ordinary_01 seed 0 is dropped from both runs because the caller was at fault in run A
+    assert "| all | 100% | 50% |" in md
+    assert "ordinary_01-s0" in md and "1 scenario" in md
+    p = build_parser().parse_args(["compare", str(a), str(b), "--exclude-caller-faults"])
+    assert p.command == "compare" and p.exclude_caller_faults is True

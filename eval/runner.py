@@ -452,9 +452,13 @@ def rescore_dir(directory: str | Path, scenarios_dir: str | Path | None = None, 
 # ----- compare -------------------------------------------------------------------------------
 
 
-def compare_runs(run_dirs: list[str | Path]) -> str:
-    """Side-by-side all-pass rates per family for several run directories (reads scores.jsonl)."""
+def compare_runs(run_dirs: list[str | Path], exclude_caller_faults: bool = False) -> str:
+    """Side-by-side all-pass rates per family for several run directories (reads scores.jsonl).
+    With `exclude_caller_faults`, a scenario x seed episode in which the simulated caller mis-stated
+    its credentials in any run (see `caller_fault`) is dropped from every run, so candidates are
+    compared on the same calls."""
     runs: list[tuple[str, dict[str, dict]]] = []  # (label, episode_id -> {"family", "fails": set})
+    excluded: set[str] = set()
     for d in run_dirs:
         d = Path(d)
         episodes: dict[str, dict] = {}
@@ -465,13 +469,36 @@ def compare_runs(run_dirs: list[str | Path]) -> str:
             r = json.loads(line)
             label = r.get("model_id") or label
             e = episodes.setdefault(
-                r["episode_id"], {"family": r["family"], "fails": set(), "advisory_fails": set()}
+                r["episode_id"],
+                {
+                    "family": r["family"],
+                    "key": f"{r.get('scenario_id')}-s{r.get('repeat_seed')}",
+                    "fails": set(),
+                    "advisory_fails": set(),
+                },
             )
             if not r["pass"]:
                 (e["advisory_fails"] if r.get("advisory") else e["fails"]).add(r["scorer"])
+        if exclude_caller_faults:
+            for p in (d / "episodes").glob("*.json"):
+                ep = json.loads(p.read_text())
+                if caller_fault(ep):
+                    excluded.add(f"{ep.get('scenario_id')}-s{ep.get('repeat_seed')}")
         runs.append((label, episodes))
+    if excluded:
+        runs = [
+            (label, {eid: e for eid, e in eps.items() if e["key"] not in excluded})
+            for label, eps in runs
+        ]
     families = sorted({e["family"] for _, eps in runs for e in eps.values()})
-    lines = [
+    lines = []
+    if exclude_caller_faults:
+        lines += [
+            f"Excluded {len(excluded)} scenario x seed episode(s) in which the simulated caller mis-stated "
+            f"its own phone or date of birth in at least one run: {', '.join(sorted(excluded)) or 'none'}",
+            "",
+        ]
+    lines += [
         "| family | " + " | ".join(label for label, _ in runs) + " |",
         "|---|" + "---|" * len(runs),
     ]
@@ -833,6 +860,11 @@ def build_parser() -> argparse.ArgumentParser:
         "compare", help="side-by-side all-pass rates per family for several run directories"
     )
     c.add_argument("runs", nargs="+")
+    c.add_argument(
+        "--exclude-caller-faults",
+        action="store_true",
+        help="drop scenario x seed episodes where the simulated caller mis-stated its credentials in any run",
+    )
     f = sub.add_parser(
         "failures", help="dump every failing episode with scorer, turn and transcript context"
     )
@@ -951,7 +983,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.command == "validate":
         return _cmd_validate(a)
     if a.command == "compare":
-        print(compare_runs(a.runs))
+        print(compare_runs(a.runs, exclude_caller_faults=a.exclude_caller_faults))
         return 0
     if a.command == "buckets":
         md = buckets_report(a.directory, dataset_dir=a.dataset)
