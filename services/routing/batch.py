@@ -7,6 +7,8 @@ is trained on (train/routing_format.py when present; an identical local copy oth
 
   uv run python -m services.routing.batch --model-dir $R3_ARTIFACTS/models/Qwen3-4B-8bit --limit 200 [--dry-run]
   uv run python -m services.routing.batch --model-dir $R3_ARTIFACTS/models/r3-route-<hash> --source r3-route-<hash>
+  uv run python -m services.routing.batch --score-only --gold-file $R3_ARTIFACTS/datasets/tickets-v1/tickets.jsonl --source <id>
+    (scores the labels written by <source> against tickets.category on the file's split=="test" ids; ledger rows routing.*)
 
 The job takes the GPU lock (scripts/gpu_lock.sh, owner R) for its run and never overlaps a live call window
 by construction: the scheduler that calls it is responsible for the window; the lock is the guard.
@@ -104,9 +106,34 @@ def write_labels(con, rows: list[dict]) -> int:
     return len(rows)
 
 
+def score_against_gold(con, gold_file: str, source: str, run_id: str, write_ledger: bool = True) -> dict | None:
+    """Labels written by `source` vs tickets.category, on the gold file's split=="test" ticket ids (E's 100 test tickets)."""
+    from services.routing.score import score
+    test_ids = {json.loads(l)["ticket_id"] for l in open(gold_file) if l.strip() and json.loads(l).get("split") == "test"}
+    rows = con.execute("select ticket_id, category, label from tickets where label is not null and label_source=%s", (source,)).fetchall()
+    rows = [r for r in rows if r[0] in test_ids]
+    if not rows:
+        print(f"no labeled test tickets for source {source}"); return None
+    s = score([r[1] for r in rows], [r[2] for r in rows])
+    print(f"routing score for {source} on {s['n']} test tickets: accuracy {s['accuracy']:.2f}  macro F1 {s['macro_f1']:.2f}  coverage {s['coverage']:.2f}  "
+          f"weighted error {s['weighted_error']}  costly confusions {s['costly'] or 'none'}")
+    for lab, m in s["per_label"].items():
+        if m["support"] or m["fp"]:
+            f = f"{m['f1']:.2f}" if m["f1"] is not None else "-"
+            print(f"  {lab:<26} support {m['support']:>3}  tp {m['tp']:>3}  fp {m['fp']:>3}  fn {m['fn']:>3}  f1 {f}")
+    if write_ledger:
+        with con.cursor() as cur:
+            for k in ("accuracy", "macro_f1", "coverage", "weighted_error", "n"):
+                cur.execute("insert into cost_ledger(run_id, model_id, item, qty, unit, measured, note) values (%s,%s,%s,%s,%s,true,%s)",
+                            (run_id, source, f"routing.{k}", s[k], "ratio" if k in ("accuracy", "macro_f1", "coverage") else "count", f"vs tickets.category on {s['n']} test tickets; costly={s['costly']}"))
+    return s
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--model-dir", required=True)
+    ap.add_argument("--model-dir", default=None)
+    ap.add_argument("--gold-file", default=None, help="E's tickets.jsonl; when given, the test split is scored after labeling")
+    ap.add_argument("--score-only", action="store_true", help="only score existing labels of --source against the gold file")
     ap.add_argument("--source", default=None, help="label_source written back (default: basename of model dir)")
     ap.add_argument("--limit", type=int, default=500)
     ap.add_argument("--batch-size", type=int, default=16)
@@ -116,6 +143,13 @@ def main() -> int:
     from dotenv import load_dotenv
     import psycopg
     load_dotenv(ROOT / ".env")
+    if args.score_only:
+        if not (args.gold_file and args.source):
+            print("--score-only needs --gold-file and --source", file=sys.stderr); return 2
+        with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as con:
+            return 0 if score_against_gold(con, args.gold_file, args.source, f"routing-{args.source}") else 1
+    if not args.model_dir:
+        print("--model-dir is required unless --score-only", file=sys.stderr); return 2
     source = args.source or os.path.basename(args.model_dir.rstrip("/"))
     lock = ROOT / "scripts" / "gpu_lock.sh"
     if not args.no_lock and subprocess.run([str(lock), "acquire", "R", "20", "routing batch"], capture_output=True, text=True).returncode != 0:
@@ -137,6 +171,8 @@ def main() -> int:
             print(f"labeled {len(rows)} tickets with {source} in {secs:.1f}s ({1000 * secs / len(rows):.0f} ms/ticket); needs_review={invalid}; {'dry run' if args.dry_run else 'written'}")
             for r in rows[:5]:
                 print(f"  {r['ticket_id']}: {r['label']:<26} <- {r['raw'][:60]!r}")
+            if args.gold_file and not args.dry_run:
+                score_against_gold(con, args.gold_file, source, f"routing-{source}")
     finally:
         if not args.no_lock:
             subprocess.run([str(lock), "release", "R"], capture_output=True)
