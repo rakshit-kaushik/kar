@@ -52,3 +52,71 @@ def test_transcript_role_comes_from_the_transcribed_track_not_from_the_attribute
     assert role_for({"lk.transcribed_track_id": "TR_agent9"}, {"TR_mic1"}) == "agent"
     assert role_for({}, {"TR_mic1"}) == "agent"
     assert role_for({"lk.transcribed_track_id": "TR_mic1"}, set()) == "agent"  # own track unknown yet: never claim it as the caller's
+
+
+# Nov 1, run 2 redeployed: the fixed lines were tuned on run 1's flow (re-ask the day, ask the time, read back). Run 2 proposes a
+# slot straight after the request and says goodbye after booking, so the scripted caller accepted a time it never wanted and
+# kept talking after the call was over. A person states their own fact against a different proposal, does not repeat a fact
+# already given, and hangs up after the agent's goodbye.
+TIMEOUT_LINES = ["five five five zero one four two two one nine", "march twelfth, nineteen eighty eight",
+                 "can you book me a mortgage consultation for tuesday morning at market street", "sure, go ahead", "nine thirty is fine",
+                 "yes", "yes, please try again", "thanks, goodbye"]
+ORDINARY_LINES = LINES + ["no, that's everything. thank you, goodbye"]
+DANA = {**FACTS, "service": "mortgage consultation"}
+
+
+async def _after_request(lines):
+    b = AnsweringScript(lines, DANA)
+    t = []
+    for _ in range(3):
+        t.append(("caller", await b.next_line(t)))
+    return b, t
+
+
+async def test_a_proposal_that_contradicts_the_callers_time_gets_the_fact_and_the_script_waits():
+    b, t = await _after_request(TIMEOUT_LINES)
+    t.append(("agent", "To confirm: a mortgage consultation at Market Street on Tuesday, November third, at ten in the morning. Shall I book it?"))
+    assert await b.next_line(t) == "nine thirty, please" and b.last_reask == "time:corrected"
+    t += [("caller", "nine thirty, please"), ("agent", "To confirm: a mortgage consultation at Market Street on Tuesday, November third, at nine thirty in the morning. Shall I book it?")]
+    assert await b.next_line(t) == "sure, go ahead" and b.last_reask is None
+
+
+async def test_a_range_of_times_gets_the_callers_time():
+    b, t = await _after_request(ORDINARY_LINES)
+    t.append(("agent", "To confirm: a mortgage consultation at Market Street on Tuesday, November third, at any time from nine in the morning to four thirty in the afternoon."))
+    assert await b.next_line(t) == "nine thirty, please"
+
+
+async def test_a_different_day_branch_or_service_gets_the_fact_but_a_list_of_options_does_not():
+    b, t = await _after_request(ORDINARY_LINES)
+    t.append(("agent", "To confirm: an account opening at Market Street on Tuesday, November third, at nine thirty in the morning. Shall I book it?"))
+    assert await b.next_line(t) == "mortgage consultation, please" and b.last_reask == "service:corrected"
+    t.append(("agent", "To confirm: a mortgage consultation at Mill Road on Wednesday, November fourth, at nine thirty in the morning. Shall I book it?"))
+    assert (await b.next_line(t)).endswith(", please")
+    b2, t2 = await _after_request(ORDINARY_LINES)
+    t2.append(("agent", "Which branch would you like: Market Street, Marlow Street, Marker Street, or Mill Road?"))
+    assert await b2.next_line(t2) == "market street" and b2.last_reask == "branch"  # a re-ask of a given fact, not a contradiction
+
+
+async def test_a_re_asked_service_is_repeated():
+    b, t = await _after_request(ORDINARY_LINES)
+    t.append(("agent", "Which service would you like: account opening, mortgage consultation, loan application, or notary?"))
+    assert await b.next_line(t) == "mortgage consultation" and b.last_reask == "service"
+
+
+async def test_a_scripted_line_that_only_repeats_a_given_fact_is_skipped():
+    b, t = await _after_request(ORDINARY_LINES)
+    t.append(("agent", "To confirm: a mortgage consultation at Market Street on Tuesday, November third, at ten in the morning. Shall I book it?"))
+    first = await b.next_line(t)
+    assert first == "nine thirty, please"
+    t.append(("caller", first))
+    t.append(("agent", "To confirm: a mortgage consultation at Market Street on Tuesday, November third, at nine thirty in the morning. Shall I book it?"))
+    assert await b.next_line(t) == "yes, that's right"  # "nine thirty is fine" says nothing new
+
+
+async def test_the_agents_goodbye_gets_the_last_line_and_ends_the_call():
+    b, t = await _after_request(ORDINARY_LINES)
+    t.append(("agent", "I've booked your mortgage consultation at Market Street on Tuesday, November third, at nine thirty in the morning. Goodbye, Dana!"))
+    assert await b.next_line(t) == "no, that's everything. thank you, goodbye" and b.last_reask == "farewell"
+    t.append(("caller", "no, that's everything. thank you, goodbye"))
+    assert await b.next_line(t) is None
