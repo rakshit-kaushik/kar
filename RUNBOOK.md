@@ -155,7 +155,34 @@ the application after the ticket" and the timeout flow as "transient write fault
 idempotency key"; the scorecard's `retry=` and `policy=` columns and the write-up's (retry n) / (policy n) marks say which calls
 needed them. Nothing in those two rows is the model's recovery.
 
-Write-up tables generated at the end: `/Users/abgup/r3-artifacts/runs/writeup-1101-0937.md` (scripts/writeup.py; eval, latency incl. the combined rehearsal batch, load, cost, routing, rehearsal, targets).
+Write-up tables generated at the end: `/Users/abgup/r3-artifacts/runs/writeup-1101-0954.md` (scripts/writeup.py; eval, latency incl. the combined rehearsal batch, load, cost, routing, rehearsal, targets).
+
+### Nov 1 09:40-10:00: the interruption stalls explained, the no-transcript re-prompt, and lane close-out
+The two rehearsal interruption stalls (calls 3 and 5) were not the model's: the caller's barge-in audio was heard by VAD but Deepgram
+never returned a final transcript for it, LiveKit classified the interruption as false after 2 s and resumed the read-back (its
+default), and then both sides waited: the agent for the caller, the scripted caller for a reply. livekit-agents 1.8.10 has
+`transcription_timeout` for exactly this ("use it to prompt the user to repeat themselves"): the agent now sets it to
+AGENT_TRANSCRIPTION_TIMEOUT (2.5 s; 0 off) and on `user_transcription_timeout` says "Sorry, I didn't catch that. Could you say it
+again?" outside the chat context (the model and the loop guard never see it). Own event `stt_timeout_reprompt`, scorecard `reprompt=`,
+write-up "(reprompt n)". Reviewer-approved 09:48 under the standing conditions. Interruption re-run with it (`rehearsal-r3-voice-730f8ba68e-1101-0945-rules`): 2/5 (claim 3, reprompt 1); the 08:40 row 2/5 is kept.
+The untranscribed barge-in did not recur, so the re-prompt's effect on that stall is unproven; the three failures were two calls in
+which Deepgram misread the spoken date of birth (lookup not_found) and the model transferred after one re-ask while the fixed
+script did not repeat the credential, and one call with the weekday re-ask. The re-prompt fired once, after a 5 s utterance whose
+final transcript came late, so AGENT_TRANSCRIPTION_TIMEOUT went from 2.5 to 4.0 s (the stall it addresses waits 45 s) and the
+agent was restarted with it at 09:55. The third 08:40 failure (call 4) was an STT credential misread followed by a one-strike transfer, the
+relative-date and verification-retry gaps E's labels already name.
+
+Serving-path note from T (not a gate item): on the same 17 caller-fault-excluded seed-0 episodes, fused vs unfused through
+mlx_lm.server 13/17 vs 12/17 all-pass (fusing neutral); the same fused weights through the deployed vllm-mlx path 10/17 vs 13/17
+through mlx_lm.server, within noise at n=17, claims 0 everywhere; run id r3-voice-730f8ba68e-mlxlm-eval-20261101-093437-localcaller.
+
+Lane status at close: E closed (nothing open needs S; numbers in the report verified by E against the final batch; e/sim at 1084850,
+179 tests; the v5.1 slice and the hosted-caller rerun wait on the hosted key). T closed (lock T released 09:42, no more GPU time;
+canonical training lines in the report). Reviewer loop closed 09:47: report accepted as written; E's review items closed (eight
+scenarios approved, 100 routing tickets accepted after a hand check). S: agent, proxy and server up in the demo state, one call at a
+time; routing scheduler off; nothing of S takes the GPU after the interruption re-run.
+
+Final write-up tables: `/Users/abgup/r3-artifacts/runs/writeup-1101-0954.md`.
 
 ### Nov 1 07:58: gate-fail fallback ready
 If run 2's fused 8-bit artifact fails the precision gate, `scripts/serve_unfused.sh $R3_ARTIFACTS/models/r3-voice-730f8ba68e`
