@@ -423,20 +423,42 @@ def serve_side_stack(model_dir: str | Path, model_name: str, port: int, out_dir:
     return info
 
 
-def table_from_scores(run_dir: str | Path, model_name: str | None = None, run_id: str | None = None) -> dict:
+def excluded_episode_prefixes(compare_file: str | Path) -> list[str]:
+    """The `<scenario>-s<seed>` ids E's compare-excl-caller-faults.md lists on its first line (episodes in
+    which the simulated caller mis-stated its own credentials); rows whose episode_id starts with one are
+    dropped from every candidate alike."""
+    first = Path(compare_file).read_text().splitlines()[0] if Path(compare_file).exists() else ""
+    if ":" not in first:
+        return []
+    return [tok.strip().rstrip(".") for tok in first.split(":", 1)[1].split(",") if tok.strip()]
+
+
+def table_from_scores(run_dir: str | Path, model_name: str | None = None, run_id: str | None = None,
+                      exclude_file: str | Path | None = None) -> dict:
     """family_table.{json,md} for a run directory the runner already wrote (e.g. E's base baseline),
-    so it can join the candidate ranking (train/select.py, train/report.py)."""
+    so it can join the candidate ranking (train/select.py, train/report.py). With `exclude_file`
+    (E's compare-excl-caller-faults.md) the caller-fault episodes are dropped and the table is written
+    as family_table_excl.{json,md}: the selection rule is applied to that view."""
     run_dir = Path(run_dir)
     rows = collect_results(run_id or "", model_name or "", run_dir, database_url=None)
     if not rows:
         raise FileNotFoundError(f"no scores.jsonl / eval_results.jsonl in {run_dir}")
     rid = run_id or rows[0].get("run_id")
     name = model_name or rows[0].get("model_id")
+    excluded = None
+    if exclude_file:
+        prefixes = excluded_episode_prefixes(exclude_file)
+        before = len(rows)
+        rows = [r for r in rows if not any(str(r.get("episode_id") or "").startswith(p + "-") or str(r.get("episode_id") or "") == p for p in prefixes)]
+        excluded = {"file": str(exclude_file), "prefixes": prefixes, "rows_dropped": before - len(rows)}
     table = family_table(rows)
     table.update(model=name, request_model=name, model_dir=None, adapter=None, run_id=rid, scenarios=None, runner="r3-eval",
-                 returncode=0, server=None, rows_source=str(run_dir), created_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
-    (run_dir / "family_table.json").write_text(json.dumps(table, indent=2, default=str) + "\n")
-    (run_dir / "family_table.md").write_text(f"# {name} ({rid})\n\n" + format_family_table(table) + "\n")
+                 returncode=0, server=None, rows_source=str(run_dir), excluded=excluded,
+                 created_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+    stem = "family_table_excl" if excluded else "family_table"
+    (run_dir / f"{stem}.json").write_text(json.dumps(table, indent=2, default=str) + "\n")
+    (run_dir / f"{stem}.md").write_text(f"# {name} ({rid})" + (f" excluding {len(excluded['prefixes'])} caller-fault episodes" if excluded else "") + "\n\n"
+                                       + format_family_table(table) + "\n")
     return table
 
 
@@ -449,8 +471,9 @@ def main(argv=None) -> int:
         sub.add_argument("--from-scores", type=Path, required=True)
         sub.add_argument("--model-name", default=None)
         sub.add_argument("--run-id", default=None)
+        sub.add_argument("--exclude-from", type=Path, default=None, help="E's compare-excl-caller-faults.md")
         a = sub.parse_args(argv)
-        t = table_from_scores(a.from_scores, a.model_name, a.run_id)
+        t = table_from_scores(a.from_scores, a.model_name, a.run_id, exclude_file=a.exclude_from)
         print(format_family_table(t))
         return 0
     ap.add_argument("--model-dir", required=True, type=Path, help="versioned fused model dir ($R3_ARTIFACTS/models/<id>)")

@@ -284,3 +284,20 @@ def test_select_candidates_dedupes_tables_of_the_same_model():
     t = {"model": "m", "selection": {"task_completion": 50.0, "unsupported_success_claims": 0, "tool_calls": 10.0, "episodes": 27}}
     ranked = select_candidates([t, dict(t), {"model": "base", "selection": {"task_completion": 40.0, "unsupported_success_claims": 0, "tool_calls": 5.0, "episodes": 27}}])
     assert [r["model"] for r in ranked] == ["m", "base"] and [r["rank"] for r in ranked] == [1, 2]
+
+
+def test_table_from_scores_can_exclude_the_caller_fault_episodes_listed_by_the_compare(tmp_path):
+    from train.eval_hook import excluded_episode_prefixes, table_from_scores
+
+    compare = tmp_path / "compare-excl-caller-faults.md"
+    compare.write_text("Excluded 2 scenario x seed episode(s) in which the simulated caller mis-stated its own phone: ordinary_01-s1, correction_01-s1\n\n| x |\n")
+    assert excluded_episode_prefixes(compare) == ["ordinary_01-s1", "correction_01-s1"]
+    out = tmp_path / "run"
+    out.mkdir()
+    rows = [dict(r, episode_id=f"{r['scenario_id']}-s{r['repeat_seed']}-abc123") for r in E_ROWS]
+    (out / "scores.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    table = table_from_scores(out, model_name="m", exclude_file=compare)
+    assert table["excluded"]["prefixes"] == ["ordinary_01-s1", "correction_01-s1"] and table["excluded"]["rows_dropped"] == 5
+    assert table["overall"]["n"] == 0 and (out / "family_table_excl.json").exists()
+    table = table_from_scores(out, model_name="m")  # no exclusion: all 4 non-advisory rows
+    assert table["overall"]["n"] == 4
