@@ -1,0 +1,46 @@
+# R3 voice adapter, run 1 — mlx_lm.lora (0.32.2) recipe. CONTRACT.md §0 + master-build-plan "Run 1 config".
+# Every top-level key except `r3:` is an mlx_lm.lora config key. `train/launch.py` resolves `${VAR}`,
+# adds the run-sized keys (iters, steps_per_eval, save_every, lr_schedule) and writes the resolved
+# copy to $R3_ARTIFACTS/runs/<id>/config.resolved.yaml. Direct use also works:
+#   mlx_lm.lora -c train/configs/voice_run1.yaml --data <dir> --iters <n>   (constant lr, no clipping)
+model: ${R3_ARTIFACTS}/models/Qwen3-4B-8bit   # 8-bit base, loaded quantized (QLoRA); trained and served at 8-bit
+train: true
+fine_tune_type: lora
+optimizer: adam
+num_layers: -1                                # all 36 decoder blocks
+lora_parameters:
+  rank: 32
+  scale: 2.0                                  # mlx_lm uses scale = alpha / rank = 64 / 32 (there is no `alpha` key)
+  dropout: 0.05
+  keys:                                       # attention + MLP projections, names as in mlx_lm/models/qwen3.py
+    - self_attn.q_proj
+    - self_attn.k_proj
+    - self_attn.v_proj
+    - self_attn.o_proj
+    - mlp.gate_proj
+    - mlp.up_proj
+    - mlp.down_proj
+max_seq_length: 2048                          # never raised when behind; cut targets or conversations instead
+batch_size: 1                                 # micro-batch 1 on 36 GB
+grad_accumulation_steps: 16                   # effective batch 16
+learning_rate: 1.0e-4                         # peak lr; the launcher turns this into cosine + 3% warmup (lr_schedule)
+grad_checkpoint: true
+mask_prompt: true                             # loss on the final assistant turn only (tool-call tokens in, tool results out)
+steps_per_report: 10                          # loss + tokens/s every 10 steps
+val_batches: -1                               # whole validation set at each eval point
+seed: 0
+# iters / steps_per_eval / save_every are NOT set here: one epoch = len(train.jsonl) at batch 1, sized by the launcher
+# to end inside the GPU window, with validation + a checkpoint at the midpoint and the end.
+r3:                                           # launcher-only keys (ignored by mlx_lm, copied into adapter_config.json)
+  task: voice
+  model_prefix: r3-voice                      # versioned dir: $R3_ARTIFACTS/models/r3-voice-<hash>/
+  epochs: 1
+  schedule: cosine_decay                      # mlx.optimizers.schedulers.cosine_decay over the optimizer steps
+  warmup_ratio: 0.03                          # linear warmup over 3% of the optimizer steps
+  clip_grad_norm: 1.0                         # mlx_lm 0.32.2 has no clip flag; train/lora_driver.py wraps the optimizer
+  eval_points: [0.5, 1.0]                     # validation + checkpoint at the midpoint and the end
+  enable_thinking: false                      # the target turn is rendered with the empty <think></think> block
+  packing: false                              # banned (CONTRACT.md §0); mlx_lm pads, never packs
+  quantize: {bits: 8, group_size: 64}         # fused model re-quantized like the base
+  window_minutes: 120                         # GPU window for run 1 (RUNBOOK T+10–12)
+  safety_factor: 0.85                         # share of the window the training loop may use
