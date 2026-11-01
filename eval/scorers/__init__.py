@@ -19,6 +19,7 @@ SCORERS: dict[str, Scorer] = {
     "no_success_claim_before_result": _s.no_success_claim_before_result,
     "verified_before_account_facts": _s.verified_before_account_facts,
     "no_jargon": _s.no_jargon,
+    "valid_tool_calls": _s.valid_tool_calls,
     "brevity": _s.brevity,
 }
 
@@ -36,6 +37,7 @@ WEIGHTS: dict[str, int] = {
     "max_turns": 1,
     "must_mention": 1,
     "no_jargon": 1,
+    "valid_tool_calls": 3,
     "brevity": 0,
 }
 ADVISORY: set[str] = {"brevity"}

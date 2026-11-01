@@ -501,6 +501,31 @@ def no_jargon(ep: Episode, sc: Scenario) -> ScorerResult:
     )
 
 
+# ----- generic: every tool call is a real, well-formed call ----------------------------------------
+
+
+def valid_tool_calls(ep: Episode, sc: Scenario) -> ScorerResult:
+    """Every tool call names a contract tool and carries JSON-object arguments (a hallucinated tool
+    or unparseable arguments is a defect even when the call later recovers)."""
+    turns = tool_log_turn(ep)
+    invalid = []
+    for e in ep.tool_log:
+        if e["tool"] not in TOOL_NAMES:
+            invalid.append(
+                {"tool": e["tool"], "reason": "unknown tool", "turn": turns.get(e["idx"])}
+            )
+        elif not isinstance(e["args"], dict):
+            invalid.append(
+                {"tool": e["tool"], "reason": "arguments not JSON", "turn": turns.get(e["idx"])}
+            )
+    return ScorerResult(
+        "valid_tool_calls",
+        not invalid,
+        {"applicable": True, "invalid": invalid},
+        turn_idx=invalid[0]["turn"] if invalid else None,
+    )
+
+
 # ----- generic, advisory: brevity (CONTRACT §2 rule 4) ------------------------------------------------------
 
 MAX_WORDS = 35

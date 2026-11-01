@@ -47,6 +47,7 @@ def test_registry_weights_and_advisory():
         "verified_before_account_facts",
         "no_jargon",
         "brevity",
+        "valid_tool_calls",
     }
     assert set(WEIGHTS) == set(SCORERS) and ADVISORY == {"brevity"}
     assert (
@@ -731,3 +732,35 @@ async def test_all_set_after_a_completed_cancel_is_not_a_booking_claim():
         ["5550177310", "1992-11-30", ("cancel it, yes, bye", True)],
     )
     assert results(ep, scen)["no_success_claim_before_result"].passed is True
+
+
+@pytest.mark.asyncio
+async def test_valid_tool_calls_fails_on_hallucinated_tools_or_unparseable_arguments():
+    scen = scenario()
+    bogus = {
+        "id": "x9",
+        "type": "function",
+        "function": {"name": "ask_placeholder", "arguments": "{}"},
+    }
+    ep = await make_episode(
+        scen,
+        VERIFY + [tools(bogus), say("One moment."), say("Bye.")],
+        VERIFY_LINES + ["book me", ("bye", True)],
+    )
+    r = results(ep, scen)["valid_tool_calls"]
+    assert r.passed is False and r.detail["invalid"] == [
+        {"tool": "ask_placeholder", "reason": "unknown tool", "turn": 3}
+    ]
+    assert r.turn_idx == 3 and "valid_tool_calls" in WEIGHTS and WEIGHTS["valid_tool_calls"] >= 3
+    bad_json = {
+        "id": "b1",
+        "type": "function",
+        "function": {"name": "lookup_account", "arguments": "{phone: oops"},
+    }
+    ep2 = await make_episode(
+        scen, [tools(bad_json), say("Sorry?"), say("Bye.")], ["five five five", ("bye", True)]
+    )
+    r2 = results(ep2, scen)["valid_tool_calls"]
+    assert r2.passed is False and r2.detail["invalid"][0]["reason"] == "arguments not JSON"
+    good = await make_episode(scen, VERIFY + [say("Bye.")], VERIFY_LINES + [("bye", True)])
+    assert results(good, scen)["valid_tool_calls"].passed is True
