@@ -309,20 +309,51 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
         if tl.last_audible_ms is None:
             result["notes"].append("no greeting heard"); return result
         while True:
-            # quiet -> human pause -> still quiet (the agent may have started a new sentence meanwhile)
-            while True:
-                if not await wait_listening(args.reply_timeout):
-                    result["notes"].append(f"turn {turn}: agent never finished speaking / never replied"); return result
-                await asyncio.sleep(args.pause)
-                if tl.agent_quiet(now_ms(), quiet_ms=args.quiet_ms):
-                    break
+            interrupt_info = None
+            if args.interrupt_turn and turn + 1 == args.interrupt_turn:
+                # cut into the agent's reply once it has been audibly speaking for interrupt_after_ms
+                t_end = time.perf_counter() + args.reply_timeout
+                while tl.agent_audible_for_ms(now_ms()) < args.interrupt_after_ms and time.perf_counter() < t_end:
+                    await asyncio.sleep(0.02)
+                spoke_before = tl.agent_audible_for_ms(now_ms())
+                interrupt_info = {"turn": turn + 1, "agent_spoke_ms_before": spoke_before, "transcript_idx": len(transcript)}
+                if spoke_before < args.interrupt_after_ms:
+                    result["notes"].append(f"turn {turn + 1}: agent reply too short to interrupt ({spoke_before} ms)")
+            else:
+                # quiet -> human pause -> still quiet (the agent may have started a new sentence meanwhile)
+                while True:
+                    if not await wait_listening(args.reply_timeout):
+                        result["notes"].append(f"turn {turn}: agent never finished speaking / never replied"); return result
+                    await asyncio.sleep(args.pause)
+                    if tl.agent_quiet(now_ms(), quiet_ms=args.quiet_ms):
+                        break
             line = await brain.next_line(transcript)
             if line is None:
                 break
             turn += 1
             result["turns"] = turn
             pcm = await asyncio.to_thread(tts_cached, line)
+
+            async def watch_stop() -> int | None:
+                """ms from the caller's first audible frame to the agent's last audible frame (a 400 ms gap = stopped)."""
+                while pump.first_audible_capture_ms is None:
+                    await asyncio.sleep(0.01)
+                onset = pump.first_audible_capture_ms
+                t_end = time.perf_counter() + 20
+                while time.perf_counter() < t_end:
+                    la = tl.last_audible_ms
+                    if la is not None and now_ms() - la > 400:
+                        return max(0, la - onset)
+                    await asyncio.sleep(0.02)
+                return None
+
+            stop_task = asyncio.create_task(watch_stop()) if interrupt_info else None
             eos = await pump.speak(pcm)
+            if stop_task is not None:
+                interrupt_info["agent_stop_ms"] = await stop_task
+                interrupt_info["line"] = line
+                result["interruption"] = interrupt_info
+                await emit("caller_interrupted", {k: v for k, v in interrupt_info.items() if k != "transcript_idx"}, turn)
             tl.caller_speech_end(eos)
             if pump.first_audible_capture_ms is not None:
                 caller_starts.append(pump.first_audible_capture_ms)
@@ -351,6 +382,9 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
         result["summary"] = summary
         result["latencies"] = tl.latencies()
         result["transcript"] = transcript
+        if result.get("interruption"):
+            idx = result["interruption"].pop("transcript_idx", 0)
+            result["interruption"]["transcript_after"] = transcript[idx:]
         if listener is not None:
             pairs = list(zip(caller_starts, heard_by_listener))
             result["loopback_ms"] = [h - s for s, h in pairs]
@@ -376,6 +410,8 @@ async def main() -> int:
     ap.add_argument("--quiet-ms", type=int, default=700, help="agent audio must be silent this long before the caller speaks")
     ap.add_argument("--no-db", action="store_true")
     ap.add_argument("--json", default=None, help="write per-call results to this file")
+    ap.add_argument("--interrupt-turn", type=int, default=0, help="caller turn that cuts into the agent's reply instead of waiting for quiet (0 = never)")
+    ap.add_argument("--interrupt-after-ms", type=int, default=2000, help="how long the agent must have been audibly speaking before the caller cuts in")
     ap.add_argument("--listener", action="store_true", help="second participant measures capture->heard delay of the caller's own speech (transport + receive buffer)")
     ap.add_argument("--dump-frames", action="store_true", help="record (ts_ms, samples, rms) of every agent audio frame into the JSON")
     args = ap.parse_args()
@@ -407,6 +443,11 @@ async def main() -> int:
     print(f"\ncalls={len(results)} ok={sum(r['ok'] for r in results)} concurrency={args.concurrency} script={args.script}")
     if all_lat:
         print(f"end of caller speech -> agent first audio: p50 {pct(all_lat, 0.5):.0f} ms  p95 {pct(all_lat, 0.95):.0f} ms  max {max(all_lat):.0f} ms  n={len(all_lat)}  (target p50 ≤ 1000, p95 ≤ 1600)")
+    for r in results:
+        if r.get("interruption"):
+            i = r["interruption"]
+            print(f"interruption [{r['call_id']}]: caller cut in after the agent had spoken {i['agent_spoke_ms_before']} ms; agent audio stopped {i.get('agent_stop_ms')} ms after the caller's onset; "
+                  f"heard after it: {[t for role, t in i.get('transcript_after', []) if role == 'caller'][:3]}")
     disp = [r["dispatch_ms"] for r in results if r.get("dispatch_ms") is not None]
     if disp:
         print(f"agent joined after: p50 {pct(disp, 0.5):.0f} ms  max {max(disp):.0f} ms")
