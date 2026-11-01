@@ -138,16 +138,28 @@ async def test_a_regeneration_for_the_same_user_turn_is_not_a_repeat():
     guard.begin_turn(1)
     assert await collect(guarded_stream(agen(line), guard, no_loop)) == line  # final transcript: same turn, same line, not a repeat
     assert guard.repeats == 0
+    calls = []
+
+    async def on_loop(action, repeated):
+        calls.append(action)
+
     guard.begin_turn(2)
-    assert await collect(guarded_stream(agen(line), guard, no_loop)) == [REPHRASE]  # a new user turn with the same line is a repeat
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE]  # a new user turn with the same line is a repeat
+    assert calls == ["rephrase"]
 
 
 async def test_a_regeneration_restores_the_repeat_count_of_the_turn_start():
     guard = LoopGuard()
     line = [Chunk("Which day would you like?")]
+    calls = []
+
+    async def on_loop(action, repeated):
+        calls.append(action)
+
     guard.begin_turn(1)
     await collect(guarded_stream(agen(line), guard, no_loop))
     guard.begin_turn(2)
-    assert await collect(guarded_stream(agen(line), guard, no_loop)) == [REPHRASE] and guard.repeats == 1
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE] and guard.repeats == 1
     guard.begin_turn(2)  # regenerated for the same turn: counts from the turn start again, not a second repeat
-    assert await collect(guarded_stream(agen(line), guard, no_loop)) == [REPHRASE] and guard.repeats == 1
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE] and guard.repeats == 1
+    assert calls == ["rephrase", "rephrase"]  # never "handoff": the regeneration did not advance the count
