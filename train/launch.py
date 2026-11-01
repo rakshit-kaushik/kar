@@ -258,7 +258,7 @@ def ledger_rows(ctx: dict, metrics: dict, fuse_meta: dict | None, status: str) -
     def add(item, qty, unit, measured=True, note=None):
         if qty is not None:
             rows.append({"item": item, "qty": qty, "unit": unit, "measured": measured, "note": note})
-    add("train_wall_time", metrics.get("wall_seconds"), "s")
+    add("train_wall_time", metrics.get("wall_seconds"), "seconds")
     add("train_iters", metrics.get("iters"), "micro-steps")
     add("train_tokens_per_sec_total", metrics.get("total_tokens_per_second"), "tokens/s", note="prompt+target tokens, from it/s x mean example length")
     add("train_tokens_per_sec_loss", metrics.get("loss_tokens_per_second"), "tokens/s", note="mlx_lm tokens/s: loss (target) tokens only")
@@ -269,8 +269,8 @@ def ledger_rows(ctx: dict, metrics: dict, fuse_meta: dict | None, status: str) -
     add("val_loss_initial", metrics.get("initial_val_loss"), "nats")
     add("val_loss_final", metrics.get("final_val_loss"), "nats")
     if fuse_meta:
-        add("fuse_quantize_wall_time", fuse_meta.get("fuse_seconds"), "s")
-    add("gpu_hours_training", (metrics.get("wall_seconds") or 0) / 3600.0 if metrics.get("wall_seconds") else None, "h",
+        add("fuse_quantize_wall_time", fuse_meta.get("fuse_seconds"), "seconds")
+    add("gpu_hours_training", (metrics.get("wall_seconds") or 0) / 3600.0 if metrics.get("wall_seconds") else None, "hours",
         note="unit_cost left for session D's machine-hour rate")
     return rows
 
