@@ -135,6 +135,19 @@ def cost_tables(con, rates: dict, eval_ids: list[str]) -> str:
     return "\n\n".join(parts)
 
 
+def rehearsal_table(con) -> str:
+    """Pass counts per demo scenario from scripts/demo_check.py's ledger rows (rehearsal.<scenario>.pass / .runs)."""
+    names = ("ordinary", "correction", "timeout", "interruption", "handoff")
+    rows = []
+    for run_id, m in sorted(ledger_metrics(con, "rehearsal-%").items()):
+        items = {k: v for k, v in m.items() if k.startswith("rehearsal.")}
+        if not items:
+            continue
+        cells = [f"{int(items[f'rehearsal.{s}.pass'])}/{int(items[f'rehearsal.{s}.runs'])}" if items.get(f"rehearsal.{s}.runs") else "-" for s in names]
+        rows.append([run_id] + cells)
+    return md_table(["rehearsal run (model, stamp)"] + list(names), rows) if rows else "_no rehearsal yet_"
+
+
 def routing_table(con) -> str:
     rows = []
     for path in sorted(glob.glob(os.path.join(ART, "runs", "routing-*zeroshot*", "summary.md"))):
@@ -182,6 +195,7 @@ def main() -> int:
                "## Load test (HTTP level)", load_table(con), "",
                "## Cost", cost_tables(con, rates, eval_ids), "",
                "## Ticket routing (100 hand-checked test tickets)", routing_table(con), "",
+               "## Demo rehearsal (simulated caller, five scripted scenarios; pass = expected final state, no claim without a tool result, no ids spoken)", rehearsal_table(con), "",
                "## Targets vs measured", targets_table(con), ""]
     out = pathlib.Path(args.out or os.path.join(ART, "runs", f"writeup-{time.strftime('%m%d-%H%M')}.md"))
     out.parent.mkdir(parents=True, exist_ok=True)

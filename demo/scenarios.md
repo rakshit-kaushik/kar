@@ -14,6 +14,12 @@ How to run each scenario:
   (`--interrupt-turn 4 --interrupt-after-ms 2500` for the interruption; the fault spec goes in `--prefix` for the timeout).
 - **Replay through any model** (text, side by side): `uv run python scripts/replay.py --turns-file demo/turns/<name>.json --model base=... --model adapter=... --model hosted=...`
 - Latency per stage: `uv run python scripts/g1_report.py --like 'demo-<name>%'`; cost: `uv run python scripts/cost_report.py --like 'demo-%'`.
+- **Unattended rehearsal** (the plan's T+22–24 run): `RUNS=5 scripts/rehearsal.sh` under lock S (~50 min for 25 calls): per scenario the
+  simulated caller with `--record-dir` (two-channel wav per call, left caller / right agent), `scripts/demo_check.py` (PASS/FAIL per call
+  against the final-state column below, plus no success claim without a tool result, no ids spoken, no structural text), g1_report latency
+  and cost_report into the ledger under `rehearsal-<model>-<stamp>`; output `$R3_ARTIFACTS/runs/rehearsal-<model>-<stamp>/`.
+- The interruption cut-in defaults to caller turn 5 (the read-back, `INT_TURN`): the run-1 candidate answers the slot question in one
+  sentence, too short to cut into at turn 4 (measured Nov 1 04:36). A recording made by the simulated caller is labelled **recorded**.
 
 | # | Scenario | Caller lines | What the agent must do | Final state | Must never |
 |---|---|---|---|---|---|
