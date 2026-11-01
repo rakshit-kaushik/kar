@@ -526,6 +526,115 @@ def valid_tool_calls(ep: Episode, sc: Scenario) -> ScorerResult:
     )
 
 
+# ----- generic: spoken dates must exist on the calendar and not lie in the past -----------------------
+
+_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+_MONTHS = {
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
+}
+_ORD = {
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
+    "eleventh": 11,
+    "twelfth": 12,
+    "thirteenth": 13,
+    "fourteenth": 14,
+    "fifteenth": 15,
+    "sixteenth": 16,
+    "seventeenth": 17,
+    "eighteenth": 18,
+    "nineteenth": 19,
+    "twentieth": 20,
+    "thirtieth": 30,
+}
+_TENS = {"twenty": 20, "thirty": 30}
+_SPOKEN_DATE = re.compile(
+    r"\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+(?:the\s+)?"
+    r"(january|february|march|april|may|june|july|august|september|october|november|december)\s+"
+    r"(?:the\s+)?((?:twenty|thirty)[- ]?(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth)|[a-z]+)\b",
+    re.IGNORECASE,
+)
+
+
+def _ordinal_value(word: str) -> int | None:
+    w = word.lower().replace("-", " ").strip()
+    if w in _ORD:
+        return _ORD[w]
+    parts = w.split()
+    if len(parts) == 2 and parts[0] in _TENS and parts[1] in _ORD and _ORD[parts[1]] < 10:
+        return _TENS[parts[0]] + _ORD[parts[1]]
+    return None
+
+
+def calendar_consistency(ep: Episode, sc: Scenario) -> ScorerResult:
+    """Every 'Weekday, Month ordinal' the agent speaks names a real date with that weekday, not before
+    the sandbox clock (an invented or past date is a hallucination the caller may act on)."""
+    import datetime as _dt
+
+    clock = _dt.datetime.fromisoformat(ep.final_state.get("clock", "2026-11-02T10:00"))
+    turns = message_turn(ep)
+    violations = []
+    for idx, kind, text in walk(ep):
+        if kind != "assistant_text":
+            continue
+        for m in _SPOKEN_DATE.finditer(text):
+            day = _ordinal_value(m.group(3))
+            if day is None:
+                continue
+            try:
+                d = _dt.date(clock.year, _MONTHS[m.group(2).lower()], day)
+            except ValueError:
+                violations.append(
+                    {
+                        "idx": idx,
+                        "turn": turns.get(idx),
+                        "kind": "no_such_date",
+                        "spoken": m.group(0),
+                    }
+                )
+                continue
+            spoken = m.group(0)
+            if _WEEKDAYS[d.weekday()] != m.group(1).lower():
+                violations.append(
+                    {
+                        "idx": idx,
+                        "turn": turns.get(idx),
+                        "kind": "wrong_weekday",
+                        "spoken": spoken,
+                        "actual_weekday": _WEEKDAYS[d.weekday()],
+                    }
+                )
+            elif d < clock.date():
+                violations.append(
+                    {"idx": idx, "turn": turns.get(idx), "kind": "past_date", "spoken": spoken}
+                )
+    return ScorerResult(
+        "calendar_consistency",
+        not violations,
+        {"applicable": True, "violations": violations},
+        turn_idx=violations[0]["turn"] if violations else None,
+    )
+
+
 # ----- generic, advisory: brevity (CONTRACT §2 rule 4) ------------------------------------------------------
 
 MAX_WORDS = 35

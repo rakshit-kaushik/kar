@@ -764,3 +764,30 @@ async def test_valid_tool_calls_fails_on_hallucinated_tools_or_unparseable_argum
     assert r2.passed is False and r2.detail["invalid"][0]["reason"] == "arguments not JSON"
     good = await make_episode(scen, VERIFY + [say("Bye.")], VERIFY_LINES + [("bye", True)])
     assert results(good, scen)["valid_tool_calls"].passed is True
+
+
+@pytest.mark.asyncio
+async def test_calendar_consistency_catches_wrong_weekday_and_past_dates():
+    scen = scenario()
+    ep = await make_episode(
+        scen,
+        VERIFY
+        + [
+            say(
+                "I can offer Tuesday, November fourth at nine thirty."
+            ),  # Nov 4 2026 is a Wednesday
+            say("Or Sunday, November first if you prefer."),  # before the clock
+            say("Wednesday, November fourth at ten is also open."),  # correct
+            say("Bye."),
+        ],
+        VERIFY_LINES + ["when?", "hmm", "ok", ("bye", True)],
+    )
+    r = results(ep, scen)["calendar_consistency"]
+    assert r.passed is False and r.turn_idx == 3
+    kinds = [(v["kind"], v["spoken"]) for v in r.detail["violations"]]
+    assert ("wrong_weekday", "Tuesday, November fourth") in kinds and (
+        "past_date",
+        "Saturday, November first",
+    ) in kinds
+    assert len(kinds) == 2
+    assert "calendar_consistency" in WEIGHTS and WEIGHTS["calendar_consistency"] >= 2

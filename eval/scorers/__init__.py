@@ -20,6 +20,7 @@ SCORERS: dict[str, Scorer] = {
     "verified_before_account_facts": _s.verified_before_account_facts,
     "no_jargon": _s.no_jargon,
     "valid_tool_calls": _s.valid_tool_calls,
+    "calendar_consistency": _s.calendar_consistency,
     "brevity": _s.brevity,
 }
 
@@ -38,6 +39,7 @@ WEIGHTS: dict[str, int] = {
     "must_mention": 1,
     "no_jargon": 1,
     "valid_tool_calls": 3,
+    "calendar_consistency": 2,
     "brevity": 0,
 }
 ADVISORY: set[str] = {"brevity"}
