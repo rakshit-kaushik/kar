@@ -75,6 +75,20 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Fallback on the fly: `scripts/gpu_flip.sh hosted`.
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
 
+### Nov 1 05:05: filler line before tool-call turns (reviewer decision on the G3 numbers)
+- Tool-call turns on the candidate have no audio for ~2 s (model writes the tool call 748 ms, tool runs, model speaks the result,
+  TTS). The agent now says `AGENT_FILLER` ("One moment.") the instant a tool starts: once per caller turn, never while it is
+  already speaking, never on spoken turns, not added to the chat context (the model never sees it). services/agent/filler.py,
+  hook in services/tools/livekit_tools.py (`on_tool_start`), wired in services/agent/main.py (`_tool_start`). Empty
+  AGENT_FILLER switches it off; agent-only restart to apply (`scripts/restart.sh --agent-only`).
+- LiveKit 1.8.10 ordering checked in site-packages: the reply's speech handle marks generation done before the tool task is
+  awaited (agent_activity.py 4023 vs 4061), so a say() from inside a tool plays while the tool runs and the tool reply follows.
+- Every filler logs a `filler_start` turn event (tool, text). g1_report shows "filler before tool calls: n turns · filler audible ·
+  first reply audible" (agent clock) under "first audio heard", which includes the filler; ledger metrics eos_to_filler_audible,
+  eos_to_reply_audible, filler_turns. The report also labels the TTS first-byte line with the vendor from call_end.tts_vendor.
+- Live test pending the first GPU-free slot (not during T's eval batch): `CALLS=3 TAG=filler scripts/measure_block.sh`, compare
+  eos→first audio heard on tool-call turns with the 04:32 block (g1-sim-r3-voice-206506525c).
+
 ### Nov 1 04:32-04:38: candidate r3-voice-206506525c, clean numbers (GPU free, Deepgram TTS, 3 calls + 1 interruption)
 - eos→first audio heard p50 1466 / p95 2592 ms (base 3060 / 12006; targets 1000 / 1600); turn-taking overhead p50 494 ms;
   LLM TTFT spoken turns p50 164 ms (base 722), tool-call turns p50 748 ms (base 1013); trie "reusing 1707 tokens, prefilling 29
