@@ -164,3 +164,78 @@ def test_frontload_decline_profile_has_both_variants():
         ]
         assert s["script"] and "never mind" in s["script"][0]["do"]
     assert all(not validate_against_seed(parse_scenario(d, d["id"]), sb) for d in out)
+
+
+def test_v51_profile_covers_the_five_data_gaps():
+    out = generate(60, seed=51, profile="v51")
+    assert len(out) == 60
+    sb = Sandbox()
+    assert all(not validate_against_seed(parse_scenario(d, d["id"]), sb) for d in out)
+    by = {
+        k: [s for s in out if s["id"].startswith(f"gen_{k}_")]
+        for k in (
+            "misstate_retry",
+            "relative_booking",
+            "two_intents_confirm",
+            "self_correct_inline",
+            "card_already_blocked",
+        )
+    }
+    assert all(len(v) >= 5 for v in by.values()), {k: len(v) for k, v in by.items()}
+    for s in by["misstate_retry"]:
+        steps = s["expect"]["tool_calls"]
+        assert steps[0]["tool"] == "lookup_account" and steps[0]["ok"] is False
+        assert steps[1]["tool"] == "lookup_account" and steps[1]["ok"] is True
+        assert steps[0]["args"]["date_of_birth"] != steps[1]["args"]["date_of_birth"]
+        assert steps[0]["args"]["phone"] == steps[1]["args"]["phone"]
+        # the sandbox really answers not_verified to the mis-stated date of birth
+        assert sb.call("lookup_account", steps[0]["args"])["error"] == "not_verified"
+        assert s["expect"]["handoff"]["required"] is False and "could not verify" in s["goal"]
+        sb.reset()
+    for s in by["relative_booking"]:
+        goal = s["goal"].lower()
+        assert "say the day only as" in goal
+        assert "tomorrow" in goal or "this " in goal or "next " in goal or " of november" in goal
+        assert [t["tool"] for t in s["expect"]["tool_calls"]] == [
+            "lookup_account",
+            "check_availability",
+            "book_appointment",
+        ]
+    for s in by["two_intents_confirm"]:
+        tools = [t["tool"] for t in s["expect"]["tool_calls"]]
+        assert (
+            tools[:3] == ["lookup_account", "check_availability", "book_appointment"]
+            and tools[3] == "create_ticket"
+        )
+        assert (
+            s["expect"]["final_state"]["appointments_new"] and s["expect"]["final_state"]["tickets"]
+        )
+        if s["expect"]["final_state"]["tickets"][0]["category"] == "card_lost_stolen":
+            assert tools[-1] == "request_handoff" and s["expect"]["handoff"]["required"] is True
+        assert s["script"] and "and also" in s["script"][0]["do"]
+    for s in by["self_correct_inline"]:
+        assert "no wait" in s["goal"] and s["expect"]["corrections_hold"]
+        held = s["expect"]["corrections_hold"][0]
+        booked = s["expect"]["final_state"]["appointments_new"][0]
+        assert booked[held["field"]] == held["value"]
+    for s in by["card_already_blocked"]:
+        assert "already blocked" in s["goal"]
+        tools = [t["tool"] for t in s["expect"]["tool_calls"]]
+        assert tools == ["lookup_account", "create_ticket", "request_handoff"]
+        assert s["expect"]["final_state"]["tickets"][0]["category"] == "card_lost_stolen"
+        assert s["expect"]["handoff"]["required"] is True
+
+
+def test_relative_date_phrases_from_the_seed_clock():
+    from datetime import date
+
+    from data.gen.scenarios import relative_date
+
+    today = date(2026, 11, 2)  # Monday
+    assert relative_date(date(2026, 11, 3), today) == "tomorrow"
+    assert relative_date(date(2026, 11, 5), today) == "this thursday"
+    assert relative_date(date(2026, 11, 10), today) == "next tuesday"
+    assert (
+        relative_date(date(2026, 11, 14), today, prefer_ordinal=True)
+        == "the fourteenth of november"
+    )

@@ -101,6 +101,38 @@ def spoken_year(y: int) -> str:
     return year_words(y)
 
 
+MONTHS = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+]
+
+
+def spoken_dob(d: date) -> str:
+    return f"{MONTHS[d.month - 1]} {ordinal(d.day)} {spoken_year(d.year)}"
+
+
+def relative_date(d: date, today: date, prefer_ordinal: bool = False) -> str:
+    """How a caller says a date without naming it: 'tomorrow', 'this thursday', 'next tuesday', or
+    'the fourteenth of november' (the test callers always said 'Weekday, November Nth')."""
+    if prefer_ordinal or (d - today).days > 13:
+        return f"the {ordinal(d.day)} of {MONTHS[d.month - 1]}"
+    if (d - today).days == 1:
+        return "tomorrow"
+    this_week_end = today + timedelta(days=6 - today.weekday())
+    word = WEEKDAYS[d.weekday()].lower()
+    return f"this {word}" if d <= this_week_end else f"next {word}"
+
+
 def test_signatures(test_dir: str | Path = TEST_DIR) -> set[tuple]:
     sigs: set[tuple] = set()
     for s in load_scenarios(test_dir):
@@ -831,6 +863,213 @@ class _Gen:
             inject=inject,
         )
 
+    # ----- v5.1 slice: the five data gaps the run-1 failure labels named ----------------------------
+    def _goal_after_verification(self, cust):
+        """A short follow-on goal: a status question or a booking; returns (goal_text, steps, fs, forbidden)."""
+        if self.sb.customer_appointments(cust.customer_id) and self.rng.random() < 0.5:
+            return (
+                "ask when and where your upcoming appointment is; once told, say thanks and hang up",
+                [],
+                {},
+                WRITE_TOOLS,
+            )
+        parts = self.book_parts(cust)
+        if not parts:
+            return None
+        service, b, d, hhmm, _slot, steps, fs = parts
+        return (
+            f"book a {SERVICE_WORDS[service]} at {BRANCH_WORDS[b]} on {spoken_date(d)} at {spoken_time(hhmm)} (available) and confirm the read-back",
+            steps[1:],
+            fs,
+            None,
+        )
+
+    def misstate_retry(self):
+        cust = self.customer()
+        follow = self._goal_after_verification(cust)
+        if not follow:
+            return None
+        goal_text, steps, fs, forbidden = follow
+        true_dob = cust.date_of_birth
+        wrong = (
+            true_dob.replace(month=true_dob.month % 12 + 1)
+            if self.rng.random() < 0.5
+            else true_dob.replace(day=(true_dob.day % 20) + 1)
+        )
+        if wrong == true_dob:
+            wrong = true_dob.replace(
+                day=true_dob.day + 1 if true_dob.day < 28 else true_dob.day - 1
+            )
+        expect = {
+            "tool_calls": [
+                {
+                    "tool": "lookup_account",
+                    "args": {"phone": cust.phone, "date_of_birth": wrong.isoformat()},
+                    "ok": False,
+                },
+                self.lookup_step(cust),
+                *steps,
+            ],
+            "final_state": fs,
+            "max_turns": 14,
+            "handoff": {"required": False, "reason": None},
+        }
+        if forbidden:
+            expect["forbidden_tools"] = forbidden
+        return self.base(
+            "correction",
+            f"{cust.first_name} misremembers the date of birth once",
+            "One not_verified: the agent asks again instead of transferring; second lookup verifies",
+            self.caller(cust, extra={"date_of_birth_first_attempt": spoken_dob(wrong)}),
+            f"When asked for your date of birth, first say '{spoken_dob(wrong)}' (you misremember). When the agent says it could not verify you and asks again, say the correct one, '{spoken_dob(true_dob)}'. Then {goal_text}.",
+            expect,
+            script=[
+                {
+                    "trigger": "agent asks for your date of birth the first time",
+                    "do": f"say '{spoken_dob(wrong)}'",
+                },
+                {
+                    "trigger": "agent says it could not verify you or asks for the date of birth again",
+                    "do": f"say '{spoken_dob(true_dob)}'",
+                },
+            ],
+        )
+
+    def relative_booking(self):
+        cust = self.customer()
+        parts = self.book_parts(cust)
+        if not parts:
+            return None
+        service, b, d, hhmm, _slot, steps, fs = parts
+        when = relative_date(d, self.sb.today, prefer_ordinal=self.rng.random() < 0.3)
+        return self.base(
+            "ordinary",
+            f"{cust.first_name} books for '{when}'",
+            "Relative date: the agent resolves it against today's date and never asks 'which day'",
+            self.caller(cust),
+            f"Book a {SERVICE_WORDS[service]} at {BRANCH_WORDS[b]} {when} at {spoken_time(hhmm)}. Say the day only as '{when}', never as a calendar date; if the agent reads back {spoken_date(d)} that is right, confirm it.",
+            {"tool_calls": steps, "final_state": fs, "max_turns": 12},
+        )
+
+    def two_intents_confirm(self):
+        cust = self.customer()
+        parts = self.book_parts(cust)
+        if not parts:
+            return None
+        service, b, d, hhmm, _slot, steps, fs = parts
+        if (
+            self.rng.random() < 0.5
+            and ("ticket", cust.customer_id, "card_lost_stolen") not in self.sigs
+        ):
+            card = self.sb.customer_cards(cust.customer_id)[0].card_last4
+            second = f"and also i lost my debit card ending {spell_digits(card)}"
+            cat, handoff = "card_lost_stolen", True
+            tail = "Agree to the lost-card ticket and accept the transfer to a banker; do not mention strange charges."
+        else:
+            cats = [c for c in TICKET_GOALS if ("ticket", cust.customer_id, c) not in self.sigs]
+            cat, handoff = self.rng.choice(cats), False
+            second = f"and also i want to {TICKET_GOALS[cat]}"
+            tail = "Agree when the agent offers a ticket for the second thing, confirm its read-back, then hang up."
+        extra = [
+            {
+                "tool": "create_ticket",
+                "args": {"customer_id": cust.customer_id, "category": cat},
+                "ok": True,
+            }
+        ]
+        if handoff:
+            extra.append({"tool": "request_handoff", "args": {}, "ok": True})
+        fs["tickets"] = [{"customer_id": cust.customer_id, "category": cat}]
+        return self.base(
+            "multi_intent",
+            f"{cust.first_name} adds a second request to the booking confirmation",
+            "Second intent attached to the 'yes': booking completes, then the ticket; neither is dropped",
+            self.caller(cust),
+            f"Book a {SERVICE_WORDS[service]} at {BRANCH_WORDS[b]} on {spoken_date(d)} at {spoken_time(hhmm)}. When the agent reads the booking back and asks you to confirm, answer in one breath: 'yes go ahead, {second}'. {tail}",
+            {
+                "tool_calls": steps + extra,
+                "final_state": fs,
+                "max_turns": 16,
+                "handoff": {"required": handoff, "reason": None},
+            },
+            script=[
+                {
+                    "trigger": "agent reads the booking back and asks to confirm",
+                    "do": f"say 'yes go ahead, {second}' in one utterance",
+                }
+            ],
+        )
+
+    def self_correct_inline(self):
+        cust = self.customer()
+        parts = self.book_parts(cust)
+        if not parts:
+            return None
+        service, b, d, hhmm, slot, steps, fs = parts
+        if self.rng.random() < 0.5:
+            others = [x for x in BRANCH_WORDS if x != b]
+            wrong = self.rng.choice(others)
+            held = {"field": "branch_id", "value": b}
+            inline = f"{BRANCH_WORDS[wrong]}, no wait, {BRANCH_WORDS[b]}"
+            ask = "branch"
+        else:
+            slots = [x for x in self.sb.open_slots(b, d) if x != hhmm]
+            if not slots:
+                return None
+            wrong_hhmm = self.rng.choice(slots)
+            held = {"field": "slot_start", "value": slot}
+            inline = f"{spoken_time(wrong_hhmm)}, no wait, {spoken_time(hhmm)}"
+            ask = "time"
+        return self.base(
+            "correction",
+            f"{cust.first_name} corrects the {ask} mid-sentence",
+            "In-utterance self-correction: the value after 'no wait' is the one checked, booked and read back",
+            self.caller(cust),
+            f"Book a {SERVICE_WORDS[service]} at {BRANCH_WORDS[b]} on {spoken_date(d)} at {spoken_time(hhmm)}. When you give the {ask}, say it as '{inline}' in one utterance. Confirm the read-back only if it has {BRANCH_WORDS[b] if ask == 'branch' else spoken_time(hhmm)}.",
+            {
+                "tool_calls": steps,
+                "final_state": fs,
+                "max_turns": 14,
+                "corrections_hold": [held],
+            },
+            script=[{"trigger": f"agent asks for the {ask}", "do": f"say '{inline}'"}],
+        )
+
+    def card_already_blocked(self):
+        cust = self.customer()
+        if ("ticket", cust.customer_id, "card_lost_stolen") in self.sigs:
+            return None
+        card = self.sb.customer_cards(cust.customer_id)[0].card_last4
+        when = self.rng.choice(["yesterday", "last night", "this morning", "on Saturday"])
+        return self.base(
+            "needs_person",
+            f"{cust.first_name} already blocked the lost card and wants a replacement",
+            "Lost card already blocked in the app: card_lost_stolen ticket then handoff; no block claim, no fraud",
+            self.caller(cust),
+            f"You lost your debit card ending {spell_digits(card)} {when} and already blocked it yourself in the app. You want a replacement card sent. No strange charges, do not mention any. Agree to the ticket and accept the transfer to a banker.",
+            {
+                "tool_calls": [
+                    self.lookup_step(cust),
+                    {
+                        "tool": "create_ticket",
+                        "args": {"customer_id": cust.customer_id, "category": "card_lost_stolen"},
+                        "ok": True,
+                    },
+                    {"tool": "request_handoff", "args": {}, "ok": True},
+                ],
+                "handoff": {"required": True, "reason": None},
+                "forbidden_tools": [
+                    "book_appointment",
+                    "reschedule_appointment",
+                    "cancel_appointment",
+                ],
+                "final_state": {
+                    "tickets": [{"customer_id": cust.customer_id, "category": "card_lost_stolen"}]
+                },
+                "max_turns": 12,
+            },
+        )
+
     def frontload_decline(self):
         """Two live-call slices (session S): the caller front-loads every detail, or leaves at the read-back."""
         cust = self.customer()
@@ -906,7 +1145,9 @@ def _batch_letters(i: int) -> str:
 
 def _quota(n: int, weights: dict[str, float]) -> list[str]:
     """Family for each of n slots, proportional to weights (largest remainder), in a fixed order."""
-    fams = [f for f in FAMILIES if weights.get(f, 0) > 0]
+    fams = [f for f in FAMILIES if weights.get(f, 0) > 0] + [
+        f for f in weights if f not in FAMILIES and weights[f] > 0
+    ]  # family names first, then profile-specific builder keys, in a fixed order
     total = sum(weights[f] for f in fams)
     exact = {f: n * weights[f] / total for f in fams}
     counts = {f: int(exact[f]) for f in fams}
@@ -952,9 +1193,24 @@ def generate(
     if profile == "frontload_decline":
         builders["ordinary"] = _Gen.frontload_decline
         mix = mix or {"ordinary": 1}
+    if profile == "v51":  # the five data gaps from run 1's failure labels, keyed by builder
+        builders = {
+            "misstate_retry": _Gen.misstate_retry,
+            "relative_booking": _Gen.relative_booking,
+            "two_intents_confirm": _Gen.two_intents_confirm,
+            "self_correct_inline": _Gen.self_correct_inline,
+            "card_already_blocked": _Gen.card_already_blocked,
+        }
+        mix = mix or {
+            "misstate_retry": 60,
+            "relative_booking": 25,
+            "two_intents_confirm": 30,
+            "self_correct_inline": 20,
+            "card_already_blocked": 20,
+        }
     weights = mix or dict.fromkeys(FAMILIES, 1)
     out: list[dict] = []
-    counters: dict[str, int] = dict.fromkeys(FAMILIES, 0)
+    counters: dict[str, int] = dict.fromkeys(weights, 0)
     goals: set[str] = set()
     for fam in _quota(n, weights):
         for _ in range(60):
