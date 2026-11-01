@@ -15,7 +15,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import psycopg  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
-from services.demo.check import SCENARIOS, call_summary, check_call  # noqa: E402, unfinished
+from services.demo.check import SCENARIOS, call_summary, check_call, unfinished  # noqa: E402
 
 load_dotenv(pathlib.Path(__file__).resolve().parents[1] / ".env")
 
