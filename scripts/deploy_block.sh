@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lane S hand-back block (≤15 min under lock S): deploy a fused candidate, probe, verify the prefix trie hits on a 2-turn
 # request pair, 3 simulated calls + 1 interruption call, reports + cost into the ledger, release.
-# Usage: scripts/deploy_block.sh $R3_ARTIFACTS/models/r3-voice-<hash> [CALLS=3]
+# Usage: scripts/deploy_block.sh $R3_ARTIFACTS/models/r3-voice-<hash> [CALLS=3]   [INT_TURN=5: caller turn that cuts into the agent (5 = the read-back)]
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; set -a; . ./.env; set +a
 ART="${R3_ARTIFACTS:-$HOME/r3-artifacts}"; DIR="${1:?model dir}"; ID="$(basename "$DIR")"; CALLS="${CALLS:-3}"
@@ -37,7 +37,7 @@ PY
 grep -E "Prefix trie cache HIT|System KV cache" "$ART/logs/server.log" | tail -3 | tee -a "$LOG"
 step "$CALLS sequential simulated calls + 1 interruption call on $ID"
 run uv run python scripts/sim_caller.py --calls "$CALLS" --concurrency 1 --prefix "r3-dep-$BATCH" --json "$OUT/calls.json"
-run uv run python scripts/sim_caller.py --calls 1 --interrupt-turn 4 --interrupt-after-ms 2500 --prefix "r3-depint-$BATCH" --json "$OUT/interrupt.json"
+run uv run python scripts/sim_caller.py --calls 1 --interrupt-turn "${INT_TURN:-5}" --interrupt-after-ms 2500 --prefix "r3-depint-$BATCH" --json "$OUT/interrupt.json"
 run uv run python scripts/g1_report.py --like "r3-dep-$BATCH-%" --ledger --run-id "g1-sim-$ID" --note "candidate $ID, sequential simulated calls, trie fix live" | tee "$OUT/g1_report.txt"
 run uv run python scripts/g1_report.py --like "r3-depint-$BATCH-%" --ledger --run-id "g1-interrupt-$ID" --note "candidate $ID interruption test" | tee "$OUT/interrupt_report.txt"
 run uv run python scripts/cost_report.py --like "r3-dep-$BATCH-%" --ledger --run-id "cost-$ID"
