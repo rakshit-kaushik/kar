@@ -142,3 +142,25 @@ def test_double_fault_short_profile_uses_cancel_and_reschedule_only():
         assert [i["call_index"] for i in s["inject"]] == [1, 2]
         assert not s.get("script")
         assert not validate_against_seed(parse_scenario(s, s["id"]), sb)
+
+
+def test_frontload_decline_profile_has_both_variants():
+    out = generate(40, seed=41, profile="frontload_decline")
+    assert len(out) == 40 and all(s["family"] == "ordinary" for s in out)
+    front = [s for s in out if "in one sentence" in s["goal"]]
+    decline = [s for s in out if "never mind" in s["goal"]]
+    assert len(front) >= 12 and len(decline) >= 12 and len(front) + len(decline) == 40
+    sb = Sandbox()
+    for s in front:
+        tools = [t["tool"] for t in s["expect"]["tool_calls"]]
+        assert tools == ["lookup_account", "check_availability", "book_appointment"]
+        assert s["expect"]["final_state"]["appointments_new"] and s["expect"]["max_turns"] <= 10
+    for s in decline:
+        assert "book_appointment" in s["expect"]["forbidden_tools"]
+        assert s["expect"]["final_state"] == {"no_other_changes": True}
+        assert [t["tool"] for t in s["expect"]["tool_calls"]] == [
+            "lookup_account",
+            "check_availability",
+        ]
+        assert s["script"] and "never mind" in s["script"][0]["do"]
+    assert all(not validate_against_seed(parse_scenario(d, d["id"]), sb) for d in out)

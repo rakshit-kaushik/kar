@@ -831,6 +831,45 @@ class _Gen:
             inject=inject,
         )
 
+    def frontload_decline(self):
+        """Two live-call slices (session S): the caller front-loads every detail, or leaves at the read-back."""
+        cust = self.customer()
+        parts = self.book_parts(cust)
+        if not parts:
+            return None
+        service, b, d, hhmm, _slot, steps, fs = parts
+        what = f"a {SERVICE_WORDS[service]} at {BRANCH_WORDS[b]} on {spoken_date(d)} at {spoken_time(hhmm)}"
+        if self.rng.random() < 0.5:
+            return self.base(
+                "ordinary",
+                f"{cust.first_name} gives every detail at once",
+                "Caller front-loads service, branch, day and time: agent checks availability without re-asking",
+                self.caller(cust),
+                f"After verification, say in one sentence: 'I'd like to book {what}'. Then answer only what the agent "
+                "asks; the time is available, so insist on it and confirm the read-back.",
+                {"tool_calls": steps, "final_state": fs, "max_turns": 10},
+            )
+        return self.base(
+            "ordinary",
+            f"{cust.first_name} leaves at the read-back",
+            "No yes after the read-back: nothing is booked and the closing must not claim a booking",
+            self.caller(cust),
+            f"Book {what}. When the agent reads the booking back and asks you to confirm, say 'actually never mind, "
+            "i'll call back later, bye' and hang up without saying yes.",
+            {
+                "tool_calls": steps[:2],
+                "forbidden_tools": ["book_appointment"],
+                "final_state": {},
+                "max_turns": 8,
+            },
+            script=[
+                {
+                    "trigger": "agent reads the booking back and asks to confirm",
+                    "do": "say 'actually never mind, i'll call back later, bye' and hang up without saying yes",
+                }
+            ],
+        )
+
     def noisy_transcript(self):
         cust = self.customer()
         parts = self.book_parts(cust)
@@ -910,6 +949,9 @@ def generate(
     if profile in ("double_fault", "double_fault_short"):
         builders["tool_timeout"] = _Gen.double_fault
         mix = mix or {"tool_timeout": 1}
+    if profile == "frontload_decline":
+        builders["ordinary"] = _Gen.frontload_decline
+        mix = mix or {"ordinary": 1}
     weights = mix or dict.fromkeys(FAMILIES, 1)
     out: list[dict] = []
     counters: dict[str, int] = dict.fromkeys(FAMILIES, 0)
