@@ -2,17 +2,15 @@
   "type": "function",
   "function": {
     "name": "book_appointment",
-    "description": "Book a slot returned by check_availability. Call only after the caller confirmed the read-back. Errors: conflict, unavailable, invalid_argument, timeout.",
+    "description": "Book a slot from check_availability after the caller confirmed the read-back.",
     "parameters": {
       "type": "object",
       "properties": {
         "customer_id": {
-          "type": "string",
-          "description": "From lookup_account"
+          "type": "string"
         },
         "branch_id": {
           "type": "string",
-          "description": "One of",
           "enum": [
             "market_st",
             "marlow_st",
@@ -22,7 +20,6 @@
         },
         "service_type": {
           "type": "string",
-          "description": "One of",
           "enum": [
             "account_opening",
             "mortgage_consultation",
@@ -34,11 +31,11 @@
         },
         "slot_start": {
           "type": "string",
-          "description": "YYYY-MM-DDTHH:MM local"
+          "description": "YYYY-MM-DDTHH:MM"
         },
         "idempotency_key": {
           "type": "string",
-          "description": "Caller-generated UUID; repeat returns the original result"
+          "description": "new UUID per write"
         }
       },
       "required": [
@@ -47,8 +44,7 @@
         "service_type",
         "slot_start",
         "idempotency_key"
-      ],
-      "additionalProperties": false
+      ]
     }
   }
 }

@@ -2,13 +2,12 @@
   "type": "function",
   "function": {
     "name": "request_handoff",
-    "description": "Transfer the caller to a person. Say one closing sentence after this and stop.",
+    "description": "Transfer to a person; then say one sentence and stop.",
     "parameters": {
       "type": "object",
       "properties": {
         "reason": {
           "type": "string",
-          "description": "Why",
           "enum": [
             "suspected_fraud",
             "verification_failed",
@@ -19,14 +18,13 @@
         },
         "summary": {
           "type": "string",
-          "description": "What was done and what remains"
+          "description": "done and remaining"
         }
       },
       "required": [
         "reason",
         "summary"
-      ],
-      "additionalProperties": false
+      ]
     }
   }
 }
