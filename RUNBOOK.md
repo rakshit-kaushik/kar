@@ -75,6 +75,13 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Fallback on the fly: `scripts/gpu_flip.sh hosted`.
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
 
+### Nov 1 07:58: gate-fail fallback ready
+If run 2's fused 8-bit artifact fails the precision gate, `scripts/serve_unfused.sh $R3_ARTIFACTS/models/r3-voice-730f8ba68e`
+(under lock S) replaces the vllm-mlx server with mlx_lm.server 0.32.2 serving the unfused adapter on the trained base
+(Qwen3-4B-8bit, the exact configuration the gate run used), labels proxy and agent `r3-voice-730f8ba68e-unfused`, and pins
+the proxy's upstream name to `default_model` (mlx_lm.server answers only to that name). One request at a time, no prefix
+cache: expect base-like TTFT (~0.7-1.0 s on tool-call turns). Rollback: `scripts/deploy_model.sh --rollback`.
+
 ### Nov 1 07:11-07:31: hand-back block, lock overlap, served-name mismatch, caller TTS fallback
 What happened, in order. (1) T's hand-back restart (07:10) served run 1's weights under the name `r3-voice-base` and started
 the proxy and agent with LLM_MODEL=r3-voice-base: T's launcher carried its worktree's stale .env in its environment, and
