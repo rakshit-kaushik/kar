@@ -1,0 +1,70 @@
+{
+  "id": "ambiguous_branch_02",
+  "family": "ambiguous_branch",
+  "title": "Grace's 'Market Street' comes through as 'marker street'",
+  "tests": "Transcript says marker, the appointment is at market; agent confirms rather than acting on the mismatch; reschedule only",
+  "caller": {
+    "customer_id": "C-1008",
+    "name": "Grace Nakamura",
+    "persona": "Clear speaker; the transcript misrenders Market as 'marker' once",
+    "knows": {
+      "phone": "5550188801",
+      "phone_spoken": "five five five zero one eight eight eight zero one",
+      "date_of_birth": "1995-06-18",
+      "first_name": "Grace",
+      "cards": [
+        "2470"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2004",
+          "what": "mortgage_consultation at Market Street on 2026-11-06T15:30"
+        }
+      ]
+    },
+    "noise": "high",
+    "stt_quirks": [
+      "the first time you name the branch, the transcript reads 'marker street'; when asked to confirm say 'Market, like a farmer's market'"
+    ]
+  },
+  "goal": "Move your Friday November 6th mortgage consultation at Market Street to Monday November 9th at 9 in the morning, same branch.",
+  "expect": {
+    "final_state": {
+      "appointments_changed": [
+        {
+          "appointment_id": "A-2004",
+          "slot_start": "2026-11-09T09:00",
+          "status": "booked"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550188801",
+          "date_of_birth": "1995-06-18"
+        },
+        "ok": true
+      },
+      {
+        "tool": "reschedule_appointment",
+        "args": {
+          "appointment_id": "A-2004",
+          "new_slot_start": "2026-11-09T09:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14,
+    "forbidden_tools": [
+      "cancel_appointment",
+      "book_appointment"
+    ]
+  }
+}

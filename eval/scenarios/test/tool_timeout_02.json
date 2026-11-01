@@ -1,0 +1,82 @@
+{
+  "id": "tool_timeout_02",
+  "family": "tool_timeout",
+  "title": "Cancellation fails twice",
+  "tests": "Two failures -> plain statement, no success claim, handoff with reason tool_failure; appointment stays booked",
+  "caller": {
+    "customer_id": "C-1002",
+    "name": "Marcus Okafor",
+    "persona": "Calm but wants it done today",
+    "knows": {
+      "phone": "5550198823",
+      "phone_spoken": "five five five zero one nine eight eight two three",
+      "date_of_birth": "1975-07-04",
+      "first_name": "Marcus",
+      "cards": [
+        "7781",
+        "0034"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2001",
+          "what": "notary at Marlow Street on 2026-11-05T14:00"
+        }
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Cancel your Thursday November 5th notary appointment at Marlow Street. If the agent reports a problem, ask it to try once more; if it fails again, accept being transferred to a person.",
+  "inject": [
+    {
+      "tool": "cancel_appointment",
+      "call_index": 1,
+      "error": "timeout"
+    },
+    {
+      "tool": "cancel_appointment",
+      "call_index": 2,
+      "error": "timeout"
+    }
+  ],
+  "expect": {
+    "final_state": {
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550198823",
+          "date_of_birth": "1975-07-04"
+        },
+        "ok": true
+      },
+      {
+        "tool": "cancel_appointment",
+        "args": {
+          "appointment_id": "A-2001"
+        },
+        "ok": false
+      },
+      {
+        "tool": "cancel_appointment",
+        "args": {
+          "appointment_id": "A-2001"
+        },
+        "ok": false
+      },
+      {
+        "tool": "request_handoff",
+        "args": {
+          "reason": "tool_failure"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": true,
+      "reason": "tool_failure"
+    },
+    "max_turns": 14
+  }
+}

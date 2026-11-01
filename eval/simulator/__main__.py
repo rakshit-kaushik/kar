@@ -1,9 +1,9 @@
 """Run one scenario live and print the transcript.
 
-    uv run python -m eval.simulator eval/scenarios/gen/ordinary-01-dana-mortgage.yaml \
-        [--base-url URL --model ID] [--out DIR]
+    uv run python -m eval.simulator eval/scenarios/test/ordinary_01.json \
+        [--base-url URL --model ID] [--seed 0] [--prompt PATH] [--out DIR]
 
-Defaults: agent = HOSTED_LLM_* (text baseline), caller = HOSTED_LLM_*.
+Defaults: agent = HOSTED_LLM_* (text baseline), caller = HOSTED_LLM_* at temperature 0.3.
 """
 
 from __future__ import annotations
@@ -38,8 +38,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--caller-base-url", default=os.environ.get("HOSTED_LLM_BASE_URL"))
     p.add_argument("--caller-model", default=os.environ.get("HOSTED_LLM_MODEL"))
+    p.add_argument("--seed", type=int, default=0, help="caller variation seed")
+    p.add_argument(
+        "--prompt", default=None, help="system prompt file (default: see eval/simulator/prompts.py)"
+    )
     p.add_argument("--out", default=None)
-    p.add_argument("--max-turns", type=int, default=20)
     a = p.parse_args(argv)
     hosted_key = os.environ.get("HOSTED_LLM_API_KEY")
     agent_key = a.api_key or (
@@ -51,12 +54,18 @@ def main(argv: list[str] | None = None) -> int:
         scenario,
         client=make_client(a.caller_base_url, hosted_key),
         model=a.caller_model,
-        max_turns=a.max_turns,
+        seed=a.seed,
     )
-    sb = Sandbox(seed=scenario.seed, today=scenario.today, fixture=scenario.fixture.model_dump())
     ep = asyncio.run(
         run_episode(
-            scenario, agent, caller, sb, model_id=a.model, run_id="adhoc", max_turns=a.max_turns
+            scenario,
+            agent,
+            caller,
+            Sandbox(),
+            model_id=a.model,
+            run_id="adhoc",
+            repeat_seed=a.seed,
+            prompt_path=a.prompt,
         )
     )
     for m in ep.messages[1:]:
@@ -70,12 +79,12 @@ def main(argv: list[str] | None = None) -> int:
         elif m["role"] == "tool":
             print(f"  <- {m['content'][:160]}")
     print(
-        f"\noutcome={ep.outcome} error={ep.error} agent_turns={ep.n_agent_turns} "
-        f"requests={ep.n_model_requests} usage={json.dumps(ep.usage)}"
+        f"\noutcome={ep.outcome} error={ep.error} caller_turns={len(ep.turns)} requests={ep.n_model_requests} "
+        f"truncated={ep.n_truncated} prompt={ep.prompt_source} ({ep.system_prompt_chars} chars, "
+        f"first prompt_tokens={ep.first_prompt_tokens})"
     )
-    print(
-        f"latency_ms p50={sorted(ep.latency_ms)[len(ep.latency_ms) // 2] if ep.latency_ms else None}"
-    )
+    print(f"usage={json.dumps(ep.usage)}")
+    print(f"diff={json.dumps(ep.final_state['diff'])}")
     if a.out:
         print("saved", ep.save(a.out))
     return 0

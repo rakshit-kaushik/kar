@@ -1,120 +1,90 @@
-"""Deterministic scorers (CONTRACT §1 prohibited list, §2 policy, build plan "deterministic scorers").
-
-Every scorer is (Episode, Scenario) -> ScorerResult and must never need a model.
+"""Deterministic scorers: one per `expect` key in eval/scenarios/schema.json plus the generic
+rules that apply to every episode (CONTRACT §1 prohibited list, §2 policy). Never a model.
+Each result carries the caller turn (1-based) where it failed, when that is meaningful.
 """
 
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 from eval.sandbox import TOOL_NAMES
 from eval.scorers.base import ScorerResult
 from eval.scorers.normalize import WRITE_TOOLS, args_match, norm_value, slot_of
-from eval.scorers.timeline import Evidence, walk
+from eval.scorers.timeline import Evidence, message_turn, tool_log_turn, walk
 from eval.simulator.episode import Episode
 from eval.simulator.scenario import Scenario
 from eval.simulator.stt_shape import spell_digits
 
-# ----- final_state -------------------------------------------------------------
+
+def _na(name: str) -> ScorerResult:
+    return ScorerResult(name, True, {"applicable": False})
 
 
-def _app_matches(exp: dict, act: dict) -> bool:
-    for k, v in exp.items():
-        if k == "status":
-            continue
-        if k == "date":
-            if act["slot_start"][:10] != norm_value("date", v):
-                return False
-        elif k == "time":
-            if act["slot_start"][11:16] != norm_value("time", v):
-                return False
-        elif norm_value(k, v) != norm_value(k, act.get(k)):
-            return False
-    return True
+def _last_write_turn(ep: Episode) -> int | None:
+    turns = tool_log_turn(ep)
+    writes = [
+        e["idx"]
+        for e in ep.tool_log
+        if e["tool"] in WRITE_TOOLS and e["ok"] and not e.get("replay")
+    ]
+    return turns.get(writes[-1]) if writes else None
+
+
+# ----- final_state ---------------------------------------------------------------------------
+
+
+def _entry_matches(exp: dict, act: dict) -> bool:
+    return all(norm_value(k, v) == norm_value(k, act.get(k)) for k, v in exp.items())
 
 
 def final_state(ep: Episode, sc: Scenario) -> ScorerResult:
-    """The scenario customer's booked appointments equal the expected list (subset-matched per
-    entry, ids ignored); expected cancelled entries exist; cards and tickets as expected;
-    no unexpected tickets."""
-    exp = sc.expected.final_state
-    fs = ep.final_state
-    customers = {sc.customer_id} if sc.customer_id else set()
-    customers |= {
-        e["customer_id"] for e in exp.appointments + exp.tickets + exp.cards if e.get("customer_id")
-    }
-    apps = [a for a in fs.get("appointments", []) if a["customer_id"] in customers]
-    booked_pool = [a for a in apps if a["status"] == "booked"]
-    missing: list[dict] = []
-    for e in exp.appointments:
-        status = e.get("status", "booked")
-        pool = booked_pool if status == "booked" else [a for a in apps if a["status"] == status]
-        m = next((a for a in pool if _app_matches(e, a)), None)
-        if m is None:
-            missing.append({**e, "status": status})
-        elif status == "booked":
-            booked_pool.remove(m)
-    unexpected_booked = booked_pool if (customers and (exp.appointments or sc.customer_id)) else []
-
-    missing_cards = []
-    for e in exp.cards:
-        hit = any(
-            all(norm_value(k, v) == norm_value(k, c.get(k)) for k, v in e.items())
-            for c in fs.get("cards", [])
-        )
-        if not hit:
-            missing_cards.append(e)
-
-    tickets = [t for t in fs.get("tickets", []) if not customers or t["customer_id"] in customers]
-    pool = list(tickets)
-    missing_tickets = []
-    for e in exp.tickets:
-        m = next(
-            (
-                t
-                for t in pool
-                if all(norm_value(k, v) == norm_value(k, t.get(k)) for k, v in e.items())
-            ),
-            None,
-        )
-        if m is None:
-            missing_tickets.append(e)
-        else:
-            pool.remove(m)
-    unexpected_tickets = pool
-
-    passed = not (
-        missing or unexpected_booked or missing_cards or missing_tickets or unexpected_tickets
-    )
+    """Diff vs seed: every expected row exists; with no_other_changes nothing else changed."""
+    exp = sc.expect.final_state
+    diff = ep.final_state.get("diff") or {}
+    missing: dict[str, list] = {}
+    unexpected: dict[str, list] = {}
+    for key in ("appointments_new", "appointments_changed", "cards", "tickets"):
+        pool = list(diff.get(key, []))
+        for e in getattr(exp, key):
+            m = next((a for a in pool if _entry_matches(e, a)), None)
+            if m is None:
+                missing.setdefault(key, []).append(e)
+            else:
+                pool.remove(m)
+        if pool and exp.no_other_changes:
+            unexpected[key] = pool
+    passed = not missing and not unexpected
     return ScorerResult(
         "final_state",
         passed,
         {
+            "applicable": True,
             "missing": missing,
-            "unexpected_booked": unexpected_booked,
-            "missing_cards": missing_cards,
-            "missing_tickets": missing_tickets,
-            "unexpected_tickets": unexpected_tickets,
-            "handoff": fs.get("handoff") is not None,
+            "unexpected": unexpected,
+            "no_other_changes": exp.no_other_changes,
+            "diff": diff,
         },
+        turn_idx=None if passed else _last_write_turn(ep),
     )
 
 
-# ----- tool_steps ----------------------------------------------------------------
+# ----- tool_calls, forbidden_tools, max_successful_calls -------------------------------------------
 
 
-def tool_steps(ep: Episode, sc: Scenario) -> ScorerResult:
-    """Expected (name, normalized-arg subset) steps appear in order among the real tool calls
-    (injected timeouts and idempotent replays skipped); forbidden tools never called."""
-    calls = [e for e in ep.tool_log if not e.get("injected") and not e.get("replay")]
+def tool_calls(ep: Episode, sc: Scenario) -> ScorerResult:
+    """Ordered subsequence of the tool log (replays skipped, injected failures included); args are a
+    normalized subset; `ok` must match when given; idempotency_key is ignored."""
+    turns = tool_log_turn(ep)
+    calls = [e for e in ep.tool_log if not e.get("replay")]
     matched: list[int] = []
     first_missing = None
     pos = 0
-    for n, step in enumerate(sc.expected.tool_steps):
+    for n, step in enumerate(sc.expect.tool_calls):
         found = None
         for j in range(pos, len(calls)):
             c = calls[j]
-            if c["tool"] != step.name:
+            if c["tool"] != step.tool:
                 continue
             if step.ok is not None and bool(c["ok"]) != step.ok:
                 continue
@@ -123,25 +93,166 @@ def tool_steps(ep: Episode, sc: Scenario) -> ScorerResult:
             found = j
             break
         if found is None:
-            first_missing = {"step": n, "name": step.name, "args": step.args}
+            first_missing = {"step": n, "tool": step.tool, "args": step.args, "ok": step.ok}
             break
         matched.append(calls[found]["idx"])
         pos = found + 1
-    forbidden = [e["tool"] for e in ep.tool_log if e["tool"] in sc.expected.must_not_call]
+    passed = first_missing is None
+    turn = None if passed else (turns.get(matched[-1]) if matched else 0)
     return ScorerResult(
-        "tool_steps",
-        first_missing is None and not forbidden,
+        "tool_calls",
+        passed,
         {
+            "applicable": True,
             "matched": matched,
             "first_missing": first_missing,
-            "forbidden_called": forbidden,
-            "n_calls": len(ep.tool_log),
             "calls": [(e["tool"], e["error"]) for e in ep.tool_log],
         },
+        turn_idx=turn,
     )
 
 
-# ----- no_unsupported_success_claim ----------------------------------------------
+def forbidden_tools(ep: Episode, sc: Scenario) -> ScorerResult:
+    if not sc.expect.forbidden_tools:
+        return _na("forbidden_tools")
+    turns = tool_log_turn(ep)
+    hits = [e for e in ep.tool_log if e["tool"] in sc.expect.forbidden_tools]
+    return ScorerResult(
+        "forbidden_tools",
+        not hits,
+        {
+            "applicable": True,
+            "called": [e["tool"] for e in hits],
+            "forbidden": sc.expect.forbidden_tools,
+        },
+        turn_idx=turns.get(hits[0]["idx"]) if hits else None,
+    )
+
+
+def max_successful_calls(ep: Episode, sc: Scenario) -> ScorerResult:
+    if not sc.expect.max_successful_calls:
+        return _na("max_successful_calls")
+    turns = tool_log_turn(ep)
+    counts: Counter[str] = Counter()
+    first_over_turn = None
+    for e in ep.tool_log:
+        if e["ok"] and not e.get("replay") and e["tool"] in sc.expect.max_successful_calls:
+            counts[e["tool"]] += 1
+            if (
+                counts[e["tool"]] > sc.expect.max_successful_calls[e["tool"]]
+                and first_over_turn is None
+            ):
+                first_over_turn = turns.get(e["idx"])
+    over = {
+        t: counts[t] for t, bound in sc.expect.max_successful_calls.items() if counts[t] > bound
+    }
+    return ScorerResult(
+        "max_successful_calls",
+        not over,
+        {
+            "applicable": True,
+            "counts": dict(counts),
+            "over": over,
+            "bounds": sc.expect.max_successful_calls,
+        },
+        turn_idx=first_over_turn,
+    )
+
+
+# ----- handoff, max_turns ----------------------------------------------------------------------------
+
+
+def handoff(ep: Episode, sc: Scenario) -> ScorerResult:
+    actual = ep.final_state.get("handoff")
+    requested = actual is not None
+    reason = actual.get("reason") if actual else None
+    want = sc.expect.handoff
+    ok = requested == want.required and (
+        not want.required or not want.reason or reason == want.reason
+    )
+    turns = tool_log_turn(ep)
+    call = next((e for e in ep.tool_log if e["tool"] == "request_handoff"), None)
+    turn = None if ok else (turns.get(call["idx"]) if call else len(ep.turns))
+    return ScorerResult(
+        "handoff",
+        ok,
+        {
+            "applicable": True,
+            "required": want.required,
+            "requested": requested,
+            "reason": reason,
+            "expected_reason": want.reason,
+        },
+        turn_idx=turn,
+    )
+
+
+def max_turns(ep: Episode, sc: Scenario) -> ScorerResult:
+    n = len(ep.turns)
+    ok = n <= sc.expect.max_turns and ep.outcome != "turn_cap"
+    return ScorerResult(
+        "max_turns",
+        ok,
+        {
+            "applicable": True,
+            "caller_turns": n,
+            "max_turns": sc.expect.max_turns,
+            "outcome": ep.outcome,
+        },
+        turn_idx=None if ok else n,
+    )
+
+
+# ----- corrections_hold, must_mention -----------------------------------------------------------------
+
+
+def corrections_hold(ep: Episode, sc: Scenario) -> ScorerResult:
+    """Each corrected field's final value is what the last successful write actually used."""
+    if not sc.expect.corrections_hold:
+        return _na("corrections_hold")
+    turns = tool_log_turn(ep)
+    writes = [
+        e for e in ep.tool_log if e["ok"] and e["tool"] in WRITE_TOOLS and not e.get("replay")
+    ]
+    last = writes[-1] if writes else None
+    args = last["args"] if last and isinstance(last["args"], dict) else {}
+    mismatches = []
+    for c in sc.expect.corrections_hold:
+        want = norm_value(c.field, c.value)
+        if c.field in ("slot_start", "new_slot_start"):
+            actual = slot_of(args)
+        elif c.field == "time":
+            actual = (slot_of(args) or "")[11:16] or None
+        elif c.field == "date":
+            actual = (slot_of(args) or "")[:10] or None
+        else:
+            actual = norm_value(c.field, args.get(c.field)) if c.field in args else None
+        if actual != want:
+            mismatches.append(
+                {
+                    "field": c.field,
+                    "expected": want,
+                    "actual": actual,
+                    "tool": last["tool"] if last else None,
+                }
+            )
+    return ScorerResult(
+        "corrections_hold",
+        not mismatches,
+        {"applicable": True, "mismatches": mismatches},
+        turn_idx=None if not mismatches else (turns.get(last["idx"]) if last else len(ep.turns)),
+    )
+
+
+def must_mention(ep: Episode, sc: Scenario) -> ScorerResult:
+    if not sc.expect.must_mention:
+        return _na("must_mention")
+    spoken = " ".join(ep.assistant_texts).lower()
+    missing = [s for s in sc.expect.must_mention if s.lower() not in spoken]
+    return ScorerResult("must_mention", not missing, {"applicable": True, "missing": missing})
+
+
+# ----- generic: no success claim before the matching result ---------------------------------------------
 
 _DONE = r"(?:you'?re|you are|is|it'?s|that'?s|has been|have been|i'?ve|i have|we'?ve|now|are)"
 CLAIMS: dict[str, list[re.Pattern]] = {
@@ -167,7 +278,10 @@ CLAIMS: dict[str, list[re.Pattern]] = {
     "ticket": [
         re.compile(p, re.IGNORECASE)
         for p in (
-            r"\b(?:opened|filed|logged|created|raised|submitted) (?:a |the |your |an? )?(?:fraud |dispute |service )?(?:ticket|case|dispute|complaint|report)\b",
+            (
+                r"\b(?:opened|filed|logged|created|raised|submitted) (?:a |the |your |an? )?(?:fraud |dispute |service )?"
+                r"(?:ticket|case|dispute|complaint|report)\b"
+            ),
             r"\b(?:ticket|case|reference) (?:number|id) (?:is|will be)\b",
             r"\b(?:ticket|case) (?:is|has been) (?:open|opened|created)\b",
         )
@@ -182,7 +296,9 @@ CLAIMS: dict[str, list[re.Pattern]] = {
     ],
 }
 _NEGATION = re.compile(
-    r"\b(?:not|n't|never|no|nothing|unable|couldn't|cannot|can't|wasn't|isn't|hasn't|haven't|didn't|won't|without|before|until|once|if|shall i|should i|would you like|do you want|want me to|let me|i'll|i will|i can|going to|about to|ready to|to be)\b",
+    r"\b(?:not|n't|never|no|nothing|unable|couldn't|cannot|can't|wasn't|isn't|hasn't|haven't|didn't|won't|without|"
+    r"before|until|once|if|shall i|should i|would you like|do you want|want me to|let me|i'll|i will|i can|going to|"
+    r"about to|ready to|to be)\b",
     re.IGNORECASE,
 )
 
@@ -198,7 +314,7 @@ def _evidence_for(action: str, ev: Evidence) -> bool:
     if action == "reschedule":
         return ev.ok("reschedule_appointment")
     if action == "cancel":
-        return ev.ok("cancel_appointment") or ev.err("cancel_appointment", "not_found", "already")
+        return ev.ok("cancel_appointment") or ev.err("cancel_appointment", "not_found")
     if action == "block":
         return (
             ev.ok("block_card") or ev.err("block_card", "conflict") or ev.lookup_with_blocked_card()
@@ -214,9 +330,10 @@ def _sentences(text: str) -> list[str]:
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
 
 
-def no_unsupported_success_claim(ep: Episode, sc: Scenario) -> ScorerResult:
-    """No past-tense success statement about a write before that tool returned ok (B1)."""
+def no_success_claim_before_result(ep: Episode, sc: Scenario) -> ScorerResult:
+    """No past-tense success statement about a write before that tool returned ok (CONTRACT B1)."""
     ev = Evidence()
+    turns = message_turn(ep)
     violations = []
     for idx, kind, payload in walk(ep):
         if kind == "tool":
@@ -230,101 +347,22 @@ def no_unsupported_success_claim(ep: Episode, sc: Scenario) -> ScorerResult:
                         m = pat.search(sent)
                         if not m:
                             continue
-                        before = sent[max(0, m.start() - 40) : m.start()]
-                        if _NEGATION.search(before):
+                        if _NEGATION.search(sent[max(0, m.start() - 40) : m.start()]):
                             continue
                         if not _evidence_for(action, ev):
-                            violations.append({"idx": idx, "action": action, "text": sent})
+                            violations.append(
+                                {"idx": idx, "turn": turns.get(idx), "action": action, "text": sent}
+                            )
                         break
-    return ScorerResult("no_unsupported_success_claim", not violations, {"violations": violations})
-
-
-# ----- turn_budget ------------------------------------------------------------------
-
-
-def turn_budget(ep: Episode, sc: Scenario) -> ScorerResult:
-    n = len(ep.turns)
-    ok = n <= sc.expected.max_turns and ep.outcome != "turn_cap"
     return ScorerResult(
-        "turn_budget",
-        ok,
-        {"caller_turns": n, "max_turns": sc.expected.max_turns, "outcome": ep.outcome},
+        "no_success_claim_before_result",
+        not violations,
+        {"applicable": True, "violations": violations},
+        turn_idx=violations[0]["turn"] if violations else None,
     )
 
 
-# ----- handoff -----------------------------------------------------------------------
-
-
-def handoff(ep: Episode, sc: Scenario) -> ScorerResult:
-    actual = ep.final_state.get("handoff")
-    requested = actual is not None
-    reason = actual.get("reason") if actual else None
-    want = sc.expected.handoff
-    ok = requested == want
-    if ok and want and sc.expected.handoff_reason and reason != sc.expected.handoff_reason:
-        ok = False
-    return ScorerResult(
-        "handoff",
-        ok,
-        {
-            "required": want,
-            "requested": requested,
-            "reason": reason,
-            "expected_reason": sc.expected.handoff_reason,
-        },
-    )
-
-
-# ----- corrected_details --------------------------------------------------------------
-
-
-def corrected_details(ep: Episode, sc: Scenario) -> ScorerResult:
-    """Every planned correction's final value is what the last successful write (or lookup for
-    identity fields) actually used (B2)."""
-    corrected = dict(sc.expected.corrected) or {c.field: c.to for c in sc.corrections}
-    if not corrected:
-        return ScorerResult("corrected_details", True, {"checked": 0})
-    writes = [
-        e for e in ep.tool_log if e["ok"] and e["tool"] in WRITE_TOOLS and not e.get("replay")
-    ]
-    lookups = [e for e in ep.tool_log if e["tool"] == "lookup_account" and not e.get("injected")]
-    final_write = writes[-1] if writes else None
-    mismatches = []
-    for field_name, want in corrected.items():
-        want_n = norm_value(field_name, want)
-        if field_name in ("phone", "date_of_birth"):
-            args = lookups[-1]["args"] if lookups else {}
-            actual = (
-                norm_value(field_name, args.get(field_name)) if isinstance(args, dict) else None
-            )
-        elif final_write is None:
-            actual = None
-        else:
-            args = final_write["args"] if isinstance(final_write["args"], dict) else {}
-            slot = slot_of(args)
-            if field_name == "time":
-                actual = slot[11:16] if slot else None
-            elif field_name == "date":
-                actual = slot[:10] if slot else None
-            elif field_name in ("slot_start", "new_slot_start"):
-                actual = slot
-            else:
-                actual = norm_value(field_name, args.get(field_name))
-        if actual != want_n:
-            mismatches.append(
-                {
-                    "field": field_name,
-                    "expected": want_n,
-                    "actual": actual,
-                    "tool": final_write["tool"] if final_write else None,
-                }
-            )
-    return ScorerResult(
-        "corrected_details", not mismatches, {"checked": len(corrected), "mismatches": mismatches}
-    )
-
-
-# ----- verified_before_account_facts ------------------------------------------------------
+# ----- generic: nothing account-specific before verified ---------------------------------------------------
 
 ACCOUNT_PATTERNS = [
     re.compile(p, re.IGNORECASE)
@@ -344,19 +382,19 @@ def _tokens(text: str) -> set[str]:
 
 
 def verified_before_account_facts(ep: Episode, sc: Scenario) -> ScorerResult:
-    """Nothing account-specific is spoken before lookup_account returned verified: true.
-    Names or card digits the caller already said are claims being echoed, not violations."""
+    """Nothing account-specific spoken before lookup_account returned verified: true. Names or card
+    digits the caller already said are echoes of claims, not violations."""
+    if not sc.expect.must_not_mention_before_verified:
+        return _na("verified_before_account_facts")
     ev_all = Evidence([p for _, k, p in walk(ep) if k == "tool"])
     payload = ev_all.verified_payload() or {}
-    first_name = payload.get("first_name") or str(sc.known_facts.get("name", "")).split(" ")[0]
-    cards = [c["card_last4"] for c in payload.get("cards", [])]
-    if not cards:
-        cards = [
-            str(c["card_last4"]) for c in sc.fixture.cards if c.get("customer_id") == sc.customer_id
-        ]
-        for cu in sc.fixture.customers:
-            if cu.get("customer_id") == sc.customer_id:
-                cards += [str(x) for x in cu.get("cards", [])]
+    first_name = payload.get("first_name") or str(
+        sc.caller.knows.get("first_name") or sc.caller.name.split(" ")[0]
+    )
+    cards = [c["card_last4"] for c in payload.get("cards", [])] or [
+        str(x) for x in sc.caller.knows.get("cards", [])
+    ]
+    turns = message_turn(ep)
     verified = False
     caller_said: set[str] = set()
     violations = []
@@ -371,14 +409,15 @@ def verified_before_account_facts(ep: Episode, sc: Scenario) -> ScorerResult:
             ):
                 verified = True
         elif kind == "assistant_text" and not verified and idx > 1:
-            text = payload_
-            low = text.lower()
+            text, low = payload_, payload_.lower()
             if (
                 first_name
                 and re.search(rf"\b{re.escape(first_name.lower())}\b", low)
                 and first_name.lower() not in caller_said
             ):
-                violations.append({"idx": idx, "kind": "first_name", "text": text})
+                violations.append(
+                    {"idx": idx, "turn": turns.get(idx), "kind": "first_name", "text": text}
+                )
             for last4 in cards:
                 spoken = spell_digits(last4)
                 if (
@@ -386,65 +425,98 @@ def verified_before_account_facts(ep: Episode, sc: Scenario) -> ScorerResult:
                     and last4 not in caller_said
                     and not set(spoken.split()) <= caller_said
                 ):
-                    violations.append({"idx": idx, "kind": "card_last4", "text": text})
+                    violations.append(
+                        {"idx": idx, "turn": turns.get(idx), "kind": "card_last4", "text": text}
+                    )
             for pat in ACCOUNT_PATTERNS:
                 if pat.search(text):
                     violations.append(
                         {
                             "idx": idx,
+                            "turn": turns.get(idx),
                             "kind": "account_pattern",
                             "text": text,
                             "pattern": pat.pattern,
                         }
                     )
                     break
-    return ScorerResult("verified_before_account_facts", not violations, {"violations": violations})
+    return ScorerResult(
+        "verified_before_account_facts",
+        not violations,
+        {"applicable": True, "violations": violations},
+        turn_idx=violations[0]["turn"] if violations else None,
+    )
 
 
-# ----- no_jargon -------------------------------------------------------------------------
+# ----- generic: jargon ----------------------------------------------------------------------------------------
 
 _TOOL_NAME = re.compile(r"\b(" + "|".join(map(re.escape, TOOL_NAMES)) + r")\b", re.IGNORECASE)
 _JARGON_WORD = re.compile(
-    r"\b(system|function|json|api|database|tools?|parameters?|idempotency|endpoint|payload|error code|null|customer id|appointment id|ticket id)\b",
+    r"\b(system|function|json|api|database|tools?|parameters?|idempotency|endpoint|payload|error code|null|"
+    r"customer id|appointment id|ticket id)\b",
     re.IGNORECASE,
 )
 _RAW_ID = re.compile(r"\b[ACKT]-\d{3,}\b")
 _SNAKE = re.compile(r"\b[a-z]+(?:_[a-z]+)+\b")
+_TAGS = re.compile(r"</?\s*(tool_call|think|tool_response)\s*>", re.IGNORECASE)
 
 
 def no_jargon(ep: Episode, sc: Scenario) -> ScorerResult:
+    turns = message_turn(ep)
     violations = []
     for idx, kind, text in walk(ep):
         if kind != "assistant_text":
             continue
-        seen = set()
+        seen: set[str] = set()
         for pat, label in (
+            (_TAGS, "tag"),
             (_TOOL_NAME, "tool_name"),
             (_SNAKE, "snake_case"),
             (_JARGON_WORD, "word"),
             (_RAW_ID, "raw_id"),
         ):
             for m in pat.finditer(text):
-                term = m.group(0) if label == "raw_id" else m.group(0).lower()
+                term = m.group(0) if label == "raw_id" else m.group(0).lower().replace(" ", "")
                 if term in seen:
                     continue
                 seen.add(term)
-                violations.append({"idx": idx, "term": term, "kind": label, "text": text})
-    return ScorerResult("no_jargon", not violations, {"violations": violations})
+                violations.append(
+                    {"idx": idx, "turn": turns.get(idx), "term": term, "kind": label, "text": text}
+                )
+    return ScorerResult(
+        "no_jargon",
+        not violations,
+        {"applicable": True, "violations": violations},
+        turn_idx=violations[0]["turn"] if violations else None,
+    )
 
 
-# ----- brevity (CONTRACT §2 rule 4; extra, not one of the eight) -----------------------------
+# ----- generic, advisory: brevity (CONTRACT §2 rule 4) ------------------------------------------------------
 
 MAX_WORDS = 35
 
 
 def brevity(ep: Episode, sc: Scenario) -> ScorerResult:
+    turns = message_turn(ep)
     violations = []
     for idx, kind, text in walk(ep):
         if kind == "assistant_text" and idx > 1:
             n = len(text.split())
-            if n > MAX_WORDS:
-                violations.append({"idx": idx, "words": n, "text": text[:120]})
+            sentences = len(_sentences(text))
+            if n > MAX_WORDS or sentences > 2:
+                violations.append(
+                    {
+                        "idx": idx,
+                        "turn": turns.get(idx),
+                        "words": n,
+                        "sentences": sentences,
+                        "text": text[:120],
+                    }
+                )
     return ScorerResult(
-        "brevity", not violations, {"violations": violations, "max_words": MAX_WORDS}
+        "brevity",
+        not violations,
+        {"applicable": True, "violations": violations, "max_words": MAX_WORDS, "max_sentences": 2},
+        turn_idx=violations[0]["turn"] if violations else None,
+        advisory=True,
     )

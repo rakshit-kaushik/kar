@@ -1,0 +1,83 @@
+{
+  "id": "tool_timeout_01",
+  "family": "tool_timeout",
+  "title": "Availability check times out once",
+  "tests": "Agent must say it could not check, retry once, and never invent slots",
+  "caller": {
+    "customer_id": "C-1001",
+    "name": "Dana Whitfield",
+    "persona": "Patient",
+    "knows": {
+      "phone": "5550142219",
+      "phone_spoken": "five five five zero one four two two one nine",
+      "date_of_birth": "1988-03-12",
+      "first_name": "Dana",
+      "cards": [
+        "4219"
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Book a mortgage consultation at Market Street on Tuesday November 3rd at 9:30 in the morning. If the agent says it had trouble checking, say 'sure, try again'.",
+  "inject": [
+    {
+      "tool": "check_availability",
+      "call_index": 1,
+      "error": "timeout"
+    }
+  ],
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1001",
+          "branch_id": "market_st",
+          "service_type": "mortgage_consultation",
+          "slot_start": "2026-11-03T09:30"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550142219",
+          "date_of_birth": "1988-03-12"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "market_st"
+        },
+        "ok": false
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "market_st",
+          "service_type": "mortgage_consultation",
+          "date": "2026-11-03"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1001",
+          "branch_id": "market_st",
+          "service_type": "mortgage_consultation",
+          "slot_start": "2026-11-03T09:30"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14
+  }
+}

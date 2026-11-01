@@ -1,8 +1,8 @@
-"""In-memory Marlow Mutual sandbox: one instance per episode, deterministic, resettable.
+"""In-memory Marlow Mutual sandbox built from seed.json: one instance per episode.
 
-The eight contract tools run against this object (`Sandbox.call`). Every call is logged
-with its args and result so the simulator can save the tool log and the scorers can
-replay it. The same seed can be loaded into Postgres with `eval.sandbox.reset`.
+The tools whose schema files exist in schemas/tools/ run against this object (`Sandbox.call`).
+Every call is logged with args and result; `diff()` reports what changed against the seed, which
+is what the final_state scorer compares with a scenario's `expect.final_state`.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import copy
 import json
 import re
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -20,7 +19,21 @@ from typing import Any
 from . import seed as S
 
 SCHEMA_DIR = Path(__file__).resolve().parents[2] / "schemas" / "tools"
-TIMEOUT_RESULT = {"error": "timeout", "message": "The request timed out."}
+MESSAGES = {
+    "timeout": "the request timed out",
+    "unavailable": "the service is unavailable",
+    "conflict": "conflict",
+    "not_found": "not found",
+    "invalid_argument": "invalid argument",
+    "not_verified": "not verified",
+}
+HANDOFF_REASONS = (
+    "suspected_fraud",
+    "verification_failed",
+    "caller_requested",
+    "out_of_scope",
+    "tool_failure",
+)
 
 
 def load_tool_schemas() -> dict[str, dict]:
@@ -34,6 +47,57 @@ def load_tool_schemas() -> dict[str, dict]:
 
 TOOL_SCHEMAS = load_tool_schemas()
 TOOL_NAMES = list(TOOL_SCHEMAS)
+TICKET_CATEGORIES: list[str] = TOOL_SCHEMAS["create_ticket"]["function"]["parameters"][
+    "properties"
+]["category"]["enum"]
+
+
+def err(code: str, message: str | None = None) -> dict:
+    return {"error": code, "message": message or MESSAGES[code]}
+
+
+def digits(s: Any) -> str:
+    d = re.sub(r"\D", "", str(s or ""))
+    return d[1:] if len(d) == 11 and d.startswith("1") else d
+
+
+def parse_date(s: Any) -> date | None:
+    try:
+        return date.fromisoformat(str(s).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_slot(s: Any) -> datetime | None:
+    """'YYYY-MM-DDTHH:MM' (seconds or a space tolerated) -> datetime, else None."""
+    if not isinstance(s, str):
+        return None
+    t = s.strip().replace(" ", "T")
+    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            return datetime.strptime(t, fmt)
+        except ValueError:
+            pass
+    return None
+
+
+def validate_args(tool: str, args: Any) -> dict | None:
+    """Required keys present and enum values legal per the schema file; None when fine.
+
+    Unknown extra keys are tolerated (the trimmed schemas have no additionalProperties).
+    """
+    if not isinstance(args, dict):
+        return err("invalid_argument", "arguments must be an object")
+    params = TOOL_SCHEMAS[tool]["function"]["parameters"]
+    props = params.get("properties", {})
+    missing = [k for k in params.get("required", []) if args.get(k) in (None, "")]
+    if missing:
+        return err("invalid_argument", f"missing required argument: {', '.join(missing)}")
+    for key, val in args.items():
+        spec = props.get(key)
+        if spec and "enum" in spec and val is not None and val not in spec["enum"]:
+            return err("invalid_argument", f"{key} must be one of {', '.join(spec['enum'])}")
+    return None
 
 
 @dataclass
@@ -68,356 +132,196 @@ class ToolLogEntry:
 class HandoffRecord:
     reason: str
     summary: str
-    ts: str
     reason_valid: bool
 
 
-def err(code: str, message: str) -> dict:
-    return {"error": code, "message": message}
-
-
-def validate_args(tool: str, args: Any, fallback: str) -> dict | None:
-    """Check `args` against the tool's JSON schema. Returns an error dict or None.
-
-    Uses `invalid_argument` when the tool lists it (CONTRACT §4), else `fallback`.
-    """
-    schema = TOOL_SCHEMAS[tool]["function"]["parameters"]
-    code = (
-        "invalid_argument"
-        if "invalid_argument" in TOOL_SCHEMAS[tool]["function"]["description"]
-        else fallback
-    )
-    if not isinstance(args, dict):
-        return err(code, "Arguments must be an object.")
-    props = schema.get("properties", {})
-    for key in schema.get("required", []):
-        if key not in args or args[key] in (None, ""):
-            return err(code, f"Missing required argument: {key}")
-    if schema.get("additionalProperties") is False:
-        extra = [k for k in args if k not in props]
-        if extra:
-            return err(code, f"Unknown argument: {', '.join(sorted(extra))}")
-    for key, val in args.items():
-        spec = props.get(key)
-        if spec is None:
-            continue
-        if spec.get("type") == "string" and not isinstance(val, str):
-            return err(code, f"Argument {key} must be a string.")
-        if "enum" in spec and val not in spec["enum"]:
-            return err(code, f"Invalid {key}: {val!r}. Allowed: {', '.join(spec['enum'])}")
-    return None
-
-
-def parse_date(s: Any) -> date | None:
-    if not isinstance(s, str):
-        return None
-    try:
-        return date.fromisoformat(s.strip())
-    except ValueError:
-        return None
-
-
-def parse_slot(s: Any) -> datetime | None:
-    """'YYYY-MM-DDTHH:MM' (seconds tolerated, space tolerated) -> datetime, else None."""
-    if not isinstance(s, str):
-        return None
-    t = s.strip().replace(" ", "T")
-    for fmt in ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.strptime(t, fmt)
-        except ValueError:
-            pass
-    return None
-
-
-def digits(s: Any) -> str:
-    return re.sub(r"\D", "", s) if isinstance(s, str) else ""
-
-
 class Sandbox:
-    """Deterministic bank back end for one episode."""
+    """Deterministic bank back end for one episode, built from seed.json."""
 
-    def __init__(
-        self,
-        seed: int = S.DEFAULT_SEED,
-        today: date = S.DEFAULT_TODAY,
-        fixture: dict | None = None,
-        now: datetime | None = None,
-    ):
-        self.seed_int = seed
-        self.today = today
-        self.now = now or datetime.combine(today, datetime.min.time().replace(hour=9))
-        data = S.generate_seed(seed=seed, today=today)
-        self.customers: list[S.Customer] = data.customers
-        self.cards: list[S.Card] = data.cards
-        self.appointments: list[S.Appointment] = data.appointments
+    def __init__(self, seed: dict | None = None, *, inject: list[dict] | None = None):
+        from . import tools  # registers HANDLERS
+
+        self.seed = copy.deepcopy(seed) if seed is not None else S.load_seed()
+        self.clock: datetime = datetime.fromisoformat(self.seed["clock"])
+        self.today: date = self.clock.date()
+        self.clock_spoken: str = self.seed.get("clock_spoken", "")
+        self.branches: dict = self.seed["branches"]
+        self.services: dict = self.seed["services"]
+        self.blocked: dict = self.seed.get("blocked_slots", {})
+        self.customers: dict[str, S.Customer] = {}
+        self.cards: list[S.Card] = []
+        self.appointments: list[S.Appointment] = []
+        for c in self.seed["customers"]:
+            cid = c["customer_id"]
+            self.customers[cid] = S.Customer(
+                cid,
+                c["first_name"],
+                c["last_name"],
+                c["phone"],
+                date.fromisoformat(c["date_of_birth"]),
+                c["branch_id"],
+            )
+            for k in c.get("cards", []):
+                self.cards.append(
+                    S.Card(
+                        k["card_id"],
+                        cid,
+                        str(k["card_last4"]),
+                        k.get("status", "active"),
+                        k.get("replacement") or "none",
+                    )
+                )
+            for a in c.get("appointments", []):
+                self.appointments.append(
+                    S.Appointment(
+                        a["appointment_id"],
+                        cid,
+                        a["branch_id"],
+                        a["service_type"],
+                        parse_slot(a["slot_start"]),
+                        a.get("status", "booked"),
+                    )
+                )
         self.tickets: list[S.Ticket] = []
         self.handoff: HandoffRecord | None = None
-        self._next_appointment = 1 + max(int(a.appointment_id[2:]) for a in self.appointments)
-        self._next_ticket = 5520
-        self._next_customer = 1 + max(int(c.customer_id[2:]) for c in self.customers)
-        self._fixture_customer_ids: set[str] = set()
-        self.tool_log: list[ToolLogEntry] = []
-        self._idem: dict[tuple[str, str], dict] = {}
-        self._timeouts: dict[str, set[int]] = {}
+        self._next = {"A": 3001, "T": 5001}
+        self.tools = [n for n in TOOL_NAMES if n in tools.HANDLERS]
+        self._handlers = {n: tools.HANDLERS[n] for n in self.tools}
+        self._faults: list[dict] = list(inject or [])
         self._calls: dict[str, int] = {}
-        self._touched_appointments: set[str] = set()
-        self._handlers: dict[str, Callable[[Sandbox, dict], dict]] = {}
-        from . import tools
-
-        self._handlers = dict(tools.HANDLERS)
-        if fixture:
-            self.apply_fixture(fixture)
-        self._snapshot()
-
-    # ----- episode lifecycle -------------------------------------------------
-    def _snapshot(self) -> None:
+        self._idem: dict[tuple[str, str], dict] = {}
+        self.tool_log: list[ToolLogEntry] = []
+        self._seed_appts = {a.appointment_id: (a.status, a.slot) for a in self.appointments}
+        self._seed_cards = {
+            (k.customer_id, k.card_last4): (k.status, k.replacement) for k in self.cards
+        }
         self._baseline = copy.deepcopy(
-            (
-                self.customers,
-                self.cards,
-                self.appointments,
-                self.tickets,
-                self.handoff,
-                self._next_appointment,
-                self._next_ticket,
-                self._next_customer,
-            )
+            (self.cards, self.appointments, self.tickets, self.handoff, self._next)
         )
 
+    # ----- episode lifecycle -------------------------------------------------------------
     def reset(self) -> None:
-        """Back to seed + fixture; clears the tool log, idempotency cache and call counters."""
-        (
-            self.customers,
-            self.cards,
-            self.appointments,
-            self.tickets,
-            self.handoff,
-            self._next_appointment,
-            self._next_ticket,
-            self._next_customer,
-        ) = copy.deepcopy(self._baseline)
-        self.tool_log = []
-        self._idem = {}
-        self._calls = {}
-        self._touched_appointments = set()
+        """Back to the seed; clears the log, idempotency cache and call counters (faults stay)."""
+        self.cards, self.appointments, self.tickets, self.handoff, self._next = copy.deepcopy(
+            self._baseline
+        )
+        self.tool_log, self._idem, self._calls = [], {}, {}
 
-    def apply_fixture(self, fixture: dict) -> None:
-        """Layer scenario-specific records over the seed, then re-baseline for reset().
+    def inject(self, faults: list[dict]) -> None:
+        """scenario.inject: [{tool, call_index (1-based, per tool), error}] — replaces the list."""
+        self._faults = [dict(f) for f in faults]
 
-        fixture keys (all optional):
-          customers:    [{customer_id?, first_name, last_name?, phone, date_of_birth, branch_id,
-                          cards?: ["4219", ...]}]
-          cards:        [{customer_id, card_last4, status?: active|blocked, replacement?}]
-          appointments: [{customer_id, branch_id, service_type, slot_start, status?}]
-          free:         [{branch_id, date, slots?: ["14:00", ...]}]   # evict seed bookings (default: whole day)
-          unavailable:  [{branch_id, date, slots?: ["09:00", ...]}]   # fill with bookings (default: whole day)
-        `free` is applied before `unavailable`, so free + unavailable on one day leaves exactly the
-        free slots open.
-        """
-        for c in fixture.get("customers", []):
-            cid = c.get("customer_id") or f"C-{self._next_customer}"
-            if not c.get("customer_id"):
-                self._next_customer += 1
-            existing = self.find_customer(cid)
-            dob = c["date_of_birth"]
-            dob = dob if isinstance(dob, date) else date.fromisoformat(dob)
-            if existing:
-                self.customers.remove(existing)
-                self.cards = [k for k in self.cards if k.customer_id != cid]
-                self.appointments = [a for a in self.appointments if a.customer_id != cid]
-            # keep phones unique: evict any seed customer holding this phone
-            for other in [x for x in self.customers if x.phone == digits(c["phone"])]:
-                self.customers.remove(other)
-            self.customers.append(
-                S.Customer(
-                    cid,
-                    c["first_name"],
-                    c.get("last_name", "Doe"),
-                    digits(c["phone"]),
-                    dob,
-                    c["branch_id"],
-                )
-            )
-            self._fixture_customer_ids.add(cid)
-            for l4 in c.get("cards", []):
-                self.cards.append(S.Card(f"K-{len(self.cards):06d}", cid, str(l4)))
-        for k in fixture.get("cards", []):
-            self.cards = [
-                x
-                for x in self.cards
-                if not (x.customer_id == k["customer_id"] and x.card_last4 == str(k["card_last4"]))
-            ]
-            self.cards.append(
-                S.Card(
-                    f"K-{len(self.cards):06d}",
-                    k["customer_id"],
-                    str(k["card_last4"]),
-                    k.get("status", "active"),
-                    k.get("replacement"),
-                )
-            )
-        for a in fixture.get("appointments", []):
-            dt = parse_slot(a["slot_start"])
-            if dt is None:
-                raise ValueError(f"fixture appointment slot_start not YYYY-MM-DDTHH:MM: {a}")
-            self._evict_slot(a["branch_id"], dt)
-            ap = S.Appointment(
-                a.get("appointment_id") or f"A-{self._next_appointment}",
-                a["customer_id"],
-                a["branch_id"],
-                a["service_type"],
-                dt,
-                a.get("status", "booked"),
-            )
-            if not a.get("appointment_id"):
-                self._next_appointment += 1
-            self.appointments.append(ap)
-            self._fixture_customer_ids.add(a["customer_id"])
-        freed: set[tuple[str, datetime]] = set()
-        for f in fixture.get("free", []):
-            d = date.fromisoformat(f["date"]) if isinstance(f["date"], str) else f["date"]
-            for hhmm in f.get("slots") or S.slots_for(d):
-                self._evict_slot(f["branch_id"], S.slot_dt(d, hhmm))
-                freed.add((f["branch_id"], S.slot_dt(d, hhmm)))
-        fillers = [c for c in self.customers if c.filler]
-        for u in fixture.get("unavailable", []):
-            d = date.fromisoformat(u["date"]) if isinstance(u["date"], str) else u["date"]
-            for hhmm in u.get("slots") or S.slots_for(d):
-                dt = S.slot_dt(d, hhmm)
-                if (u["branch_id"], dt) in freed:
-                    continue
-                if self.slot_is_open(u["branch_id"], dt):
-                    self.appointments.append(
-                        S.Appointment(
-                            f"A-{self._next_appointment}",
-                            fillers[self._next_appointment % len(fillers)].customer_id,
-                            u["branch_id"],
-                            "financial_review",
-                            dt,
-                        )
-                    )
-                    self._next_appointment += 1
-        self._snapshot()
+    def inject_timeout(self, tool: str, nth_call: int = 1) -> None:
+        self._faults.append({"tool": tool, "call_index": int(nth_call), "error": "timeout"})
 
-    def _evict_slot(self, branch_id: str, dt: datetime) -> None:
-        self.appointments = [
-            a
-            for a in self.appointments
-            if not (a.branch_id == branch_id and a.slot_start == dt and a.status == "booked")
-        ]
+    # ----- queries -----------------------------------------------------------------------
+    def find_customer(self, customer_id: Any) -> S.Customer | None:
+        return self.customers.get(str(customer_id))
 
-    # ----- queries -----------------------------------------------------------
-    def find_customer(self, customer_id: str) -> S.Customer | None:
-        return next((c for c in self.customers if c.customer_id == customer_id), None)
+    def find_customer_by_phone(self, phone: Any) -> S.Customer | None:
+        p = digits(phone)
+        return next((c for c in self.customers.values() if c.phone == p), None) if p else None
 
-    def find_customer_by_phone(self, phone: str) -> S.Customer | None:
-        return next((c for c in self.customers if c.phone == phone), None)
-
-    def find_appointment(self, appointment_id: str) -> S.Appointment | None:
-        return next((a for a in self.appointments if a.appointment_id == appointment_id), None)
+    def find_appointment(self, appointment_id: Any) -> S.Appointment | None:
+        return next((a for a in self.appointments if a.appointment_id == str(appointment_id)), None)
 
     def customer_appointments(self, customer_id: str) -> list[S.Appointment]:
         return sorted(
-            (
-                a
-                for a in self.appointments
-                if a.customer_id == customer_id
-                and a.status == "booked"
-                and a.slot_start.date() >= self.today
-            ),
+            (a for a in self.appointments if a.customer_id == customer_id and a.status == "booked"),
             key=lambda a: a.slot_start,
         )
 
     def customer_cards(self, customer_id: str) -> list[S.Card]:
         return [k for k in self.cards if k.customer_id == customer_id]
 
-    def slot_is_open(self, branch_id: str, dt: datetime) -> bool:
-        return not any(
-            a.branch_id == branch_id and a.slot_start == dt and a.status == "booked"
-            for a in self.appointments
-        )
+    def closed(self, d: date) -> bool:
+        return S.hours_for(d, self.seed) is None
 
-    def open_slots(self, branch_id: str, d: date) -> list[str]:
+    def open_slots(
+        self, branch_id: str, d: date, ignore_appointment: str | None = None
+    ) -> list[str]:
+        """Slots inside hours, after the clock, not booked at the branch, not blocked."""
+        blocked = self.blocked.get(branch_id, {}).get(d.isoformat())
+        if blocked == "all":
+            return []
+        taken = {
+            a.slot
+            for a in self.appointments
+            if a.branch_id == branch_id
+            and a.status == "booked"
+            and a.appointment_id != ignore_appointment
+        }
+        taken |= {f"{d.isoformat()}T{b}" for b in (blocked or [])}
         out = []
-        for hhmm in S.slots_for(d):
+        for hhmm in S.slots_for(d, self.seed):
             dt = S.slot_dt(d, hhmm)
-            if dt <= self.now:
-                continue
-            if self.slot_is_open(branch_id, dt):
+            if dt > self.clock and dt.strftime("%Y-%m-%dT%H:%M") not in taken:
                 out.append(hhmm)
         return out
 
-    def date_problem(self, d: date) -> str | None:
-        """Why a date cannot be booked: closed / past / beyond horizon; None when fine."""
-        if d < self.today:
-            return "That date is in the past."
-        if d > self.today + S.BOOKING_HORIZON:
-            return f"Bookings open only {S.BOOKING_HORIZON.days} days ahead."
-        if S.hours_for(d) is None:
-            return "The branch is closed on Sundays."
-        return None
+    def slot_is_open(
+        self, branch_id: str, dt: datetime, ignore_appointment: str | None = None
+    ) -> bool:
+        return dt.strftime("%H:%M") in self.open_slots(branch_id, dt.date(), ignore_appointment)
 
-    def new_appointment_id(self) -> str:
-        aid = f"A-{self._next_appointment}"
-        self._next_appointment += 1
-        return aid
+    def next_id(self, prefix: str) -> str:
+        n = self._next[prefix]
+        self._next[prefix] += 1
+        return f"{prefix}-{n}"
 
-    def new_ticket_id(self) -> str:
-        tid = f"T-{self._next_ticket}"
-        self._next_ticket += 1
-        return tid
-
-    def touch(self, appointment_id: str) -> None:
-        self._touched_appointments.add(appointment_id)
-
-    # ----- failure injection -------------------------------------------------
-    def inject_timeout(self, tool: str, nth_call: int = 1) -> None:
-        """The nth call (1-based, counted per tool, replays included) returns `timeout`."""
-        self._timeouts.setdefault(tool, set()).add(int(nth_call))
-
-    # ----- dispatch ----------------------------------------------------------
+    # ----- dispatch ----------------------------------------------------------------------
     def call(self, name: str, args: Any) -> dict:
         t0 = time.perf_counter()
         ts = datetime.now().isoformat(timespec="milliseconds")
+        if isinstance(args, str):
+            try:
+                args = json.loads(args)
+            except ValueError as e:
+                return self._finish(
+                    name, args, err("invalid_argument", f"bad arguments: {e}"), ts, t0
+                )
+        if args is None:
+            args = {}
         handler = self._handlers.get(name)
         if handler is None:
-            result = err("invalid_argument", f"Unknown tool: {name}")
-            self._log(name, args, result, ts, t0)
-            return result
+            return self._finish(name, args, err("invalid_argument", f"unknown tool {name}"), ts, t0)
+        if not isinstance(args, dict):
+            return self._finish(
+                name, args, err("invalid_argument", "arguments must be an object"), ts, t0
+            )
         self._calls[name] = self._calls.get(name, 0) + 1
-        if self._calls[name] in self._timeouts.get(name, ()):
-            result = dict(TIMEOUT_RESULT)
-            self._log(name, args, result, ts, t0, injected=True)
-            return result
-        key = args.get("idempotency_key") if isinstance(args, dict) else None
-        if isinstance(key, str) and key and (name, key) in self._idem:
-            result = copy.deepcopy(self._idem[(name, key)])
-            self._log(name, args, result, ts, t0, replay=True)
-            return result
-        result = handler(self, args)
-        if (
+        for f in self._faults:
+            if f.get("tool") == name and int(f.get("call_index", 1)) == self._calls[name]:
+                return self._finish(
+                    name, args, err(f.get("error", "timeout")), ts, t0, injected=True
+                )
+        key = args.get("idempotency_key")
+        has_key = (
             isinstance(key, str)
-            and key
-            and "idempotency_key" in TOOL_SCHEMAS[name]["function"]["parameters"]["properties"]
-        ):
+            and key != ""
+            and "idempotency_key"
+            in TOOL_SCHEMAS[name]["function"]["parameters"].get("properties", {})
+        )
+        if has_key and (name, key) in self._idem:
+            return self._finish(
+                name, args, copy.deepcopy(self._idem[(name, key)]), ts, t0, replay=True
+            )
+        result = handler(self, args)
+        if has_key and "error" not in result:
             self._idem[(name, key)] = copy.deepcopy(result)
-        self._log(name, args, result, ts, t0)
-        return result
+        return self._finish(name, args, result, ts, t0)
 
     def reject(self, name: str, args: Any, message: str) -> dict:
         """Log a call the harness could not dispatch (e.g. unparseable arguments)."""
-        result = err("invalid_argument", message)
-        self._log(
+        return self._finish(
             name,
             args,
-            result,
+            err("invalid_argument", message),
             datetime.now().isoformat(timespec="milliseconds"),
             time.perf_counter(),
         )
-        return result
 
-    def _log(
+    def _finish(
         self,
         name: str,
         args: Any,
@@ -426,7 +330,7 @@ class Sandbox:
         t0: float,
         injected: bool = False,
         replay: bool = False,
-    ) -> None:
+    ) -> dict:
         error = result.get("error") if isinstance(result, dict) else None
         self.tool_log.append(
             ToolLogEntry(
@@ -442,30 +346,53 @@ class Sandbox:
                 elapsed_ms=round((time.perf_counter() - t0) * 1000, 3),
             )
         )
+        return result
 
-    # ----- export ------------------------------------------------------------
-    def dump_state(self) -> dict:
-        """Final sandbox state for the episode JSON. Filler bookings are left out unless touched."""
-        keep_cust = {
-            c.customer_id for c in self.customers if not c.filler
-        } | self._fixture_customer_ids
-        apps = [
-            a
+    # ----- export ------------------------------------------------------------------------
+    def diff(self) -> dict:
+        """What changed against the seed, in the shape of expect.final_state."""
+        new = [
+            {
+                "customer_id": a.customer_id,
+                "branch_id": a.branch_id,
+                "service_type": a.service_type,
+                "slot_start": a.slot,
+            }
             for a in self.appointments
-            if a.customer_id in keep_cust or a.appointment_id in self._touched_appointments
+            if a.appointment_id not in self._seed_appts and a.status == "booked"
         ]
+        changed = [
+            {"appointment_id": a.appointment_id, "status": a.status, "slot_start": a.slot}
+            for a in self.appointments
+            if a.appointment_id in self._seed_appts
+            and (a.status, a.slot) != self._seed_appts[a.appointment_id]
+        ]
+        cards = [
+            {"card_last4": k.card_last4, "status": k.status, "replacement": k.replacement}
+            for k in self.cards
+            if (k.status, k.replacement) != self._seed_cards.get((k.customer_id, k.card_last4))
+        ]
+        tickets = [{"customer_id": t.customer_id, "category": t.category} for t in self.tickets]
         return {
-            "today": self.today.isoformat(),
+            "appointments_new": new,
+            "appointments_changed": changed,
+            "cards": cards,
+            "tickets": tickets,
+        }
+
+    def dump_state(self) -> dict:
+        return {
+            "clock": self.clock.strftime("%Y-%m-%dT%H:%M"),
             "appointments": [
                 {
                     "appointment_id": a.appointment_id,
                     "customer_id": a.customer_id,
                     "branch_id": a.branch_id,
                     "service_type": a.service_type,
-                    "slot_start": a.slot_start.strftime("%Y-%m-%dT%H:%M"),
+                    "slot_start": a.slot,
                     "status": a.status,
                 }
-                for a in sorted(apps, key=lambda a: (a.customer_id, a.slot_start))
+                for a in self.appointments
             ],
             "cards": [
                 {
@@ -475,7 +402,6 @@ class Sandbox:
                     "replacement": k.replacement,
                 }
                 for k in self.cards
-                if k.customer_id in keep_cust
             ],
             "tickets": [
                 {
@@ -483,17 +409,17 @@ class Sandbox:
                     "customer_id": t.customer_id,
                     "category": t.category,
                     "summary": t.summary,
+                    "status": t.status,
                 }
                 for t in self.tickets
             ],
             "handoff": None
             if self.handoff is None
             else {
-                "requested": True,
                 "reason": self.handoff.reason,
                 "summary": self.handoff.summary,
-                "ts": self.handoff.ts,
                 "reason_valid": self.handoff.reason_valid,
             },
+            "diff": self.diff(),
             "tool_calls": len(self.tool_log),
         }

@@ -1,0 +1,314 @@
+{
+  "clock": "2026-11-02T10:00",
+  "clock_spoken": "Monday, November second, 2026, ten in the morning",
+  "timezone": "local",
+  "bank": "Marlow Mutual Bank",
+  "branches": {
+    "market_st": {
+      "name": "Market Street",
+      "address": "120 Market Street, Marlow"
+    },
+    "marlow_st": {
+      "name": "Marlow Street",
+      "address": "41 Marlow Street, Marlow"
+    },
+    "marker_st": {
+      "name": "Marker Street",
+      "address": "8 Marker Street, Marlow"
+    },
+    "mill_rd": {
+      "name": "Mill Road",
+      "address": "300 Mill Road, Marlow"
+    }
+  },
+  "services": {
+    "account_opening": {
+      "minutes": 30,
+      "fee": "free"
+    },
+    "mortgage_consultation": {
+      "minutes": 30,
+      "fee": "free"
+    },
+    "loan_application": {
+      "minutes": 30,
+      "fee": "free"
+    },
+    "financial_review": {
+      "minutes": 30,
+      "fee": "free"
+    },
+    "notary": {
+      "minutes": 30,
+      "fee": "$10 per document"
+    },
+    "safe_deposit_box": {
+      "minutes": 30,
+      "fee": "$60 per year, small box"
+    }
+  },
+  "hours": {
+    "mon": [
+      "09:00",
+      "17:00"
+    ],
+    "tue": [
+      "09:00",
+      "17:00"
+    ],
+    "wed": [
+      "09:00",
+      "17:00"
+    ],
+    "thu": [
+      "09:00",
+      "17:00"
+    ],
+    "fri": [
+      "09:00",
+      "17:00"
+    ],
+    "sat": [
+      "09:00",
+      "13:00"
+    ],
+    "sun": null
+  },
+  "slot_minutes": 30,
+  "card_replacement": {
+    "standard": {
+      "days": "5-7 business days",
+      "fee": "free"
+    },
+    "express": {
+      "days": "2 business days",
+      "fee": "$25"
+    }
+  },
+  "customers": [
+    {
+      "customer_id": "C-1001",
+      "first_name": "Dana",
+      "last_name": "Whitfield",
+      "phone": "5550142219",
+      "date_of_birth": "1988-03-12",
+      "branch_id": "market_st",
+      "cards": [
+        {
+          "card_id": "K-1001-4219",
+          "card_last4": "4219",
+          "status": "active"
+        }
+      ],
+      "appointments": []
+    },
+    {
+      "customer_id": "C-1002",
+      "first_name": "Marcus",
+      "last_name": "Okafor",
+      "phone": "5550198823",
+      "date_of_birth": "1975-07-04",
+      "branch_id": "marlow_st",
+      "cards": [
+        {
+          "card_id": "K-1002-7781",
+          "card_last4": "7781",
+          "status": "active"
+        },
+        {
+          "card_id": "K-1002-0034",
+          "card_last4": "0034",
+          "status": "active"
+        }
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2001",
+          "branch_id": "marlow_st",
+          "service_type": "notary",
+          "slot_start": "2026-11-05T14:00",
+          "status": "booked"
+        }
+      ]
+    },
+    {
+      "customer_id": "C-1003",
+      "first_name": "Priya",
+      "last_name": "Raman",
+      "phone": "5550177310",
+      "date_of_birth": "1992-11-30",
+      "branch_id": "marker_st",
+      "cards": [
+        {
+          "card_id": "K-1003-5560",
+          "card_last4": "5560",
+          "status": "active"
+        }
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2002",
+          "branch_id": "mill_rd",
+          "service_type": "financial_review",
+          "slot_start": "2026-11-10T11:00",
+          "status": "booked"
+        }
+      ]
+    },
+    {
+      "customer_id": "C-1004",
+      "first_name": "Tomas",
+      "last_name": "Herrera",
+      "phone": "5550133457",
+      "date_of_birth": "1960-01-22",
+      "branch_id": "mill_rd",
+      "cards": [
+        {
+          "card_id": "K-1004-9912",
+          "card_last4": "9912",
+          "status": "blocked"
+        }
+      ],
+      "appointments": []
+    },
+    {
+      "customer_id": "C-1005",
+      "first_name": "Aiko",
+      "last_name": "Tanaka",
+      "phone": "5550155678",
+      "date_of_birth": "2001-09-09",
+      "branch_id": "market_st",
+      "cards": [
+        {
+          "card_id": "K-1005-3307",
+          "card_last4": "3307",
+          "status": "active"
+        }
+      ],
+      "appointments": []
+    },
+    {
+      "customer_id": "C-1006",
+      "first_name": "Robert",
+      "last_name": "Lindqvist",
+      "phone": "5550166642",
+      "date_of_birth": "1949-05-15",
+      "branch_id": "marlow_st",
+      "cards": [
+        {
+          "card_id": "K-1006-1188",
+          "card_last4": "1188",
+          "status": "active"
+        }
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2003",
+          "branch_id": "marlow_st",
+          "service_type": "safe_deposit_box",
+          "slot_start": "2026-11-03T10:00",
+          "status": "booked"
+        }
+      ]
+    },
+    {
+      "customer_id": "C-1007",
+      "first_name": "Fatima",
+      "last_name": "El-Sayed",
+      "phone": "5550122290",
+      "date_of_birth": "1983-12-02",
+      "branch_id": "marker_st",
+      "cards": [
+        {
+          "card_id": "K-1007-6645",
+          "card_last4": "6645",
+          "status": "active"
+        }
+      ],
+      "appointments": []
+    },
+    {
+      "customer_id": "C-1008",
+      "first_name": "Grace",
+      "last_name": "Nakamura",
+      "phone": "5550188801",
+      "date_of_birth": "1995-06-18",
+      "branch_id": "mill_rd",
+      "cards": [
+        {
+          "card_id": "K-1008-2470",
+          "card_last4": "2470",
+          "status": "active"
+        }
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2004",
+          "branch_id": "market_st",
+          "service_type": "mortgage_consultation",
+          "slot_start": "2026-11-06T15:30",
+          "status": "booked"
+        }
+      ]
+    },
+    {
+      "customer_id": "C-1009",
+      "first_name": "Devon",
+      "last_name": "Price",
+      "phone": "5550144412",
+      "date_of_birth": "1979-02-28",
+      "branch_id": "market_st",
+      "cards": [
+        {
+          "card_id": "K-1009-8823",
+          "card_last4": "8823",
+          "status": "active"
+        }
+      ],
+      "appointments": []
+    },
+    {
+      "customer_id": "C-1010",
+      "first_name": "Helena",
+      "last_name": "Vogt",
+      "phone": "5550111123",
+      "date_of_birth": "1968-10-10",
+      "branch_id": "marlow_st",
+      "cards": [
+        {
+          "card_id": "K-1010-5151",
+          "card_last4": "5151",
+          "status": "active"
+        }
+      ],
+      "appointments": []
+    }
+  ],
+  "blocked_slots": {
+    "marker_st": {
+      "2026-11-03": [
+        "09:00",
+        "09:30",
+        "10:00",
+        "10:30",
+        "11:00",
+        "11:30"
+      ]
+    },
+    "mill_rd": {
+      "2026-11-04": "all"
+    }
+  },
+  "rules": {
+    "lookup_account": "phone AND date_of_birth must both match one customer -> verified:true; phone matches but dob does not -> error not_verified; no phone match -> error not_found",
+    "check_availability": "open slots = all slot_minutes slots within hours[weekday] minus booked appointments at that branch minus blocked_slots; date before clock or on a closed day -> error unavailable; unknown branch/service or bad date -> invalid_argument",
+    "book_appointment": "slot must be open -> else unavailable; same customer + same service_type + same date already booked -> conflict; returns appointment_id A-3xxx",
+    "reschedule_appointment": "appointment must exist and be booked -> else not_found; new slot must be open -> else unavailable/conflict",
+    "cancel_appointment": "appointment must exist and be booked -> else not_found; sets status cancelled",
+    "block_card": "card must belong to customer -> else not_found; already blocked -> conflict; sets status blocked and replacement",
+    "create_ticket": "category must be in taxonomy -> else invalid_argument; returns ticket_id T-5xxx",
+    "request_handoff": "always succeeds; ends the episode after one more assistant turn",
+    "idempotency": "a repeated idempotency_key returns the original result without a second write",
+    "timeout_injection": "scenario.inject marks the n-th call of a tool to return {error:'timeout'} without applying any write"
+  }
+}

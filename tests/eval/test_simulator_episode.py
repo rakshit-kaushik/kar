@@ -1,288 +1,250 @@
-"""Episode loop: scripted agent + scripted caller against a real Sandbox."""
+"""Episode loop on schema.json scenarios: scripted agent + scripted caller against the seed sandbox."""
 
 import json
-import uuid
-from datetime import date
 
 import pytest
+from helpers import (
+    DANA_LOOKUP,
+    VERIFY_LINES,
+    ScriptedAgent,
+    ScriptedCaller,
+    make_episode,
+    say,
+    scenario,
+    tc,
+    tools,
+)
 
 from eval.sandbox import Sandbox
 from eval.simulator.episode import GREETING, Episode, run_episode
-from eval.simulator.scenario import Scenario
 
-SCEN = Scenario.model_validate(
-    {
-        "id": "ordinary-01",
-        "family": "ordinary",
-        "today": "2026-11-02",
-        "customer_id": "C-1042",
-        "known_facts": {"phone": "5550142219", "date_of_birth": "1988-03-12"},
-        "persona": {"name": "Dana"},
-        "goal": "book a notary at market street wednesday",
-        "expected": {"max_turns": 8},
-    }
-)
-
-
-def tc(name, args, id_=None):
-    return {
-        "id": id_ or f"call_{uuid.uuid4().hex[:8]}",
-        "type": "function",
-        "function": {"name": name, "arguments": json.dumps(args)},
-    }
-
-
-def say(text):
-    return {"role": "assistant", "content": text}
-
-
-def tools(*calls):
-    return {"role": "assistant", "content": "", "tool_calls": list(calls)}
-
-
-class ScriptedAgent:
-    def __init__(self, script):
-        self.script = list(script)
-        self.seen = []
-
-    async def respond(self, messages):
-        self.seen.append([dict(m) for m in messages])
-        return self.script.pop(0)
-
-
-class ScriptedCaller:
-    """Yields (text, hangup) pairs; records the transcript it was shown."""
-
-    def __init__(self, lines):
-        self.lines = list(lines)
-        self.seen = []
-
-    async def next_utterance(self, transcript, turn_idx):
-        self.seen.append(list(transcript))
-        if not self.lines:
-            return ("", True)
-        return self.lines.pop(0)
+AVAIL = {"branch_id": "market_st", "service_type": "mortgage_consultation", "date": "2026-11-03"}
+BOOK = {
+    "customer_id": "C-1001",
+    "branch_id": "market_st",
+    "service_type": "mortgage_consultation",
+    "slot_start": "2026-11-03T09:30",
+    "idempotency_key": "k1",
+}
 
 
 @pytest.mark.asyncio
 async def test_ordinary_booking_flow_records_everything():
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
-    slot = sb.call(
-        "check_availability",
-        {"branch_id": "market_st", "service_type": "notary", "date": "2026-11-04"},
-    )["slots"][0]
-    sb.reset()
-    lookup = tc("lookup_account", {"phone": "5550142219", "date_of_birth": "1988-03-12"}, "c1")
-    avail = tc(
-        "check_availability",
-        {"branch_id": "market_st", "service_type": "notary", "date": "2026-11-04"},
-        "c2",
-    )
-    book = tc(
-        "book_appointment",
-        {
-            "customer_id": "C-1042",
-            "branch_id": "market_st",
-            "service_type": "notary",
-            "slot_start": f"2026-11-04T{slot}",
-            "idempotency_key": "k1",
-        },
-        "c3",
-    )
+    scen = scenario()
+    lookup = tc("lookup_account", DANA_LOOKUP, "c1")
     agent = ScriptedAgent(
         [
             say("Thanks. And your date of birth?"),
             tools(lookup),
             say("Thanks Dana, you're verified. What can I help with today?"),
-            tools(avail),
-            say(f"Wednesday I have {slot}. Shall I book the notary at Market Street?"),
-            tools(book),
+            tools(tc("check_availability", AVAIL, "c2")),
+            say(
+                "Tuesday at nine thirty is open. Shall I book the mortgage consultation at Market Street?"
+            ),
+            tools(tc("book_appointment", BOOK, "c3")),
             say("Booked. Anything else?"),
             say("Thanks Dana, goodbye."),
         ]
     )
     caller = ScriptedCaller(
-        [
-            ("five five five zero one four two two one nine", False),
-            ("march twelfth nineteen eighty eight", False),
-            ("i need a notary at market street wednesday", False),
-            ("yes", False),
-            ("no that's it", True),
-        ]
+        VERIFY_LINES
+        + ["mortgage consultation tuesday morning market street", "yes", ("no that's it", True)]
     )
-    ep = await run_episode(SCEN, agent, caller, sb, model_id="scripted", run_id="r1")
-
-    assert isinstance(ep, Episode)
-    assert ep.outcome == "completed"
-    assert ep.messages[0]["role"] == "system"
+    ep = await run_episode(
+        scen, agent, caller, Sandbox(), model_id="scripted", run_id="r1", repeat_seed=1
+    )
+    assert isinstance(ep, Episode) and ep.outcome == "completed"
+    assert (
+        ep.messages[0]["role"] == "system"
+        and "Monday, November second" in ep.messages[0]["content"]
+    )
     assert ep.messages[1] == {"role": "assistant", "content": GREETING}
-    # the model's tool_calls objects are stored verbatim
     assert ep.messages[5]["tool_calls"] == [lookup]
-    tool_msg = ep.messages[6]
-    assert tool_msg["role"] == "tool" and tool_msg["tool_call_id"] == "c1"
-    assert json.loads(tool_msg["content"])["verified"] is True
+    assert ep.messages[6]["role"] == "tool" and ep.messages[6]["tool_call_id"] == "c1"
+    assert json.loads(ep.messages[6]["content"])["verified"] is True
     assert [e["tool"] for e in ep.tool_log] == [
         "lookup_account",
         "check_availability",
         "book_appointment",
     ]
-    assert any(
-        a["customer_id"] == "C-1042" and a["status"] == "booked"
-        for a in ep.final_state["appointments"]
+    assert ep.final_state["diff"]["appointments_new"] == [
+        {
+            "customer_id": "C-1001",
+            "branch_id": "market_st",
+            "service_type": "mortgage_consultation",
+            "slot_start": "2026-11-03T09:30",
+        }
+    ]
+    assert (
+        ep.turns[-1]["caller_text"] == "no that's it"
+        and ep.turns[-1]["assistant_text"] == "Thanks Dana, goodbye."
     )
-    assert ep.turns[-1]["caller_text"] == "no that's it"
-    assert ep.turns[-1]["assistant_text"] == "Thanks Dana, goodbye."
-    assert ep.n_agent_turns == 6 and len(ep.turns) == 5
-    assert ep.scenario_id == "ordinary-01" and ep.family == "ordinary"
+    assert ep.n_agent_turns == 6 and len(ep.turns) == 5 and ep.n_model_requests == 8
+    assert ep.scenario_id == "ordinary_01" and ep.family == "ordinary" and ep.repeat_seed == 1
     assert ep.model_id == "scripted" and ep.run_id == "r1"
-    # what the agent saw on its last call is the full history
-    assert agent.seen[-1][-1]["content"] == "no that's it"
-    # the caller was shown the greeting first
+    assert ep.turns[0]["finish_reasons"] == ["stop"] and ep.turns[0]["truncated"] is False
     assert caller.seen[0] == [("agent", GREETING)]
+    assert ep.prompt_source.endswith("system_prompt.md") and ep.system_prompt_chars > 500
 
 
 @pytest.mark.asyncio
-async def test_caller_text_is_stt_shaped_at_noise_level():
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
-    scen = SCEN.model_copy(update={"noise_level": 0})
-    agent = ScriptedAgent([say("ok"), say("bye")])
-    caller = ScriptedCaller([("My number is 555-014-2219, thanks!", False), ("bye", True)])
-    ep = await run_episode(scen, agent, caller, sb, model_id="s", run_id="r")
-    assert ep.turns[0]["caller_text_raw"] == "My number is 555-014-2219, thanks!"
+async def test_noise_levels_map_to_stt_shaping():
+    clean = await make_episode(
+        scenario(),
+        [say("ok"), say("bye")],
+        [("My number is 555-014-2219, thanks!", False), ("bye", True)],
+    )
     assert (
-        ep.turns[0]["caller_text"]
+        clean.turns[0]["caller_text"]
         == "my number is five five five zero one four two two one nine thanks"
     )
-    assert ep.messages[2] == {"role": "user", "content": ep.turns[0]["caller_text"]}
+    assert clean.turns[0]["caller_text_raw"] == "My number is 555-014-2219, thanks!"
+    noisy = await make_episode(
+        scenario(caller={"noise": "high"}),
+        [say("ok"), say("bye")],
+        [
+            ("i would like to book for two people on the fourth of november please", False),
+            ("bye", True),
+        ],
+    )
+    assert (
+        noisy.turns[0]["caller_text"]
+        != "i would like to book for two people on the fourth of november please"
+    )
+
+
+@pytest.mark.asyncio
+async def test_inject_from_scenario_is_armed_and_counted():
+    scen = scenario(
+        inject=[
+            {"tool": "check_availability", "call_index": 1, "error": "timeout"},
+            {"tool": "lookup_account", "call_index": 1, "error": "not_found"},
+        ]
+    )
+    ep = await make_episode(
+        scen,
+        [
+            tools(tc("lookup_account", DANA_LOOKUP)),
+            say("That did not go through."),
+            tools(tc("lookup_account", DANA_LOOKUP)),
+            say("Verified."),
+            tools(tc("check_availability", AVAIL)),
+            say("Could not check, try again?"),
+            tools(tc("check_availability", AVAIL)),
+            say("Nine thirty is open."),
+            say("Bye."),
+        ],
+        ["five five five...", "again", "tuesday", "yes", ("bye", True)],
+    )
+    log = ep.tool_log
+    assert log[0]["result"]["error"] == "not_found" and log[0]["injected"] is True
+    assert log[1]["ok"] is True
+    assert (
+        log[2]["result"] == {"error": "timeout", "message": "the request timed out"}
+        and log[2]["injected"]
+    )
+    assert log[3]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_max_turns_comes_from_expect():
+    scen = scenario(expect={"max_turns": 3})
+    ep = await make_episode(scen, [say(f"t{i}") for i in range(10)], [f"c{i}" for i in range(10)])
+    assert ep.outcome == "turn_cap" and len(ep.turns) == 3
 
 
 @pytest.mark.asyncio
 async def test_handoff_ends_after_one_closing_sentence():
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
     agent = ScriptedAgent(
         [
             tools(
-                tc(
-                    "request_handoff",
-                    {"reason": "caller_requested", "summary": "wants a person"},
-                    "h1",
-                )
+                tc("request_handoff", {"reason": "caller_requested", "summary": "wants a person"})
             ),
             say("I'm connecting you to a colleague now, please hold."),
             say("SHOULD NOT BE REACHED"),
         ]
     )
-    caller = ScriptedCaller(
-        [("let me talk to a person", False), ("hello?", False), ("hello??", False)]
+    ep = await make_episode(
+        scenario(), [], [("a person please", False), ("hello?", False)], agent=agent
     )
-    ep = await run_episode(SCEN, agent, caller, sb, model_id="s", run_id="r")
-    assert ep.outcome == "handoff"
-    assert ep.final_state["handoff"]["reason"] == "caller_requested"
+    assert ep.outcome == "handoff" and ep.final_state["handoff"]["reason"] == "caller_requested"
     assert len(ep.turns) == 1 and len(agent.script) == 1
 
 
 @pytest.mark.asyncio
-async def test_turn_cap_ends_episode():
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
-    agent = ScriptedAgent([say(f"turn {i}") for i in range(40)])
-    caller = ScriptedCaller([(f"caller {i}", False) for i in range(40)])
-    ep = await run_episode(SCEN, agent, caller, sb, model_id="s", run_id="r", max_turns=20)
-    assert ep.outcome == "turn_cap" and len(ep.turns) == 20
+async def test_hangup_semantics():
+    with_text = await make_episode(scenario(), [say("Goodbye.")], [("thanks bye", True)])
+    assert with_text.outcome == "completed" and with_text.turns[0]["assistant_text"] == "Goodbye."
+    bare = await make_episode(scenario(), [say("never")], [("", True)])
+    assert bare.outcome == "completed" and bare.turns == []
 
 
 @pytest.mark.asyncio
-async def test_hangup_with_text_gives_agent_a_closing_turn():
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
-    agent = ScriptedAgent([say("Goodbye.")])
-    caller = ScriptedCaller([("thanks bye", True)])
-    ep = await run_episode(SCEN, agent, caller, sb, model_id="s", run_id="r")
-    assert ep.outcome == "completed"
-    assert ep.turns[0]["assistant_text"] == "Goodbye."
-
-
-@pytest.mark.asyncio
-async def test_bare_hangup_ends_without_agent_turn():
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
-    agent = ScriptedAgent([say("never")])
-    caller = ScriptedCaller([("", True)])
-    ep = await run_episode(SCEN, agent, caller, sb, model_id="s", run_id="r")
-    assert ep.outcome == "completed" and ep.turns == [] and len(agent.script) == 1
+async def test_empty_caller_text_without_hangup_keeps_the_call_alive():
+    ep = await make_episode(
+        scenario(), [say("Are you there?"), say("Bye.")], [("", False), ("bye", True)]
+    )
+    assert ep.turns[0]["caller_text"] == "hello" and ep.turns[0]["caller_text_raw"] == ""
+    assert ep.outcome == "completed" and len(ep.turns) == 2
 
 
 @pytest.mark.asyncio
 async def test_invalid_json_arguments_become_tool_error_and_call_continues():
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
     bad = {
         "id": "b1",
         "type": "function",
         "function": {"name": "lookup_account", "arguments": "{phone: oops"},
     }
-    agent = ScriptedAgent([tools(bad), say("Sorry, could you repeat the number?"), say("bye")])
-    caller = ScriptedCaller([("my number is five five five", False), ("bye", True)])
-    ep = await run_episode(SCEN, agent, caller, sb, model_id="s", run_id="r")
+    ep = await make_episode(
+        scenario(),
+        [tools(bad), say("Sorry, could you repeat the number?"), say("bye")],
+        ["my number is five five five", ("bye", True)],
+    )
     result = json.loads(ep.messages[4]["content"])
     assert ep.messages[4]["tool_call_id"] == "b1"
     assert result["error"] == "invalid_argument" and "JSON" in result["message"]
-    assert ep.tool_log[0]["ok"] is False
-    assert ep.outcome == "completed"
+    assert ep.tool_log[0]["ok"] is False and ep.outcome == "completed"
 
 
 @pytest.mark.asyncio
 async def test_tool_loop_is_capped():
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
-    avail = {"branch_id": "market_st", "service_type": "notary", "date": "2026-11-04"}
-    agent = ScriptedAgent([tools(tc("check_availability", avail)) for _ in range(10)])
-    caller = ScriptedCaller([("hi", False)])
-    ep = await run_episode(SCEN, agent, caller, sb, model_id="s", run_id="r", max_tool_rounds=3)
-    assert ep.outcome == "abandoned"
-    assert ep.error and "tool rounds" in ep.error
-    assert len(ep.tool_log) == 4  # initial + 3 more rounds, then stop
+    ep = await make_episode(
+        scenario(),
+        [tools(tc("check_availability", AVAIL)) for _ in range(10)],
+        ["hi"],
+        max_tool_rounds=3,
+    )
+    assert ep.outcome == "abandoned" and "tool rounds" in ep.error and len(ep.tool_log) == 4
 
 
 @pytest.mark.asyncio
-async def test_injected_failures_from_scenario_are_armed():
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
-    scen = Scenario.model_validate(
-        {**SCEN.to_dict(), "injected_failures": [{"tool": "lookup_account", "nth_call": 1}]}
-    )
-    lookup = {"phone": "5550142219", "date_of_birth": "1988-03-12"}
+async def test_truncated_model_output_is_flagged():
     agent = ScriptedAgent(
-        [
-            tools(tc("lookup_account", lookup)),
-            say("That didn't go through, one moment."),
-            tools(tc("lookup_account", lookup)),
-            say("Verified."),
-            say("bye"),
-        ]
+        [say("I'm sorry, Dana. I'll"), say("Bye.")], finish_reasons=["length", "stop"]
     )
-    caller = ScriptedCaller([("here are my details", False), ("ok", False), ("bye", True)])
-    ep = await run_episode(scen, agent, caller, sb, model_id="s", run_id="r")
-    assert ep.tool_log[0]["result"]["error"] == "timeout" and ep.tool_log[0]["injected"] is True
-    assert ep.tool_log[1]["ok"] is True
+    ep = await make_episode(scenario(), [], ["i lost my card", ("bye", True)], agent=agent)
+    assert ep.turns[0]["finish_reasons"] == ["length"] and ep.turns[0]["truncated"] is True
+    assert ep.n_truncated == 1
 
 
 @pytest.mark.asyncio
 async def test_agent_exception_yields_error_outcome_not_crash():
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
-
     class Boom:
         async def respond(self, messages):
             raise RuntimeError("endpoint down")
 
-    caller = ScriptedCaller([("hi", False)])
-    ep = await run_episode(SCEN, Boom(), caller, sb, model_id="s", run_id="r")
+    ep = await run_episode(
+        scenario(), Boom(), ScriptedCaller(["hi"]), Sandbox(), model_id="s", run_id="r"
+    )
     assert ep.outcome == "error" and "endpoint down" in ep.error
 
 
 @pytest.mark.asyncio
 async def test_episode_json_round_trip(tmp_path):
-    sb = Sandbox(seed=42, today=date(2026, 11, 2))
-    agent = ScriptedAgent([say("bye")])
-    caller = ScriptedCaller([("bye", True)])
-    ep = await run_episode(SCEN, agent, caller, sb, model_id="s", run_id="r")
+    ep = await make_episode(scenario(), [say("bye")], [("bye", True)])
     p = ep.save(tmp_path)
     data = json.loads(p.read_text())
-    assert p.name == "ordinary-01.json"
+    assert p.name == "ordinary_01.json"
     assert set(data) >= {
         "episode_id",
         "scenario_id",
@@ -299,6 +261,10 @@ async def test_episode_json_round_trip(tmp_path):
         "started_at",
         "ended_at",
         "n_agent_turns",
+        "repeat_seed",
+        "prompt_source",
+        "system_prompt_chars",
+        "first_prompt_tokens",
     }
-    assert data["scenario"]["id"] == "ordinary-01"
+    assert data["scenario"]["id"] == "ordinary_01" and "source" not in data["scenario"]
     assert Episode.from_dict(data).outcome == "completed"

@@ -1,4 +1,4 @@
-"""Walk an episode's messages in order, resolving tool results to tool names."""
+"""Walk an episode's messages in order; map messages and tool-log entries to caller turns."""
 
 from __future__ import annotations
 
@@ -68,11 +68,7 @@ def parse_args(tc: dict) -> Any:
 
 
 def walk(ep: Episode):
-    """Yield (idx, kind, payload): kind in {"user", "assistant_text", "tool"}.
-
-    tool payload is a ToolEvent; assistant_text payload is the spoken string.
-    The greeting (messages[1]) is included as assistant_text.
-    """
+    """Yield (idx, kind, payload): kind in {"user", "assistant_text", "tool"}; greeting included."""
     pending: dict[str, tuple[str, Any]] = {}
     for idx, m in enumerate(ep.messages):
         role = m.get("role")
@@ -99,3 +95,22 @@ def walk(ep: Episode):
                     idx, name, args, result if isinstance(result, dict) else {"value": result}
                 ),
             )
+
+
+def message_turn(ep: Episode) -> dict[int, int]:
+    """message index -> caller turn idx (1-based); the greeting/system map to 0."""
+    out = {0: 0, 1: 0}
+    for t in ep.turns:
+        for i in t.get("message_indices", []):
+            out[i] = t["idx"]
+    return out
+
+
+def tool_log_turn(ep: Episode) -> dict[int, int]:
+    """tool_log idx -> caller turn idx. Tool calls are logged in the order the turns made them."""
+    out, i = {}, 0
+    for t in ep.turns:
+        for _ in t.get("tool_calls", []):
+            out[i] = t["idx"]
+            i += 1
+    return out

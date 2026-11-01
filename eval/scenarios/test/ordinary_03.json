@@ -1,0 +1,65 @@
+{
+  "id": "ordinary_03",
+  "family": "ordinary",
+  "title": "Priya cancels next week's financial review",
+  "tests": "Cancel path with read-back; nothing else touched",
+  "caller": {
+    "customer_id": "C-1003",
+    "name": "Priya Raman",
+    "persona": "Polite, brief",
+    "knows": {
+      "phone": "5550177310",
+      "phone_spoken": "five five five zero one seven seven three one zero",
+      "date_of_birth": "1992-11-30",
+      "first_name": "Priya",
+      "cards": [
+        "5560"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2002",
+          "what": "financial_review at Mill Road on 2026-11-10T11:00"
+        }
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Cancel your financial review appointment on November 10th at Mill Road. You do not want to rebook.",
+  "expect": {
+    "final_state": {
+      "appointments_changed": [
+        {
+          "appointment_id": "A-2002",
+          "status": "cancelled"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550177310",
+          "date_of_birth": "1992-11-30"
+        },
+        "ok": true
+      },
+      {
+        "tool": "cancel_appointment",
+        "args": {
+          "appointment_id": "A-2002"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 10,
+    "forbidden_tools": [
+      "book_appointment",
+      "reschedule_appointment"
+    ]
+  }
+}

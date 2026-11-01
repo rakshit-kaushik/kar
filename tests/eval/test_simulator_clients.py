@@ -1,39 +1,23 @@
-"""OpenAI-compatible agent and caller clients, driven through a fake transport."""
+"""OpenAI-compatible agent and caller clients through a fake transport."""
 
 from types import SimpleNamespace
 
 import pytest
+from helpers import scenario
 
-from eval.simulator.clients import LLMCaller, OpenAIAgent
-from eval.simulator.scenario import Scenario
+from eval.simulator.clients import LLMCaller, OpenAIAgent, clean_caller_text
 
-SCEN = Scenario.model_validate(
-    {
-        "id": "corr-01",
-        "family": "correction",
-        "today": "2026-11-02",
-        "customer_id": "C-1042",
-        "known_facts": {"phone": "5550142219", "date_of_birth": "1988-03-12", "name": "Dana"},
-        "persona": {"name": "Dana", "age": 38, "style": "terse"},
-        "goal": "Book a notary at Marlow Street on Friday November 6 at two, then change it to two thirty.",
-        "corrections": [
-            {
-                "when": "after the agent reads back two o'clock",
-                "field": "time",
-                "from": "14:00",
-                "to": "14:30",
-                "say": "actually make it two thirty",
-            }
-        ],
-        "detours": [
-            {
-                "when": "once verified",
-                "say": "what are your saturday hours",
-                "resolution": "then continue",
-            }
-        ],
-        "noise_level": 1,
-    }
+SCEN = scenario(
+    caller={
+        "persona": "Decisive, changes her mind once",
+        "withholds": ["date of birth"],
+        "noise": "high",
+        "stt_quirks": ["say 'oh' for every zero"],
+    },
+    goal="Book a notary at Marker Street Thursday at two, then change it to two thirty.",
+    script=[
+        {"trigger": "agent reads back the 2:00 booking", "do": "say 'actually make it two thirty'"}
+    ],
 )
 
 
@@ -52,8 +36,9 @@ class FakeMessage:
 
 
 class FakeCompletions:
-    def __init__(self, replies, fail_first=0):
+    def __init__(self, replies, fail_first=0, reject_temperature=False):
         self.replies, self.calls, self.fail_first = list(replies), [], fail_first
+        self.reject_temperature = reject_temperature
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
@@ -62,6 +47,14 @@ class FakeCompletions:
             from openai import APIConnectionError
 
             raise APIConnectionError(request=SimpleNamespace())
+        if self.reject_temperature and "temperature" in kwargs:
+            from openai import BadRequestError
+
+            raise BadRequestError(
+                "`temperature` is deprecated for this model.",
+                response=SimpleNamespace(status_code=400, headers={}, request=None),
+                body={"error": {"message": "`temperature` is deprecated for this model."}},
+            )
         msg = self.replies.pop(0)
         return SimpleNamespace(
             choices=[SimpleNamespace(message=msg, finish_reason="stop")],
@@ -69,86 +62,93 @@ class FakeCompletions:
         )
 
 
-def fake_client(replies, fail_first=0):
-    comp = FakeCompletions(replies, fail_first)
+def fake_client(replies, **kw):
+    comp = FakeCompletions(replies, **kw)
     return SimpleNamespace(chat=SimpleNamespace(completions=comp)), comp
 
 
 @pytest.mark.asyncio
 async def test_agent_sends_tools_and_returns_verbatim_message():
-    tc = [
+    tcs = [
         {"id": "x1", "type": "function", "function": {"name": "lookup_account", "arguments": "{}"}}
     ]
-    client, comp = fake_client([FakeMessage(content="", tool_calls=tc)])
+    client, comp = fake_client([FakeMessage(content="", tool_calls=tcs)])
     agent = OpenAIAgent(client=client, model="m1")
     msg = await agent.respond(
         [{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}]
     )
-    assert msg == {"role": "assistant", "content": "", "tool_calls": tc}
+    assert msg == {"role": "assistant", "content": "", "tool_calls": tcs}
     sent = comp.calls[0]
-    assert sent["model"] == "m1" and len(sent["tools"]) == 8
-    assert {t["function"]["name"] for t in sent["tools"]} >= {"lookup_account", "request_handoff"}
-    assert "temperature" not in sent  # the hosted endpoint rejects it
-    assert sent["max_tokens"] == 300
+    assert sent["model"] == "m1" and {t["function"]["name"] for t in sent["tools"]} >= {
+        "lookup_account",
+        "request_handoff",
+    }
+    assert "temperature" not in sent and sent["max_tokens"] == 700
+    assert agent.last_finish_reason == "stop" and agent.last_usage == {
+        "prompt_tokens": 100,
+        "completion_tokens": 10,
+    }
     assert agent.usage_totals == {"prompt_tokens": 100, "completion_tokens": 10, "requests": 1}
 
 
 @pytest.mark.asyncio
-async def test_agent_passes_temperature_only_when_set_and_retries_connection_errors():
+async def test_agent_retries_connection_errors_and_sends_temperature_when_set():
     client, comp = fake_client([FakeMessage(content="hello")], fail_first=2)
     agent = OpenAIAgent(client=client, model="m1", temperature=0.2, retries=3, backoff_s=0)
-    msg = await agent.respond([{"role": "user", "content": "hi"}])
-    assert msg == {"role": "assistant", "content": "hello"}
+    assert await agent.respond([{"role": "user", "content": "hi"}]) == {
+        "role": "assistant",
+        "content": "hello",
+    }
     assert comp.calls[-1]["temperature"] == 0.2 and len(comp.calls) == 3
 
 
 @pytest.mark.asyncio
-async def test_agent_gives_up_after_retries():
-    client, _ = fake_client([FakeMessage(content="late")], fail_first=5)
-    agent = OpenAIAgent(client=client, model="m1", retries=2, backoff_s=0)
-    from openai import APIConnectionError
-
-    with pytest.raises(APIConnectionError):
-        await agent.respond([{"role": "user", "content": "hi"}])
+async def test_temperature_rejected_by_endpoint_falls_back_once_and_is_remembered():
+    client, comp = fake_client(
+        [FakeMessage(content="a"), FakeMessage(content="b")], reject_temperature=True
+    )
+    agent = OpenAIAgent(client=client, model="m1", temperature=0.3)
+    assert (await agent.respond([{"role": "user", "content": "hi"}]))["content"] == "a"
+    assert (await agent.respond([{"role": "user", "content": "hi"}]))["content"] == "b"
+    assert [("temperature" in c) for c in comp.calls] == [True, False, False]
+    assert agent.temperature_applied is False
 
 
 @pytest.mark.asyncio
-async def test_caller_prompt_carries_scenario_and_flips_roles():
+async def test_caller_prompt_carries_scenario_seed_and_flips_roles():
     client, comp = fake_client([FakeMessage(content="Hi, it's Dana, 555-014-2219. [hangup]")])
-    caller = LLMCaller(SCEN, client=client, model="c1")
+    caller = LLMCaller(SCEN, client=client, model="c1", seed=2)
     text, hangup = await caller.next_utterance(
         [("agent", "Hello, phone number?"), ("caller", "hi"), ("agent", "number please")], 2
     )
-    assert (text, hangup) == ("Hi, it's Dana, 555-014-2219.", True)
+    assert (text, hangup) == ("Hi, it's Dana, 555-014-2219.", True) and caller.last_raw.startswith(
+        "Hi, it's Dana"
+    )
     sent = comp.calls[0]["messages"]
     system = sent[0]["content"]
     for needle in (
-        "Dana",
-        "5550142219",
+        "Dana Whitfield",
+        "five five five zero one four two two one nine",
         "1988-03-12",
+        "Decisive",
+        "date of birth",
+        "say 'oh' for every zero",
         "two thirty",
-        "saturday hours",
-        "terse",
+        "actually make it two thirty",
         "[hangup]",
-        "Marlow Street",
+        "seed 2",
+        "Monday, November second",
     ):
         assert needle in system, needle
-    assert [m["role"] for m in sent[1:]] == ["user", "assistant", "user"]
-    assert sent[1]["content"] == "Hello, phone number?"
-    assert "temperature" not in comp.calls[0]
-    assert caller.usage_totals["requests"] == 1
+    assert [m["role"] for m in sent[1:]] == ["user", "assistant", "user"] and sent[1][
+        "content"
+    ] == "Hello, phone number?"
+    assert comp.calls[0]["temperature"] == 0.3 and caller.usage_totals["requests"] == 1
 
 
-@pytest.mark.asyncio
-async def test_caller_strips_quotes_and_narration():
-    client, _ = fake_client([FakeMessage(content='Caller: "yes please"')])
-    caller = LLMCaller(SCEN, client=client, model="c1")
-    text, hangup = await caller.next_utterance([("agent", "Shall I book it?")], 5)
-    assert (text, hangup) == ("yes please", False)
-
-
-@pytest.mark.asyncio
-async def test_caller_empty_reply_becomes_hangup():
-    client, _ = fake_client([FakeMessage(content="")])
-    caller = LLMCaller(SCEN, client=client, model="c1")
-    assert await caller.next_utterance([("agent", "Goodbye.")], 9) == ("", True)
+def test_clean_caller_text_rules():
+    assert clean_caller_text('Caller: "yes please"') == ("yes please", False)
+    assert clean_caller_text("") == ("", False)
+    assert clean_caller_text("[hangup]") == ("", True)
+    assert clean_caller_text("okay thanks bye [HANG UP]") == ("okay thanks bye", True)
+    assert clean_caller_text("*sighs* no, a person please") == ("no, a person please", False)

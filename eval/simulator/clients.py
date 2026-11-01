@@ -2,9 +2,10 @@
 
 Verified against openai 3.42.0 in .venv: `AsyncOpenAI(api_key, base_url, timeout, max_retries)`,
 `client.chat.completions.create(model, messages, tools, max_tokens, temperature)`,
-`resp.choices[0].message.model_dump(exclude_none=True)`, `resp.usage.prompt_tokens`.
-The hosted Anthropic endpoint rejects `temperature` for claude-sonnet-5-5, so it is only sent
-when explicitly configured.
+`resp.choices[0].message.model_dump(exclude_none=True)`, `resp.choices[0].finish_reason`,
+`resp.usage.prompt_tokens`. The hosted Anthropic endpoint rejects `temperature` for
+claude-sonnet-5-5 with a 400 that names it; the client then drops temperature for the rest of
+the run and records `temperature_applied = False`.
 """
 
 from __future__ import annotations
@@ -13,14 +14,28 @@ import asyncio
 import re
 from typing import Any
 
-from openai import APIConnectionError, AsyncOpenAI, InternalServerError, RateLimitError
+from openai import (
+    APIConnectionError,
+    AsyncOpenAI,
+    BadRequestError,
+    InternalServerError,
+    RateLimitError,
+)
 
-from eval.sandbox import TOOL_SCHEMAS
-from eval.simulator.prompts import PROMPT_DIR, long_date
+from eval.sandbox import TOOL_SCHEMAS, load_seed
+from eval.simulator.prompts import PROMPT_DIR
 from eval.simulator.scenario import Scenario
 
 RETRYABLE = (APIConnectionError, RateLimitError, InternalServerError)
 MESSAGE_KEYS = ("role", "content", "tool_calls")
+NOISE_INSTRUCTIONS = {
+    "none": 'Speak numbers as words the way a caller does: "five five five zero one four two two one nine", '
+    '"march twelfth nineteen eighty eight", "two thirty".',
+    "low": "You are on a phone line transcribed by speech recognition: lowercase, no punctuation, numbers as "
+    'words, an occasional "um" or "uh".',
+    "high": "You are on a bad phone line transcribed by speech recognition: lowercase, no punctuation, numbers as "
+    'words, fillers ("um", "like"), a small word dropped now and then, digits spoken loosely.',
+}
 
 
 def make_client(base_url: str, api_key: str | None, timeout_s: float = 120.0) -> AsyncOpenAI:
@@ -43,12 +58,15 @@ class _ChatBase:
     ):
         self.client, self.model = client, model
         self.temperature, self.max_tokens = temperature, max_tokens
+        self.temperature_applied: bool | None = None if temperature is None else True
         self.retries, self.backoff_s = max(1, retries), backoff_s
         self.usage_totals: dict[str, int] = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "requests": 0,
         }
+        self.last_usage: dict[str, int] = {}
+        self.last_finish_reason: str | None = None
 
     async def _create(self, messages: list[dict], tools: list[dict] | None = None) -> Any:
         kwargs: dict[str, Any] = {
@@ -60,21 +78,32 @@ class _ChatBase:
             kwargs["tools"] = tools
         if self.temperature is not None:
             kwargs["temperature"] = self.temperature
+        resp = None
         for attempt in range(self.retries):
             try:
                 resp = await self.client.chat.completions.create(**kwargs)
                 break
+            except BadRequestError as e:
+                if "temperature" in kwargs and "temperature" in str(e).lower():
+                    kwargs.pop("temperature")
+                    self.temperature, self.temperature_applied = None, False
+                    continue
+                raise
             except RETRYABLE:
                 if attempt == self.retries - 1:
                     raise
                 await asyncio.sleep(self.backoff_s * (2**attempt))
         usage = getattr(resp, "usage", None)
+        self.last_usage = {}
         if usage is not None:
-            self.usage_totals["prompt_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
-            self.usage_totals["completion_tokens"] += int(
-                getattr(usage, "completion_tokens", 0) or 0
-            )
+            self.last_usage = {
+                "prompt_tokens": int(getattr(usage, "prompt_tokens", 0) or 0),
+                "completion_tokens": int(getattr(usage, "completion_tokens", 0) or 0),
+            }
+            self.usage_totals["prompt_tokens"] += self.last_usage["prompt_tokens"]
+            self.usage_totals["completion_tokens"] += self.last_usage["completion_tokens"]
         self.usage_totals["requests"] += 1
+        self.last_finish_reason = getattr(resp.choices[0], "finish_reason", None)
         return resp
 
 
@@ -88,7 +117,7 @@ class OpenAIAgent(_ChatBase):
         model: str,
         tools: list[dict] | None = None,
         temperature: float | None = None,
-        max_tokens: int = 300,
+        max_tokens: int = 700,
         retries: int = 3,
         backoff_s: float = 1.0,
     ):
@@ -107,7 +136,7 @@ class OpenAIAgent(_ChatBase):
         raw = resp.choices[0].message.model_dump(exclude_none=True)
         msg = {k: raw[k] for k in MESSAGE_KEYS if k in raw}
         msg["role"] = "assistant"
-        if "content" not in msg or msg["content"] is None:
+        if msg.get("content") is None:
             msg["content"] = ""
         if not msg.get("tool_calls"):
             msg.pop("tool_calls", None)
@@ -115,22 +144,36 @@ class OpenAIAgent(_ChatBase):
 
 
 _HANGUP = re.compile(r"\[\s*hang\s*-?\s*up\s*\]", re.IGNORECASE)
-_LABEL = re.compile(r"^\s*(caller|customer|me|[A-Z][a-z]+)\s*:\s*", re.IGNORECASE)
+_LABEL = re.compile(r"^\s*(caller|customer|me|[A-Z][a-z]+)\s*:\s*")
+_STAGE = re.compile(r"\*[^*]{0,80}\*|\([^)]{0,80}\)")
 
 
 def clean_caller_text(raw: str) -> tuple[str, bool]:
-    hangup = bool(_HANGUP.search(raw))
-    text = _HANGUP.sub(" ", raw)
+    """Strip labels, quotes and stage directions; detect [hangup]. Empty text is NOT a hangup."""
+    hangup = bool(_HANGUP.search(raw or ""))
+    text = _HANGUP.sub(" ", raw or "")
+    text = _STAGE.sub(" ", text)
     text = _LABEL.sub("", text.strip())
     text = text.strip().strip('"“”').strip()
     text = re.sub(r"\s+", " ", text)
-    if not text:
-        return "", True
     return text, hangup
 
 
+def _render_knows(knows: dict) -> str:
+    lines = []
+    spoken = {k[: -len("_spoken")]: v for k, v in knows.items() if k.endswith("_spoken")}
+    for k, v in knows.items():
+        if k.endswith("_spoken"):
+            continue
+        line = f"- {k}: {v}"
+        if k in spoken:
+            line += f" (say it as: {spoken[k]})"
+        lines.append(line)
+    return "\n".join(lines) or "- nothing beyond your goal"
+
+
 class LLMCaller(_ChatBase):
-    """A hosted model plays the caller described by the scenario."""
+    """A hosted model plays the caller described by the scenario (temperature 0.3, seeded phrasing)."""
 
     def __init__(
         self,
@@ -138,9 +181,9 @@ class LLMCaller(_ChatBase):
         *,
         client: Any,
         model: str,
-        temperature: float | None = None,
-        max_tokens: int = 120,
-        max_turns: int = 20,
+        temperature: float | None = 0.3,
+        seed: int = 0,
+        max_tokens: int = 150,
         retries: int = 3,
         backoff_s: float = 1.0,
     ):
@@ -152,44 +195,28 @@ class LLMCaller(_ChatBase):
             retries=retries,
             backoff_s=backoff_s,
         )
-        self.scenario, self.max_turns = scenario, max_turns
+        self.scenario, self.seed = scenario, seed
+        self.max_turns = scenario.expect.max_turns
+        self.clock_spoken = load_seed().get("clock_spoken", "")
         self._template = (PROMPT_DIR / "caller_system.md").read_text()
+        self.last_raw: str | None = None
 
     def system_prompt(self, turn_idx: int) -> str:
-        s = self.scenario
-        p = s.persona
-        persona = f"{p.name}" + (f", {p.age}" if p.age else "") + f"; manner: {p.style}"
-        if p.notes:
-            persona += f"; {p.notes}"
-        facts = (
-            "; ".join(f"{k}: {v}" for k, v in s.known_facts.items()) or "nothing beyond your goal"
-        )
-        hints = " ".join(s.script_hints) or "Follow the agent's questions naturally."
-        corrections = (
-            " ".join(
-                f"When {c.when}: change {c.field} from {c.from_ or 'what you said'} to {c.to}"
-                + (f', saying "{c.say}"' if c.say else "")
-                + "."
-                for c in s.corrections
-            )
-            or "none"
-        )
-        detours = (
-            " ".join(
-                f'When {d.when}: say "{d.say}".' + (f" {d.resolution}." if d.resolution else "")
-                for d in s.detours
-            )
-            or "none"
-        )
+        s, c = self.scenario, self.scenario.caller
+        noise = NOISE_INSTRUCTIONS[c.noise]
+        if c.stt_quirks:
+            noise += " Also: " + "; ".join(c.stt_quirks) + "."
+        script = "\n".join(f"- When {it.trigger}: {it.do}." for it in s.script) or "- none"
         return self._template.format(
-            persona=persona,
-            facts=facts,
-            weekday=s.today.strftime("%A"),
-            today_long=long_date(s.today),
+            name=c.name,
+            persona=c.persona,
+            today=self.clock_spoken,
+            knows=_render_knows(c.knows),
+            withholds=", ".join(c.withholds) or "nothing in particular",
             goal=s.goal,
-            hints=hints,
-            corrections=corrections,
-            detours=detours,
+            script=script,
+            noise=noise,
+            seed=self.seed,
             turn_idx=turn_idx,
             max_turns=self.max_turns,
         ).strip()
@@ -203,5 +230,5 @@ class LLMCaller(_ChatBase):
         if messages[-1]["role"] != "user":
             messages.append({"role": "user", "content": "(silence)"})
         resp = await self._create(messages)
-        raw = resp.choices[0].message.content or ""
-        return clean_caller_text(raw)
+        self.last_raw = resp.choices[0].message.content or ""
+        return clean_caller_text(self.last_raw)

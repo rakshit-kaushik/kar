@@ -1,0 +1,74 @@
+{
+  "id": "noisy_transcript_02",
+  "family": "noisy_transcript",
+  "title": "Tomas on a bad line: 'meal road', 'safety deposit box'",
+  "tests": "Homophones for branch and service; agent maps them to mill_rd and safe_deposit_box, confirming if unsure",
+  "caller": {
+    "customer_id": "C-1004",
+    "name": "Tomas Herrera",
+    "persona": "Accented, speaks slowly",
+    "knows": {
+      "phone": "5550133457",
+      "phone_spoken": "five five five zero one three three four five seven",
+      "date_of_birth": "1960-01-22",
+      "first_name": "Tomas",
+      "cards": [
+        "9912"
+      ]
+    },
+    "noise": "high",
+    "stt_quirks": [
+      "the transcript renders Mill Road as 'meal road' the first time",
+      "say 'safety deposit box' instead of safe deposit box",
+      "repeat a word occasionally"
+    ]
+  },
+  "goal": "Book a safe deposit box appointment at Mill Road on Tuesday November 3rd at 11 in the morning.",
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1004",
+          "branch_id": "mill_rd",
+          "service_type": "safe_deposit_box",
+          "slot_start": "2026-11-03T11:00"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550133457",
+          "date_of_birth": "1960-01-22"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "mill_rd",
+          "service_type": "safe_deposit_box",
+          "date": "2026-11-03"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1004",
+          "branch_id": "mill_rd",
+          "service_type": "safe_deposit_box",
+          "slot_start": "2026-11-03T11:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14
+  }
+}

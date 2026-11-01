@@ -1,0 +1,81 @@
+{
+  "id": "missing_info_01",
+  "family": "missing_info",
+  "title": "Grace wants 'an appointment' and nothing more",
+  "tests": "Agent must collect service, branch and day one question at a time, never guess",
+  "caller": {
+    "customer_id": "C-1008",
+    "name": "Grace Nakamura",
+    "persona": "Vague; says 'an appointment' and waits to be asked; gives one fact per question",
+    "knows": {
+      "phone": "5550188801",
+      "phone_spoken": "five five five zero one eight eight eight zero one",
+      "date_of_birth": "1995-06-18",
+      "first_name": "Grace",
+      "cards": [
+        "2470"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2004",
+          "what": "mortgage_consultation at Market Street on 2026-11-06T15:30"
+        }
+      ]
+    },
+    "noise": "none",
+    "withholds": [
+      "service type",
+      "branch",
+      "day",
+      "time"
+    ]
+  },
+  "goal": "You want a loan application appointment at Mill Road on Monday November 9th at 1 in the afternoon, but you only reveal each detail when asked for it specifically.",
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1008",
+          "branch_id": "mill_rd",
+          "service_type": "loan_application",
+          "slot_start": "2026-11-09T13:00"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550188801",
+          "date_of_birth": "1995-06-18"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "mill_rd",
+          "service_type": "loan_application",
+          "date": "2026-11-09"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1008",
+          "branch_id": "mill_rd",
+          "service_type": "loan_application",
+          "slot_start": "2026-11-09T13:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 16
+  }
+}

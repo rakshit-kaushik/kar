@@ -1,0 +1,71 @@
+{
+  "id": "correction_03",
+  "family": "correction",
+  "title": "Aiko downgrades express replacement to standard",
+  "tests": "Argument correction on a card block; the final call carries reason=lost and replacement=standard",
+  "caller": {
+    "customer_id": "C-1005",
+    "name": "Aiko Tanaka",
+    "persona": "Casual, quick, cost-conscious",
+    "knows": {
+      "phone": "5550155678",
+      "phone_spoken": "five five five zero one five five six seven eight",
+      "date_of_birth": "2001-09-09",
+      "first_name": "Aiko",
+      "cards": [
+        "3307"
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "You lost your card ending 3307 (left it at a restaurant). Ask to block it and get a replacement. First ask for the fastest option; when told express costs twenty-five dollars, change to the free standard option. Confirm the block.",
+  "script": [
+    {
+      "trigger": "agent states the express fee or reads back express",
+      "do": "switch to standard"
+    }
+  ],
+  "expect": {
+    "final_state": {
+      "cards": [
+        {
+          "card_last4": "3307",
+          "status": "blocked",
+          "replacement": "standard"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550155678",
+          "date_of_birth": "2001-09-09"
+        },
+        "ok": true
+      },
+      {
+        "tool": "block_card",
+        "args": {
+          "customer_id": "C-1005",
+          "card_last4": "3307",
+          "reason": "lost",
+          "replacement": "standard"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14,
+    "corrections_hold": [
+      {
+        "field": "replacement",
+        "value": "standard"
+      }
+    ]
+  }
+}

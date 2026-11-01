@@ -1,37 +1,73 @@
-"""r3-eval runner: orchestration, summary markdown, Postgres writes, CLI defaults."""
+"""r3-eval runner: repeats with seeds, summary with mean and spread, Postgres writes, CLI subcommands."""
 
 import json
+from pathlib import Path
 
 import pytest
-from helpers import LOOKUP_ARGS, ScriptedAgent, ScriptedCaller, say, scenario, tc, tools
+from helpers import (
+    VERIFY,
+    VERIFY_LINES,
+    ScriptedAgent,
+    ScriptedCaller,
+    say,
+    scenario,
+    tc,
+    tools,
+)
 
-from eval.runner import build_parser, resolve_api_key, run_scenarios, summarize, write_db
-from eval.scorers import WEIGHTS, ScorerResult
+from eval.runner import (
+    build_parser,
+    resolve_api_key,
+    run_scenarios,
+    summarize,
+    validate_dir,
+    write_db,
+)
+from eval.scorers import ADVISORY, WEIGHTS, ScorerResult
 
-VERIFY = [
-    say("Date of birth?"),
-    tools(tc("lookup_account", LOOKUP_ARGS)),
-    say("Verified. How can I help?"),
-]
-LINES = ["five five five zero one four two two one nine", "march twelfth nineteen eighty eight"]
+TEST_DIR = Path(__file__).resolve().parents[2] / "eval/scenarios/test"
+AVAIL = {"branch_id": "market_st", "service_type": "mortgage_consultation", "date": "2026-11-03"}
+BOOK = {
+    "customer_id": "C-1001",
+    "branch_id": "market_st",
+    "service_type": "mortgage_consultation",
+    "slot_start": "2026-11-03T09:30",
+    "idempotency_key": "k",
+}
 
 
 def two_scenarios():
-    a = scenario(id="ordinary-01", family="ordinary", expected={"max_turns": 6})
-    b = scenario(id="needs-01", family="needs_person", expected={"handoff": True, "max_turns": 6})
+    a = scenario()
+    b = scenario(
+        id="needs_person_01",
+        family="needs_person",
+        expect={
+            "handoff": {"required": True, "reason": "caller_requested"},
+            "tool_calls": [{"tool": "request_handoff", "ok": True}],
+            "final_state": {"no_other_changes": True},
+        },
+    )
     return [a, b]
 
 
 def agent_factory():
-    return ScriptedAgent(VERIFY + [say("Sure, I can help with that."), say("Goodbye.")])
+    return ScriptedAgent(
+        VERIFY
+        + [
+            tools(tc("check_availability", AVAIL)),
+            say("Nine thirty is open, book it?"),
+            tools(tc("book_appointment", BOOK)),
+            say("Booked. Bye."),
+        ]
+    )
 
 
-def caller_factory(scen):
-    return ScriptedCaller(LINES + ["i need a person", ("bye", True)])
+def caller_factory(scen, seed):
+    return ScriptedCaller(VERIFY_LINES + ["tuesday nine thirty", "yes", ("bye", True)])
 
 
 @pytest.mark.asyncio
-async def test_run_scenarios_writes_episodes_scores_and_summary(tmp_path):
+async def test_run_scenarios_repeats_with_seeds_and_writes_everything(tmp_path):
     results = await run_scenarios(
         two_scenarios(),
         agent_factory,
@@ -39,111 +75,147 @@ async def test_run_scenarios_writes_episodes_scores_and_summary(tmp_path):
         out_dir=tmp_path,
         run_id="r-test",
         model_id="scripted",
-        parallel=2,
-        episodes_per_scenario=2,
+        parallel=3,
+        repeats=3,
     )
-    assert len(results) == 4
+    assert len(results) == 6 and sorted({ep.repeat_seed for ep, _ in results}) == [0, 1, 2]
     files = sorted(p.name for p in (tmp_path / "episodes").iterdir())
     assert files == [
-        "needs-01-1.json",
-        "needs-01-2.json",
-        "ordinary-01-1.json",
-        "ordinary-01-2.json",
+        f"{sid}-s{k}.json" for sid in ("needs_person_01", "ordinary_01") for k in range(3)
     ]
-    data = json.loads((tmp_path / "episodes" / "needs-01-1.json").read_text())
-    assert data["run_id"] == "r-test" and data["model_id"] == "scripted"
-    assert {s["scorer"] for s in data["scores"]} == set(WEIGHTS)
+    data = json.loads((tmp_path / "episodes" / "ordinary_01-s2.json").read_text())
+    assert data["repeat_seed"] == 2 and {s["scorer"] for s in data["scores"]} == set(WEIGHTS)
     rows = [json.loads(line) for line in (tmp_path / "scores.jsonl").read_text().splitlines()]
-    assert len(rows) == 4 * len(WEIGHTS)
+    assert len(rows) == 6 * len(WEIGHTS)
     assert set(rows[0]) == {
         "run_id",
         "model_id",
         "scenario_id",
         "episode_id",
+        "repeat_seed",
         "family",
         "scorer",
         "pass",
+        "advisory",
+        "turn_idx",
         "detail",
     }
-    handoff_rows = [r for r in rows if r["scenario_id"] == "needs-01" and r["scorer"] == "handoff"]
-    assert all(r["pass"] is False for r in handoff_rows)  # the scripted agent never hands off
-    md = (tmp_path / "summary.md").read_text()
-    assert "needs_person" in md and "ordinary" in md and "r-test" in md
-
-
-def fake_result(scenario_id, family, fails):
-    ep = type("E", (), {})()
-    ep.scenario_id, ep.family, ep.episode_id = scenario_id, family, f"{scenario_id}-x"
-    ep.outcome, ep.turns, ep.usage = (
-        "completed",
-        [1, 2, 3],
-        {"agent": {"prompt_tokens": 10, "completion_tokens": 2, "requests": 1}, "caller": {}},
+    assert all(
+        r["pass"] is False
+        for r in rows
+        if r["scenario_id"] == "needs_person_01" and r["scorer"] == "handoff"
     )
-    ep.latency_ms, ep.n_model_requests, ep.error = [100.0], 1, None
-    scores = [ScorerResult(name, name not in fails, {}) for name in WEIGHTS]
+    md = (tmp_path / "summary.md").read_text()
+    assert "needs_person" in md and "ordinary" in md and "r-test" in md and "seeds 0, 1, 2" in md
+
+
+def fake_result(scenario_id, family, fails, seed=0):
+    ep = type("E", (), {})()
+    ep.scenario_id, ep.family, ep.episode_id, ep.repeat_seed = (
+        scenario_id,
+        family,
+        f"{scenario_id}-s{seed}",
+        seed,
+    )
+    ep.outcome, ep.turns, ep.error = "completed", [1, 2, 3], None
+    ep.usage = {
+        "agent": {"prompt_tokens": 10, "completion_tokens": 2, "requests": 1},
+        "caller": {
+            "prompt_tokens": 5,
+            "completion_tokens": 1,
+            "requests": 1,
+            "temperature_applied": False,
+        },
+    }
+    ep.latency_ms, ep.n_model_requests, ep.n_truncated = [100.0], 1, 0
+    ep.prompt_source, ep.first_prompt_tokens = "eval/prompts/system_prompt.md", 3000
+    ep.started_at, ep.ended_at, ep.final_state = (
+        "2026-11-01T10:00:00",
+        "2026-11-01T10:01:00",
+        {"x": 1},
+    )
+    scores = [
+        ScorerResult(name, name not in fails, {"applicable": True}, advisory=name in ADVISORY)
+        for name in WEIGHTS
+    ]
     return ep, scores
 
 
-def test_summary_ranks_failures_by_frequency_times_cost():
+def test_summary_mean_spread_and_ranked_failures():
     results = [
-        fake_result("a", "ordinary", {"brevity"}),
-        fake_result("b", "ordinary", {"brevity", "no_unsupported_success_claim"}),
-        fake_result("c", "correction", {"brevity", "no_unsupported_success_claim"}),
-        fake_result("d", "correction", set()),
+        fake_result("a", "ordinary", set(), 0),
+        fake_result("a", "ordinary", {"brevity"}, 1),
+        fake_result("a", "ordinary", {"no_success_claim_before_result", "brevity"}, 2),
+        fake_result("b", "correction", {"no_success_claim_before_result"}, 0),
+        fake_result("b", "correction", set(), 1),
+        fake_result("b", "correction", set(), 2),
     ]
     md = summarize(results, run_id="r1", model_id="m1")
-    assert "| ordinary |" in md and "| correction |" in md
+    fam = md.split("## Per family")[1].split("## Ranked")[0]
+    assert (
+        "| ordinary | 3 | 67% (0–100) |" in fam
+    )  # all-pass per seed: 1,1,0 -> mean 67, spread 0–100
+    assert "| correction | 3 | 67% (0–100) |" in fam
     ranked = md.split("## Ranked failures")[1]
-    pos_claim = ranked.index("no_unsupported_success_claim")
-    pos_brev = ranked.index("brevity")
-    assert pos_claim < pos_brev  # 2 x 5 = 10 beats 3 x 1 = 3
-    assert "| 2 | 5 | 10 |" in ranked and "| 3 | 1 | 3 |" in ranked
-    assert "all scorers pass" in md.lower()
-    assert "50%" in md  # correction family: 1 of 2 all-pass
+    assert ranked.index("no_success_claim_before_result") < ranked.index("brevity")
+    assert "| 2 | 5 | 10 |" in ranked and "| 2 | 0 | 0 |" in ranked
+    assert "brevity (advisory)" in md
+    assert "caller temperature" in md.lower() and "not applied" in md.lower()
 
 
 @pytest.mark.db
 def test_write_db_inserts_eval_results_sessions_and_ledger(rollback_conn):
-    results = [fake_result("a", "ordinary", {"brevity"}), fake_result("b", "needs_person", set())]
-    for ep, _ in results:
-        ep.started_at, ep.ended_at, ep.final_state = (
-            "2026-11-01T10:00:00",
-            "2026-11-01T10:01:00",
-            {"x": 1},
-        )
+    results = [
+        fake_result("a", "ordinary", {"no_jargon"}),
+        fake_result("b", "needs_person", set(), 1),
+    ]
     counts = write_db(rollback_conn, results, run_id="r-db", model_id="m1")
     assert counts == {"eval_results": 2 * len(WEIGHTS), "sessions": 2, "cost_ledger": 5}
-    n = rollback_conn.execute(
-        "select count(*) from eval_results where run_id='r-db' and pass=false"
-    ).fetchone()[0]
-    assert n == 1
     row = rollback_conn.execute(
         "select family, scorer, detail from eval_results where run_id='r-db' and pass=false"
     ).fetchone()
-    assert row[0] == "ordinary" and row[1] == "brevity" and row[2] == {}
+    assert row[0] == "ordinary" and row[1] == "no_jargon"
+    assert (
+        row[2]["repeat_seed"] == 0 and row[2]["advisory"] is False and row[2]["applicable"] is True
+    )
     sess = rollback_conn.execute(
-        "select scenario_id, outcome, state from sessions where run_id='r-db' order by 1"
+        "select call_id, scenario_id, outcome, state from sessions where run_id='r-db' order by 1"
     ).fetchall()
-    assert sess[0] == ("a", "completed", {"x": 1})
+    assert sess[0] == ("a-s0", "a", "completed", {"x": 1})
 
 
-def test_cli_defaults_and_api_key_resolution(monkeypatch):
+def test_validate_dir_reports_problems_per_file(tmp_path):
+    assert validate_dir(TEST_DIR) == {}
+    bad = json.loads((TEST_DIR / "ordinary_01.json").read_text())
+    bad["caller"]["customer_id"] = "C-9999"
+    (tmp_path / "ordinary_01.json").write_text(json.dumps(bad))
+    (tmp_path / "broken.json").write_text(json.dumps({"id": "x"}))
+    problems = validate_dir(tmp_path)
+    assert set(problems) == {"ordinary_01.json", "broken.json"}
+    assert any("C-9999" in p for p in problems["ordinary_01.json"])
+
+
+def test_cli_subcommands_and_api_key_resolution(monkeypatch):
     p = build_parser()
     a = p.parse_args(
         [
+            "run",
             "--base-url",
             "http://127.0.0.1:8001/v1",
             "--model",
             "r3-voice-base",
             "--scenarios",
             "eval/scenarios/test/",
+            "--repeats",
+            "3",
             "--out",
             "/tmp/x",
         ]
     )
-    assert (
-        a.parallel == 4 and a.episodes_per_scenario == 1 and a.no_db is False and a.max_turns == 20
-    )
+    assert a.command == "run" and a.repeats == 3 and a.parallel == 4 and a.no_db is False
+    assert a.caller_temperature == 0.3 and a.prompt is None
+    v = p.parse_args(["validate", "eval/scenarios/test"])
+    assert v.command == "validate" and v.directory == "eval/scenarios/test"
     monkeypatch.setenv("HOSTED_LLM_BASE_URL", "https://api.anthropic.com/v1")
     monkeypatch.setenv("HOSTED_LLM_API_KEY", "sk-hosted")
     assert resolve_api_key(None, "https://api.anthropic.com/v1") == "sk-hosted"

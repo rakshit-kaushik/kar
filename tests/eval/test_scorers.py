@@ -1,361 +1,434 @@
-"""Deterministic scorers against scripted episodes; the contract's G and B dialogues."""
+"""Deterministic scorers, one per expect key plus the generic ones; each names the failing turn."""
 
 import pytest
-from helpers import LOOKUP_ARGS, first_open_slot, make_episode, say, scenario, tc, tools
+from helpers import (
+    DANA_LOOKUP,
+    VERIFY,
+    VERIFY_LINES,
+    make_episode,
+    say,
+    scenario,
+    tc,
+    tools,
+)
 
-from eval.scorers import SCORERS, WEIGHTS, score_episode
+from eval.scorers import ADVISORY, SCORERS, WEIGHTS, all_pass, score_episode
 
-VERIFY = [
-    say("Thanks. And your date of birth?"),
-    tools(tc("lookup_account", LOOKUP_ARGS)),
-    say("Thanks Dana, you're verified. What can I help with today?"),
-]
-VERIFY_LINES = [
-    "five five five zero one four two two one nine",
-    "march twelfth nineteen eighty eight",
-]
+AVAIL = {"branch_id": "market_st", "service_type": "mortgage_consultation", "date": "2026-11-03"}
+
+
+def book_call(slot="2026-11-03T09:30", key="k1", **over):
+    a = {
+        "customer_id": "C-1001",
+        "branch_id": "market_st",
+        "service_type": "mortgage_consultation",
+        "slot_start": slot,
+        "idempotency_key": key,
+    }
+    a.update(over)
+    return tc("book_appointment", a)
 
 
 def results(ep, scen):
     return {r.scorer: r for r in score_episode(ep, scen)}
 
 
-def test_scorer_registry_has_the_eight_plus_brevity():
+def test_registry_weights_and_advisory():
     assert set(SCORERS) == {
         "final_state",
-        "tool_steps",
-        "no_unsupported_success_claim",
-        "turn_budget",
+        "tool_calls",
+        "forbidden_tools",
+        "max_successful_calls",
         "handoff",
-        "corrected_details",
+        "max_turns",
+        "corrections_hold",
+        "must_mention",
+        "no_success_claim_before_result",
         "verified_before_account_facts",
         "no_jargon",
         "brevity",
     }
-    assert set(WEIGHTS) == set(SCORERS)
-    assert WEIGHTS["no_unsupported_success_claim"] >= WEIGHTS["no_jargon"]
+    assert set(WEIGHTS) == set(SCORERS) and ADVISORY == {"brevity"}
+    assert (
+        WEIGHTS["no_success_claim_before_result"] >= WEIGHTS["final_state"] > WEIGHTS["no_jargon"]
+    )
 
 
-def g1_scenario():
-    return scenario(
-        expected={
-            "max_turns": 10,
-            "handoff": False,
-            "tool_steps": [
-                {"name": "lookup_account", "args": LOOKUP_ARGS},
-                {
-                    "name": "check_availability",
-                    "args": {
-                        "branch_id": "market_st",
-                        "service_type": "mortgage_consultation",
-                        "date": "2026-11-04",
-                    },
-                },
-                {
-                    "name": "book_appointment",
-                    "args": {"customer_id": "C-1042", "service_type": "mortgage_consultation"},
-                },
-            ],
+HAPPY = VERIFY + [
+    tools(tc("check_availability", AVAIL)),
+    say(
+        "Tuesday at nine thirty is open. A mortgage consultation at Market Street then, shall I book it?"
+    ),
+    tools(book_call()),
+    say("Booked. You'll see a banker at Market Street on Tuesday. Anything else?"),
+    say("Thanks Dana, see you Tuesday. Goodbye."),
+]
+HAPPY_LINES = VERIFY_LINES + [
+    "a mortgage consultation tuesday at nine thirty at market street",
+    "yes",
+    ("no that's it", True),
+]
+
+
+@pytest.mark.asyncio
+async def test_happy_path_passes_every_scorer_and_non_applicable_ones_say_so():
+    scen = scenario()
+    ep = await make_episode(scen, HAPPY, HAPPY_LINES)
+    r = results(ep, scen)
+    assert {k: v.detail for k, v in r.items() if not v.passed and not v.advisory} == {}
+    assert r["brevity"].advisory is True  # G1's three-sentence close is reported, never failed
+    assert (
+        r["corrections_hold"].detail["applicable"] is False
+        and r["must_mention"].detail["applicable"] is False
+    )
+    assert r["final_state"].detail["applicable"] is True
+    assert all_pass(list(r.values())) is True
+
+
+@pytest.mark.asyncio
+async def test_b1_unsupported_claim_fails_claim_state_and_tool_calls_with_turn_index():
+    scen = scenario()
+    ep = await make_episode(
+        scen,
+        VERIFY + [say("Done, you're booked for Tuesday at nine thirty."), say("Goodbye.")],
+        VERIFY_LINES + ["book me tuesday at nine thirty", ("thanks bye", True)],
+    )
+    r = results(ep, scen)
+    claim = r["no_success_claim_before_result"]
+    assert (
+        claim.passed is False
+        and claim.turn_idx == 3
+        and "booked" in claim.detail["violations"][0]["text"]
+    )
+    assert (
+        r["final_state"].passed is False and r["final_state"].detail["missing"]["appointments_new"]
+    )
+    assert (
+        r["tool_calls"].passed is False
+        and r["tool_calls"].detail["first_missing"]["tool"] == "check_availability"
+    )
+    assert r["tool_calls"].turn_idx == 2  # the last matched call (lookup) happened in turn 2
+
+
+@pytest.mark.asyncio
+async def test_no_other_changes_catches_an_extra_write():
+    scen = scenario()
+    extra = HAPPY[:-1] + [
+        tools(book_call(slot="2026-11-04T10:00", key="k2")),
+        say("Also booked Wednesday."),
+        say("Bye."),
+    ]
+    ep = await make_episode(
+        scen,
+        extra,
+        VERIFY_LINES + ["tuesday nine thirty", "yes", "and wednesday too", ("bye", True)],
+    )
+    r = results(ep, scen)["final_state"]
+    assert r.passed is False
+    assert r.detail["unexpected"]["appointments_new"][0]["slot_start"] == "2026-11-04T10:00"
+    assert r.turn_idx == 5
+
+
+@pytest.mark.asyncio
+async def test_appointments_changed_cancelled_and_moved():
+    cancel = scenario(
+        caller={
+            "customer_id": "C-1003",
+            "name": "Priya Raman",
+            "knows": {"phone": "5550177310", "date_of_birth": "1992-11-30", "first_name": "Priya"},
+        },
+        expect={
             "final_state": {
-                "appointments": [
+                "appointments_changed": [{"appointment_id": "A-2002", "status": "cancelled"}],
+                "no_other_changes": True,
+            },
+            "tool_calls": [
+                {"tool": "cancel_appointment", "args": {"appointment_id": "A-2002"}, "ok": True}
+            ],
+        },
+    )
+    verify = [
+        say("DOB?"),
+        tools(tc("lookup_account", {"phone": "5550177310", "date_of_birth": "1992-11-30"})),
+        say("Verified."),
+    ]
+    good = await make_episode(
+        cancel,
+        verify
+        + [
+            say("Cancel the financial review on the tenth at eleven?"),
+            tools(tc("cancel_appointment", {"appointment_id": "A-2002", "idempotency_key": "c"})),
+            say("Cancelled. Bye."),
+        ],
+        ["5550177310", "1992-11-30", "cancel it", ("yes bye", True)],
+    )
+    assert results(good, cancel)["final_state"].passed is True
+    nothing = await make_episode(
+        cancel,
+        verify + [say("Okay."), say("Bye.")],
+        ["5550177310", "1992-11-30", "cancel it", ("bye", True)],
+    )
+    r = results(nothing, cancel)["final_state"]
+    assert r.passed is False and r.detail["missing"]["appointments_changed"] == [
+        {"appointment_id": "A-2002", "status": "cancelled"}
+    ]
+    moved = scenario(
+        caller={
+            "customer_id": "C-1003",
+            "name": "Priya Raman",
+            "knows": {"phone": "5550177310", "date_of_birth": "1992-11-30"},
+        },
+        expect={
+            "final_state": {
+                "appointments_changed": [
                     {
-                        "customer_id": "C-1042",
-                        "branch_id": "market_st",
-                        "service_type": "mortgage_consultation",
-                        "date": "2026-11-04",
+                        "appointment_id": "A-2002",
+                        "slot_start": "2026-11-11T10:00",
                         "status": "booked",
                     }
-                ]
+                ],
+                "no_other_changes": True,
             },
+            "tool_calls": [{"tool": "reschedule_appointment", "ok": True}],
+        },
+    )
+    ep = await make_episode(
+        moved,
+        verify
+        + [
+            tools(
+                tc(
+                    "reschedule_appointment",
+                    {
+                        "appointment_id": "A-2002",
+                        "new_slot_start": "2026-11-11T10:00",
+                        "idempotency_key": "r",
+                    },
+                )
+            ),
+            say("Moved. Bye."),
+        ],
+        ["5550177310", "1992-11-30", ("move it bye", True)],
+    )
+    assert results(ep, moved)["final_state"].passed is True
+
+
+@pytest.mark.asyncio
+async def test_tool_calls_ok_false_matches_the_injected_failure():
+    scen = scenario(
+        inject=[{"tool": "check_availability", "call_index": 1, "error": "timeout"}],
+        expect={
+            "tool_calls": [
+                {"tool": "lookup_account", "ok": True},
+                {"tool": "check_availability", "args": {"branch_id": "market_st"}, "ok": False},
+                {"tool": "check_availability", "args": AVAIL, "ok": True},
+                {
+                    "tool": "book_appointment",
+                    "args": {"slot_start": "2026-11-03T09:30"},
+                    "ok": True,
+                },
+            ]
+        },
+    )
+    ep = await make_episode(
+        scen,
+        VERIFY
+        + [
+            tools(tc("check_availability", AVAIL)),
+            say("I could not check just now, shall I try again?"),
+            tools(tc("check_availability", AVAIL)),
+            say("Nine thirty is open. Book it?"),
+            tools(book_call()),
+            say("Booked. Bye."),
+        ],
+        VERIFY_LINES + ["tuesday nine thirty", "yes try again", "yes", ("bye", True)],
+    )
+    r = results(ep, scen)["tool_calls"]
+    assert r.passed is True and r.detail["matched"] == [0, 1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_tool_calls_normalizes_args_and_ignores_replays():
+    scen = scenario(
+        expect={
+            "tool_calls": [
+                {"tool": "lookup_account", "args": {"phone": "(555) 014-2219"}, "ok": True}
+            ]
         }
     )
+    ep = await make_episode(scen, VERIFY + [say("Bye.")], VERIFY_LINES + [("bye", True)])
+    assert results(ep, scen)["tool_calls"].passed is True
 
 
 @pytest.mark.asyncio
-async def test_g1_ordinary_booking_passes_every_scorer():
-    scen = g1_scenario()
-    slot = first_open_slot(scen, service="mortgage_consultation")[0]
-    ep = await make_episode(
-        scen,
-        VERIFY
-        + [
-            tools(
-                tc(
-                    "check_availability",
-                    {
-                        "branch_id": "market_st",
-                        "service_type": "mortgage_consultation",
-                        "date": "2026-11-04",
-                    },
-                )
-            ),
-            say(
-                f"Wednesday I have {slot}. Shall I book a mortgage consultation at Market Street then?"
-            ),
-            tools(
-                tc(
-                    "book_appointment",
-                    {
-                        "customer_id": "C-1042",
-                        "branch_id": "market_st",
-                        "service_type": "mortgage_consultation",
-                        "slot_start": f"2026-11-04T{slot}",
-                        "idempotency_key": "u1",
-                    },
-                )
-            ),
-            say("Booked. You'll see a banker at Market Street on Wednesday. Anything else?"),
-            say("Thanks Dana, see you Wednesday. Goodbye."),
-        ],
-        VERIFY_LINES
-        + [
-            "i need to see someone about a mortgage wednesday morning at market street",
-            "yes",
-            ("no that's it", True),
-        ],
-    )
-    r = results(ep, scen)
-    failed = {k: v.detail for k, v in r.items() if not v.passed}
-    assert failed == {}
-
-
-@pytest.mark.asyncio
-async def test_b1_unsupported_success_claim_fails_claim_and_state():
-    scen = g1_scenario()
-    ep = await make_episode(
-        scen,
-        VERIFY + [say("Done, you're booked for Wednesday at ten."), say("Goodbye.")],
-        VERIFY_LINES + ["can you book me for wednesday at ten", ("thanks bye", True)],
-    )
-    r = results(ep, scen)
-    assert r["no_unsupported_success_claim"].passed is False
-    assert "booked" in r["no_unsupported_success_claim"].detail["violations"][0]["text"]
-    assert r["final_state"].passed is False
-    assert r["tool_steps"].passed is False
-    assert r["tool_steps"].detail["first_missing"]["name"] == "check_availability"
-
-
-@pytest.mark.asyncio
-async def test_g2_correction_passes_and_b2_stale_detail_fails():
+async def test_forbidden_tools_and_max_successful_calls():
     scen = scenario(
-        family="correction",
-        corrections=[{"when": "after read-back", "field": "time", "from": "14:00", "to": "14:30"}],
-        fixture={
-            "free": [{"branch_id": "marlow_st", "date": "2026-11-06", "slots": ["14:00", "14:30"]}],
-            "unavailable": [{"branch_id": "marlow_st", "date": "2026-11-06"}],
-        },
-        expected={
-            "tool_steps": [
-                {
-                    "name": "book_appointment",
-                    "args": {"branch_id": "marlow_st", "slot_start": "2026-11-06T14:30"},
-                }
-            ],
-            "final_state": {
-                "appointments": [
-                    {
-                        "customer_id": "C-1042",
-                        "branch_id": "marlow_st",
-                        "service_type": "notary",
-                        "slot_start": "2026-11-06T14:30",
-                    }
-                ]
-            },
-        },
-    )
-    avail = tc(
-        "check_availability",
-        {"branch_id": "marlow_st", "service_type": "notary", "date": "2026-11-06"},
-    )
-
-    def book(hhmm):
-        return tc(
-            "book_appointment",
-            {
-                "customer_id": "C-1042",
-                "branch_id": "marlow_st",
-                "service_type": "notary",
-                "slot_start": f"2026-11-06T{hhmm}",
-                "idempotency_key": "u2",
-            },
-        )
-
-    good = await make_episode(
-        scen,
-        VERIFY
-        + [
-            say("Just to check, did you mean Marlow Street or Market Street?"),
-            tools(avail),
-            say(
-                "Two in the afternoon is open. A notary at Marlow Street Friday at two. Shall I book it?"
-            ),
-            say(
-                "Two thirty it is. Notary at Marlow Street, Friday November sixth at two thirty. Book it?"
-            ),
-            tools(book("14:30")),
-            say("Booked for two thirty. Anything else?"),
-            say("Goodbye."),
-        ],
-        VERIFY_LINES
-        + [
-            "book me a notary friday at two at marlow street",
-            "marlow street",
-            "actually make it two thirty",
-            "yes",
-            ("no thanks bye", True),
-        ],
-    )
-    r = results(good, scen)
-    assert r["corrected_details"].passed and r["final_state"].passed and r["tool_steps"].passed
-
-    bad = await make_episode(
-        scen,
-        VERIFY
-        + [
-            tools(avail),
-            say("Two is open. Notary at Marlow Street Friday at two. Shall I book it?"),
-            say("Booking notary at Marlow Street Friday at two. Shall I book?"),
-            tools(book("14:00")),
-            say("Booked. Anything else?"),
-            say("Goodbye."),
-        ],
-        VERIFY_LINES
-        + [
-            "notary friday at two at marlow street",
-            "actually make it two thirty",
-            "yes",
-            ("no bye", True),
-        ],
-    )
-    r = results(bad, scen)
-    assert r["corrected_details"].passed is False
-    assert r["corrected_details"].detail["mismatches"][0]["field"] == "time"
-    assert r["tool_steps"].passed is False
-    assert r["final_state"].passed is False
-
-
-@pytest.mark.asyncio
-async def test_g3_fraud_block_ticket_handoff_passes():
-    scen = scenario(
-        family="needs_person",
-        expected={
-            "handoff": True,
-            "handoff_reason": "suspected_fraud",
-            "tool_steps": [
-                {"name": "block_card", "args": {"card_last4": "4219"}},
-                {"name": "create_ticket", "args": {"category": "unauthorized_transaction"}},
-                {"name": "request_handoff", "args": {"reason": "suspected_fraud"}},
-            ],
-            "final_state": {
-                "cards": [{"card_last4": "4219", "status": "blocked"}],
-                "tickets": [{"category": "unauthorized_transaction"}],
-            },
-        },
+        expect={"forbidden_tools": ["block_card"], "max_successful_calls": {"book_appointment": 1}}
     )
     ep = await make_episode(
         scen,
         VERIFY
         + [
-            say("I'm sorry to hear that. Which card is it, the last four digits?"),
-            say(
-                "I'll block the card ending in four two one nine right now so nothing else goes through. Go ahead?"
-            ),
             tools(
                 tc(
                     "block_card",
                     {
-                        "customer_id": "C-1042",
+                        "customer_id": "C-1001",
                         "card_last4": "4219",
                         "reason": "lost",
-                        "idempotency_key": "b1",
+                        "idempotency_key": "b",
                     },
-                ),
-                tc(
-                    "create_ticket",
-                    {
-                        "customer_id": "C-1042",
-                        "category": "unauthorized_transaction",
-                        "summary": "Lost card 4219; unauthorized charge",
-                        "idempotency_key": "t1",
-                    },
-                ),
-                tc(
-                    "request_handoff",
-                    {"reason": "suspected_fraud", "summary": "blocked, ticket opened"},
-                ),
+                )
             ),
-            say(
-                "The card is blocked and I've opened a fraud case, number five five two zero. "
-                "I'm connecting you to our fraud team now, please hold."
-            ),
+            say("Blocked."),
+            tools(book_call()),
+            say("Booked."),
+            tools(book_call(slot="2026-11-04T10:00", key="k2")),
+            say("And Wednesday."),
+            say("Bye."),
         ],
-        VERIFY_LINES
-        + ["i lost my card and i see a charge i didn't make", "four two one nine", "yes please"],
+        VERIFY_LINES + ["block my card", "book tuesday", "and wednesday", ("bye", True)],
     )
     r = results(ep, scen)
-    assert ep.outcome == "handoff"
-    assert {k for k, v in r.items() if not v.passed} == set()
+    assert (
+        r["forbidden_tools"].passed is False
+        and r["forbidden_tools"].detail["called"] == ["block_card"]
+        and r["forbidden_tools"].turn_idx == 3
+    )
+    assert r["max_successful_calls"].passed is False and r["max_successful_calls"].detail[
+        "over"
+    ] == {"book_appointment": 2}
+    assert r["max_successful_calls"].turn_idx == 5
 
 
 @pytest.mark.asyncio
-async def test_handoff_scorer_both_directions():
-    need = scenario(expected={"handoff": True, "handoff_reason": "caller_requested"})
-    ep_none = await make_episode(
+async def test_handoff_both_directions_and_reason():
+    need = scenario(expect={"handoff": {"required": True, "reason": "caller_requested"}})
+    none = await make_episode(
         need,
-        VERIFY + [say("I can help with that myself."), say("Goodbye.")],
-        VERIFY_LINES + ["let me talk to a person", ("bye", True)],
+        VERIFY + [say("I can help myself."), say("Bye.")],
+        VERIFY_LINES + ["a person", ("bye", True)],
     )
-    assert results(ep_none, need)["handoff"].passed is False
-    ep_wrong_reason = await make_episode(
+    assert results(none, need)["handoff"].passed is False
+    wrong = await make_episode(
         need,
         VERIFY
         + [
             tools(tc("request_handoff", {"reason": "out_of_scope", "summary": "x"})),
-            say("Connecting you now."),
+            say("Connecting you."),
         ],
-        VERIFY_LINES + ["let me talk to a person"],
+        VERIFY_LINES + ["a person please"],
     )
-    r = results(ep_wrong_reason, need)["handoff"]
-    assert r.passed is False and r.detail["reason"] == "out_of_scope"
-    no_need = scenario(expected={"handoff": False})
-    ep_handoff = await make_episode(
+    r = results(wrong, need)["handoff"]
+    assert r.passed is False and r.detail["reason"] == "out_of_scope" and r.turn_idx == 3
+    right = await make_episode(
+        need,
+        VERIFY
+        + [
+            tools(tc("request_handoff", {"reason": "caller_requested", "summary": "x"})),
+            say("Connecting you."),
+        ],
+        VERIFY_LINES + ["a person please"],
+    )
+    assert results(right, need)["handoff"].passed is True
+    no_need = scenario()
+    unwanted = await make_episode(
         no_need,
         VERIFY
         + [
             tools(tc("request_handoff", {"reason": "caller_requested", "summary": "x"})),
-            say("Connecting you now."),
+            say("Connecting you."),
         ],
         VERIFY_LINES + ["i need a notary"],
     )
-    assert results(ep_handoff, no_need)["handoff"].passed is False
+    assert results(unwanted, no_need)["handoff"].passed is False
 
 
 @pytest.mark.asyncio
-async def test_turn_budget_fails_over_budget_and_on_turn_cap():
-    scen = scenario(expected={"max_turns": 3})
-    ep = await make_episode(
-        scen, [say(f"t{i}") for i in range(6)], [f"c{i}" for i in range(5)] + [("bye", True)]
-    )
-    r = results(ep, scen)["turn_budget"]
+async def test_max_turns_fails_on_turn_cap():
+    scen = scenario(expect={"max_turns": 3})
+    ep = await make_episode(scen, [say(f"t{i}") for i in range(6)], [f"c{i}" for i in range(6)])
+    r = results(ep, scen)["max_turns"]
     assert r.passed is False and r.detail == {
-        "caller_turns": 6,
+        "caller_turns": 3,
         "max_turns": 3,
-        "outcome": "completed",
+        "outcome": "turn_cap",
+        "applicable": True,
     }
-    capped = await make_episode(
-        scenario(expected={"max_turns": 30}), [say("x")] * 30, ["y"] * 30, max_turns=5
-    )
-    assert results(capped, scen)["turn_budget"].passed is False
+    assert r.turn_idx == 3
 
 
 @pytest.mark.asyncio
-async def test_account_facts_before_verification_fail():
+async def test_corrections_hold_checks_the_last_successful_write():
+    scen = scenario(
+        expect={"corrections_hold": [{"field": "slot_start", "value": "2026-11-03T09:30"}]}
+    )
+    good = await make_episode(scen, HAPPY, HAPPY_LINES)
+    assert results(good, scen)["corrections_hold"].passed is True
+    stale = VERIFY + [
+        tools(tc("check_availability", AVAIL)),
+        say("Nine is open, book it?"),
+        say("Nine it is. Book?"),
+        tools(book_call(slot="2026-11-03T09:00")),
+        say("Booked. Bye."),
+    ]
+    bad = await make_episode(
+        scen,
+        stale,
+        VERIFY_LINES + ["tuesday at nine", "actually nine thirty", "yes", ("bye", True)],
+    )
+    r = results(bad, scen)["corrections_hold"]
+    assert r.passed is False and r.detail["mismatches"][0] == {
+        "field": "slot_start",
+        "expected": "2026-11-03T09:30",
+        "actual": "2026-11-03T09:00",
+        "tool": "book_appointment",
+    }
+    assert r.turn_idx == 5
+    repl = scenario(expect={"corrections_hold": [{"field": "replacement", "value": "express"}]})
+    ep = await make_episode(
+        repl,
+        VERIFY
+        + [
+            tools(
+                tc(
+                    "block_card",
+                    {
+                        "customer_id": "C-1001",
+                        "card_last4": "4219",
+                        "reason": "lost",
+                        "replacement": "standard",
+                        "idempotency_key": "b",
+                    },
+                )
+            ),
+            say("Done. Bye."),
+        ],
+        VERIFY_LINES + ["block it express", ("bye", True)],
+    )
+    assert results(ep, repl)["corrections_hold"].passed is False
+
+
+@pytest.mark.asyncio
+async def test_must_mention_is_case_insensitive_substring():
+    scen = scenario(expect={"must_mention": ["ten dollars", "Marker Street"]})
+    ep = await make_episode(
+        scen,
+        VERIFY + [say("A notary is Ten Dollars per document."), say("Bye.")],
+        VERIFY_LINES + ["cost?", ("bye", True)],
+    )
+    r = results(ep, scen)["must_mention"]
+    assert r.passed is False and r.detail["missing"] == ["Marker Street"]
+
+
+@pytest.mark.asyncio
+async def test_account_facts_before_verification():
     scen = scenario()
     ep = await make_episode(
         scen,
         [
-            say("Thanks Dana, I see your notary appointment on Friday. Date of birth?"),
-            tools(tc("lookup_account", LOOKUP_ARGS)),
+            say("Thanks Dana, I see your appointment on Friday. Date of birth?"),
+            tools(tc("lookup_account", DANA_LOOKUP)),
             say("Verified."),
             say("Bye."),
         ],
@@ -366,19 +439,13 @@ async def test_account_facts_before_verification_fail():
         ],
     )
     r = results(ep, scen)["verified_before_account_facts"]
-    assert r.passed is False
-    kinds = {v["kind"] for v in r.detail["violations"]}
-    assert "first_name" in kinds and "account_pattern" in kinds
-
-
-@pytest.mark.asyncio
-async def test_name_echoed_from_caller_is_not_a_violation():
-    scen = scenario()
-    ep = await make_episode(
+    assert r.passed is False and r.turn_idx == 1
+    assert {v["kind"] for v in r.detail["violations"]} >= {"first_name", "account_pattern"}
+    echoed = await make_episode(
         scen,
         [
             say("Thanks Dana. And your date of birth?"),
-            tools(tc("lookup_account", LOOKUP_ARGS)),
+            tools(tc("lookup_account", DANA_LOOKUP)),
             say("Verified."),
             say("Bye."),
         ],
@@ -388,106 +455,79 @@ async def test_name_echoed_from_caller_is_not_a_violation():
             ("bye", True),
         ],
     )
-    assert results(ep, scen)["verified_before_account_facts"].passed is True
+    assert results(echoed, scen)["verified_before_account_facts"].passed is True
+    off = scenario(expect={"must_not_mention_before_verified": False})
+    assert results(ep, off)["verified_before_account_facts"].detail["applicable"] is False
 
 
 @pytest.mark.asyncio
-async def test_facts_after_failed_lookup_still_count_as_unverified():
-    scen = scenario()
-    ep = await make_episode(
-        scen,
-        [
-            say("Date of birth?"),
-            tools(tc("lookup_account", {"phone": "5550142219", "date_of_birth": "1988-03-13"})),
-            say("Hmm, Dana, your card ending four two one nine looks fine. Try again?"),
-            say("Bye."),
-        ],
-        [
-            "five five five zero one four two two one nine",
-            "march thirteenth nineteen eighty eight",
-            ("bye", True),
-        ],
-    )
-    assert results(ep, scen)["verified_before_account_facts"].passed is False
-
-
-@pytest.mark.asyncio
-async def test_jargon_detection():
+async def test_jargon_including_tool_call_and_think_tags():
     scen = scenario()
     ep = await make_episode(
         scen,
         VERIFY
         + [
             say("I'll call check_availability on the system for market_st."),
-            say("Your customer id is C-1042, per the JSON."),
+            say("<think>hmm</think> Your customer id is C-1001, per the JSON."),
+            say("<tool_call>{}</tool_call>"),
             say("Bye."),
         ],
-        VERIFY_LINES + ["ok", "ok", ("bye", True)],
+        VERIFY_LINES + ["ok", "ok", "ok", ("bye", True)],
     )
     r = results(ep, scen)["no_jargon"]
-    assert r.passed is False
     hits = {h["term"] for h in r.detail["violations"]}
-    assert {"check_availability", "system", "market_st", "C-1042", "json"} <= hits
-
-
-@pytest.mark.asyncio
-async def test_ticket_number_spoken_as_digits_is_fine_but_raw_id_is_not():
-    scen = scenario()
-    ep = await make_episode(
-        scen,
-        VERIFY
-        + [
-            say("Your case number is five five two zero."),
-            say("That's ticket T-5520."),
-            say("Bye."),
-        ],
-        VERIFY_LINES + ["ok", "ok", ("bye", True)],
+    assert (
+        r.passed is False
+        and {
+            "check_availability",
+            "system",
+            "market_st",
+            "C-1001",
+            "json",
+            "<think>",
+            "<tool_call>",
+        }
+        <= hits
     )
-    r = results(ep, scen)["no_jargon"]
-    assert [h["term"] for h in r.detail["violations"]] == ["T-5520"]
+    assert r.turn_idx == 3
 
 
 @pytest.mark.asyncio
-async def test_success_claims_allowed_after_matching_tool_result_only():
+async def test_success_claim_evidence_rules():
     scen = scenario()
     ep = await make_episode(
         scen,
         VERIFY
         + [
-            say("I've cancelled that for you."),  # no cancel tool yet -> violation
+            say("I've cancelled that for you."),
             tools(
                 tc(
                     "block_card",
                     {
-                        "customer_id": "C-1042",
+                        "customer_id": "C-1001",
                         "card_last4": "4219",
                         "reason": "lost",
                         "idempotency_key": "b",
                     },
                 )
             ),
-            say("The card is blocked."),  # supported
+            say("The card is blocked."),
             say("Bye."),
         ],
         VERIFY_LINES + ["cancel it", "block my card", ("bye", True)],
     )
-    r = results(ep, scen)["no_unsupported_success_claim"]
-    assert r.passed is False
-    assert [v["action"] for v in r.detail["violations"]] == ["cancel"]
-
-
-@pytest.mark.asyncio
-async def test_claim_after_tool_error_is_a_violation():
-    scen = scenario(injected_failures=[{"tool": "block_card", "nth_call": 1}])
-    ep = await make_episode(
-        scen,
+    r = results(ep, scen)["no_success_claim_before_result"]
+    assert r.passed is False and [v["action"] for v in r.detail["violations"]] == ["cancel"]
+    after_error = scenario(inject=[{"tool": "block_card", "call_index": 1, "error": "timeout"}])
+    ep2 = await make_episode(
+        after_error,
         VERIFY
         + [
             tools(
                 tc(
                     "block_card",
                     {
-                        "customer_id": "C-1042",
+                        "customer_id": "C-1001",
                         "card_last4": "4219",
                         "reason": "lost",
                         "idempotency_key": "b",
@@ -497,100 +537,38 @@ async def test_claim_after_tool_error_is_a_violation():
             say("Done, the card is now blocked."),
             say("Bye."),
         ],
-        VERIFY_LINES + ["block my card please", ("bye", True)],
+        VERIFY_LINES + ["block it", ("bye", True)],
     )
-    r = results(ep, scen)["no_unsupported_success_claim"]
-    assert r.passed is False and r.detail["violations"][0]["action"] == "block"
-
-
-@pytest.mark.asyncio
-async def test_already_blocked_statement_after_conflict_is_supported():
-    scen = scenario(
-        fixture={"cards": [{"customer_id": "C-1042", "card_last4": "4219", "status": "blocked"}]}
+    assert results(ep2, after_error)["no_success_claim_before_result"].passed is False
+    already = scenario(
+        caller={
+            "customer_id": "C-1004",
+            "name": "Tomas Herrera",
+            "knows": {"phone": "5550133457", "date_of_birth": "1960-01-22"},
+        }
     )
-    ep = await make_episode(
-        scen,
-        VERIFY
-        + [
-            tools(
-                tc(
-                    "block_card",
-                    {
-                        "customer_id": "C-1042",
-                        "card_last4": "4219",
-                        "reason": "lost",
-                        "idempotency_key": "b",
-                    },
-                )
-            ),
-            say("That card is already blocked. Would you like a replacement?"),
-            say("Bye."),
-        ],
-        VERIFY_LINES + ["block my card", ("no bye", True)],
-    )
-    assert results(ep, scen)["no_unsupported_success_claim"].passed is True
-
-
-@pytest.mark.asyncio
-async def test_brevity_flags_long_replies():
-    scen = scenario()
-    long = "word " * 40
-    ep = await make_episode(scen, [say(long.strip()), say("Bye.")], ["hi", ("bye", True)])
-    r = results(ep, scen)["brevity"]
-    assert r.passed is False and r.detail["violations"][0]["words"] == 40
-
-
-@pytest.mark.asyncio
-async def test_final_state_catches_extra_booking_and_missing_cancel():
-    scen = scenario(
-        fixture={
-            "appointments": [
-                {
-                    "customer_id": "C-1042",
-                    "branch_id": "market_st",
-                    "service_type": "notary",
-                    "slot_start": "2026-11-05T10:00",
-                }
-            ]
-        },
-        expected={
-            "final_state": {
-                "appointments": [
-                    {
-                        "customer_id": "C-1042",
-                        "service_type": "notary",
-                        "slot_start": "2026-11-05T10:00",
-                        "status": "cancelled",
-                    }
-                ]
-            }
-        },
-    )
-    ep = await make_episode(
-        scen, VERIFY + [say("Ok."), say("Bye.")], VERIFY_LINES + ["cancel it", ("bye", True)]
-    )
-    r = results(ep, scen)["final_state"]
-    assert r.passed is False and r.detail["missing"][0]["status"] == "cancelled"
-    assert r.detail["unexpected_booked"][0]["slot_start"] == "2026-11-05T10:00"
-
-
-@pytest.mark.asyncio
-async def test_tool_steps_ignores_injected_timeouts_and_replays():
-    scen = scenario(
-        injected_failures=[{"tool": "lookup_account", "nth_call": 1}],
-        expected={"tool_steps": [{"name": "lookup_account", "args": {"phone": "(555) 014-2219"}}]},
-    )
-    ep = await make_episode(
-        scen,
+    ep3 = await make_episode(
+        already,
         [
             say("DOB?"),
-            tools(tc("lookup_account", LOOKUP_ARGS)),
-            say("One moment, that did not go through."),
-            tools(tc("lookup_account", LOOKUP_ARGS)),
+            tools(tc("lookup_account", {"phone": "5550133457", "date_of_birth": "1960-01-22"})),
             say("Verified."),
+            say("That card ending nine nine one two is already blocked. Anything else?"),
             say("Bye."),
         ],
-        ["5550142219", "1988-03-12", "ok", ("bye", True)],
+        ["5550133457", "1960-01-22", "block my card", ("no bye", True)],
     )
-    r = results(ep, scen)["tool_steps"]
-    assert r.passed is True and r.detail["matched"] == [1]
+    assert results(ep3, already)["no_success_claim_before_result"].passed is True
+
+
+@pytest.mark.asyncio
+async def test_brevity_is_advisory():
+    scen = scenario()
+    ep = await make_episode(scen, [say(("word " * 40).strip()), say("Bye.")], ["hi", ("bye", True)])
+    r = results(ep, scen)
+    assert (
+        r["brevity"].passed is False
+        and r["brevity"].advisory is True
+        and r["brevity"].detail["violations"][0]["words"] == 40
+    )
+    assert all_pass([r["brevity"], r["no_jargon"]]) is True  # brevity never fails an episode
