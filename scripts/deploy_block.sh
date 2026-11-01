@@ -19,7 +19,8 @@ import json, sys, time, urllib.request, glob
 model, out = sys.argv[1], sys.argv[2]
 tools = [json.load(open(p)) for p in sorted(glob.glob("schemas/tools/*.json"))]
 tools = [t if t.get("type") == "function" else {"type": "function", "function": t} for t in tools]
-sysmsg = {"role": "system", "content": open("services/agent/system_prompt.md").read() if glob.glob("services/agent/system_prompt.md") else "You are the phone agent of Marlow Mutual Bank. " * 40}
+seed = json.load(open("eval/sandbox/seed.json"))
+sysmsg = {"role": "system", "content": open("schemas/system_prompt.md").read().replace("{today}", seed["clock_spoken"])}  # as services/agent/main.py renders it
 def ask(msgs):
     body = json.dumps({"model": model, "messages": msgs, "tools": tools, "stream": False, "max_tokens": 40, "temperature": 0.0}).encode()
     t0 = time.perf_counter(); r = urllib.request.urlopen(urllib.request.Request("http://127.0.0.1:8000/v1/chat/completions", body, {"Content-Type": "application/json"}), timeout=60)
