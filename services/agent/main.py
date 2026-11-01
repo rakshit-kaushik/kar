@@ -33,6 +33,7 @@ from openai import AsyncOpenAI
 from psycopg.types.json import Jsonb
 
 from services.agent.state import CallState
+from services.agent.faults import faults_from_room_name
 from services.common.events import PostgresSink
 from services.tools.executor import ToolExecutor
 from services.tools.livekit_tools import build_livekit_tools
@@ -122,6 +123,9 @@ async def entrypoint(ctx: JobContext) -> None:
     sink = PostgresSink(dsn) if dsn else None
     state = CallState(call_id=call_id, model_id=model_id)
     sandbox = Sandbox(SEED)
+    faults = faults_from_room_name(call_id)  # live demo: room name '...--fault-check_availability-timeout' (services/agent/faults.py)
+    if faults:
+        sandbox.inject(faults)
     executor = ToolExecutor(sandbox=sandbox, state=state, event_sink=sink)
     data = CallData(call_id=call_id, model_id=model_id, state=state, sandbox=sandbox, executor=executor, sink=sink)
 
