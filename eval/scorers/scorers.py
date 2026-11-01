@@ -207,19 +207,27 @@ def max_turns(ep: Episode, sc: Scenario) -> ScorerResult:
 
 
 def corrections_hold(ep: Episode, sc: Scenario) -> ScorerResult:
-    """Each corrected field's final value is what the last successful write actually used."""
+    """Each corrected field's final value is what the last successful write actually used; identity
+    fields (phone, date_of_birth) are checked against the last lookup_account call instead."""
     if not sc.expect.corrections_hold:
         return _na("corrections_hold")
     turns = tool_log_turn(ep)
     writes = [
         e for e in ep.tool_log if e["ok"] and e["tool"] in WRITE_TOOLS and not e.get("replay")
     ]
+    lookups = [e for e in ep.tool_log if e["tool"] == "lookup_account" and not e.get("injected")]
     last = writes[-1] if writes else None
     args = last["args"] if last and isinstance(last["args"], dict) else {}
     mismatches = []
+    fail_turn = None
     for c in sc.expect.corrections_hold:
         want = norm_value(c.field, c.value)
-        if c.field in ("slot_start", "new_slot_start"):
+        src = last
+        if c.field in ("phone", "date_of_birth"):
+            src = lookups[-1] if lookups else None
+            la = src["args"] if src and isinstance(src["args"], dict) else {}
+            actual = norm_value(c.field, la.get(c.field)) if c.field in la else None
+        elif c.field in ("slot_start", "new_slot_start"):
             actual = slot_of(args)
         elif c.field == "time":
             actual = (slot_of(args) or "")[11:16] or None
@@ -233,14 +241,16 @@ def corrections_hold(ep: Episode, sc: Scenario) -> ScorerResult:
                     "field": c.field,
                     "expected": want,
                     "actual": actual,
-                    "tool": last["tool"] if last else None,
+                    "tool": src["tool"] if src else None,
                 }
             )
+            if fail_turn is None:
+                fail_turn = turns.get(src["idx"]) if src else len(ep.turns)
     return ScorerResult(
         "corrections_hold",
         not mismatches,
         {"applicable": True, "mismatches": mismatches},
-        turn_idx=None if not mismatches else (turns.get(last["idx"]) if last else len(ep.turns)),
+        turn_idx=fail_turn,
     )
 
 
@@ -270,7 +280,7 @@ CLAIMS: dict[str, list[re.Pattern]] = {
         for p in (
             rf"\b{_DONE} (?:now )?(?:moved|rescheduled)\b",
             r"\b(?:moved|rescheduled) (?:it|that|your appointment|the appointment)\b",
-            r"\bnow (?:set )?for\b",
+            r"\b(?:is|it'?s|that'?s) now (?:set )?(?:for|at|on)\b",
         )
     ],
     "cancel": [re.compile(r"\bcancell?ed\b", re.IGNORECASE)],

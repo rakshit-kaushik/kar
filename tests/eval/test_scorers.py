@@ -603,3 +603,78 @@ async def test_negated_claims_are_not_violations():
     )
     r = results(ep, scen)["no_success_claim_before_result"]
     assert r.passed is True, r.detail
+
+
+@pytest.mark.asyncio
+async def test_corrections_hold_checks_identity_fields_against_the_last_lookup():
+    scen = scenario(
+        expect={"corrections_hold": [{"field": "date_of_birth", "value": "1988-03-12"}]}
+    )
+    ep = await make_episode(
+        scen,
+        [
+            say("DOB?"),
+            tools(tc("lookup_account", {"phone": "5550142219", "date_of_birth": "1988-03-13"})),
+            say("That did not match, could you repeat it?"),
+            tools(tc("lookup_account", DANA_LOOKUP)),
+            say("Verified."),
+            tools(
+                tc(
+                    "create_ticket",
+                    {
+                        "customer_id": "C-1001",
+                        "category": "card_lost_stolen",
+                        "summary": "lost",
+                        "idempotency_key": "t",
+                    },
+                )
+            ),
+            say("Ticket opened. Bye."),
+        ],
+        ["5550142219", "march thirteenth", "sorry, twelfth", "lost card", ("bye", True)],
+    )
+    r = results(ep, scen)["corrections_hold"]
+    assert r.passed is True, r.detail
+    wrong = await make_episode(
+        scen,
+        [
+            say("DOB?"),
+            tools(tc("lookup_account", {"phone": "5550142219", "date_of_birth": "1988-03-13"})),
+            say("Bye."),
+        ],
+        ["5550142219", ("bye", True)],
+    )
+    r = results(wrong, scen)["corrections_hold"]
+    assert (
+        r.passed is False
+        and r.detail["mismatches"][0]["actual"] == "1988-03-13"
+        and r.turn_idx == 2
+    )
+
+
+@pytest.mark.asyncio
+async def test_now_for_is_not_a_reschedule_claim():
+    scen = scenario()
+    ep = await make_episode(
+        scen,
+        VERIFY
+        + [
+            tools(
+                tc(
+                    "create_ticket",
+                    {
+                        "customer_id": "C-1001",
+                        "category": "card_lost_stolen",
+                        "summary": "x",
+                        "idempotency_key": "t",
+                    },
+                ),
+                tc("request_handoff", {"reason": "out_of_scope", "summary": "x"}),
+            ),
+            say(
+                "I've opened your lost card ticket, and I'm transferring you to a banker now for the replacement."
+            ),
+        ],
+        VERIFY_LINES + ["i lost my card"],
+    )
+    assert results(ep, scen)["no_success_claim_before_result"].passed is True

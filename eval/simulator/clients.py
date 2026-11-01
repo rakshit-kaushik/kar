@@ -67,12 +67,35 @@ class _ChatBase:
         }
         self.last_usage: dict[str, int] = {}
         self.last_finish_reason: str | None = None
+        self.length_retries = 0
+
+    MAX_TOKENS_CAP = 2000
 
     async def _create(self, messages: list[dict], tools: list[dict] | None = None) -> Any:
+        """One chat completion with visible retries. If the reply is cut by max_tokens before any
+        visible text (hidden output ate the budget), retry once with a larger budget."""
+        resp = await self._request(messages, tools, self.max_tokens)
+        choice = resp.choices[0]
+        msg = choice.message
+        if (
+            getattr(choice, "finish_reason", None) == "length"
+            and not (msg.content or "").strip()
+            and not getattr(msg, "tool_calls", None)
+        ):
+            bigger = min(self.MAX_TOKENS_CAP, self.max_tokens * 3)
+            if bigger > self.max_tokens:
+                self.length_retries += 1
+                resp = await self._request(messages, tools, bigger)
+        self.last_finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        return resp
+
+    async def _request(
+        self, messages: list[dict], tools: list[dict] | None, max_tokens: int
+    ) -> Any:
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": self.max_tokens,
+            "max_tokens": max_tokens,
         }
         if tools:
             kwargs["tools"] = tools
@@ -103,7 +126,6 @@ class _ChatBase:
             self.usage_totals["prompt_tokens"] += self.last_usage["prompt_tokens"]
             self.usage_totals["completion_tokens"] += self.last_usage["completion_tokens"]
         self.usage_totals["requests"] += 1
-        self.last_finish_reason = getattr(resp.choices[0], "finish_reason", None)
         return resp
 
 
@@ -183,7 +205,7 @@ class LLMCaller(_ChatBase):
         model: str,
         temperature: float | None = 0.3,
         seed: int = 0,
-        max_tokens: int = 150,
+        max_tokens: int = 600,
         retries: int = 3,
         backoff_s: float = 1.0,
     ):

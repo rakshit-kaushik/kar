@@ -152,3 +152,54 @@ def test_clean_caller_text_rules():
     assert clean_caller_text("[hangup]") == ("", True)
     assert clean_caller_text("okay thanks bye [HANG UP]") == ("okay thanks bye", True)
     assert clean_caller_text("*sighs* no, a person please") == ("no, a person please", False)
+
+
+class LengthThenText:
+    """First reply: finish_reason=length with empty content; second: real text."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) == 1:
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=FakeMessage(content=""), finish_reason="length")],
+                usage=SimpleNamespace(prompt_tokens=100, completion_tokens=kwargs["max_tokens"]),
+            )
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=FakeMessage(content="yes it was lost"), finish_reason="stop"
+                )
+            ],
+            usage=SimpleNamespace(prompt_tokens=100, completion_tokens=12),
+        )
+
+
+@pytest.mark.asyncio
+async def test_caller_retries_once_with_a_bigger_budget_on_empty_length_reply():
+    comp = LengthThenText()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=comp))
+    caller = LLMCaller(SCEN, client=client, model="c1", max_tokens=400)
+    text, hangup = await caller.next_utterance([("agent", "Is it lost or stolen?")], 3)
+    assert (text, hangup) == ("yes it was lost", False)
+    assert [c["max_tokens"] for c in comp.calls] == [400, 1200]
+    assert caller.last_finish_reason == "stop" and caller.length_retries == 1
+    assert caller.usage_totals["requests"] == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_retries_once_with_a_bigger_budget_on_empty_length_reply():
+    comp = LengthThenText()
+    client = SimpleNamespace(chat=SimpleNamespace(completions=comp))
+    agent = OpenAIAgent(client=client, model="m1", max_tokens=700)
+    msg = await agent.respond([{"role": "user", "content": "hi"}])
+    assert msg == {"role": "assistant", "content": "yes it was lost"}
+    assert [c["max_tokens"] for c in comp.calls] == [700, 2000]  # capped at 2000
+    assert agent.length_retries == 1
+
+
+def test_caller_default_budget_is_large_enough_for_hidden_tokens():
+    client, _ = fake_client([FakeMessage(content="x")])
+    assert LLMCaller(SCEN, client=client, model="c1").max_tokens >= 600
