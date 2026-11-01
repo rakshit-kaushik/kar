@@ -1079,3 +1079,79 @@ def test_one_strike_handoff_uses_the_live_claim_guard_phrase_set():
     assert one_strike_handoff(ep("Let me put you through to a colleague.")) is True
     assert one_strike_handoff(ep("I'll hand you over to a banker now.")) is True
     assert one_strike_handoff(ep("Could you read me your date of birth again?")) is False
+
+
+def test_unverified_write_attempts_counts_writes_before_a_successful_lookup():
+    from eval.runner import unverified_write_attempts
+
+    log = [
+        {"idx": 0, "tool": "check_availability", "args": {}, "ok": True},
+        {
+            "idx": 1,
+            "tool": "book_appointment",
+            "args": {"customer_id": "1234567890"},
+            "ok": False,
+            "error": "not_found",
+        },
+        {"idx": 2, "tool": "lookup_account", "args": {}, "ok": True},
+        {"idx": 3, "tool": "book_appointment", "args": {"customer_id": "C-1008"}, "ok": True},
+    ]
+    assert unverified_write_attempts({"tool_log": log}) == [
+        {"tool": "book_appointment", "customer_id": "1234567890", "ok": False}
+    ]
+    assert unverified_write_attempts({"tool_log": log[2:]}) == []
+    # a handoff before verification is allowed; a failed lookup does not verify
+    log2 = [
+        {"idx": 0, "tool": "lookup_account", "args": {}, "ok": False, "error": "not_verified"},
+        {
+            "idx": 1,
+            "tool": "request_handoff",
+            "args": {"reason": "verification_failed"},
+            "ok": True,
+        },
+        {
+            "idx": 2,
+            "tool": "create_ticket",
+            "args": {"customer_id": "C-1004"},
+            "ok": False,
+            "error": "not_found",
+        },
+    ]
+    assert [a["tool"] for a in unverified_write_attempts({"tool_log": log2})] == ["create_ticket"]
+
+
+def test_buckets_report_lists_unverified_write_attempts(tmp_path):
+    from eval.runner import buckets_report
+
+    (tmp_path / "episodes").mkdir()
+    ep = _ep_for_caller_fault(["five five five", "hello"], [])
+    ep["tool_log"] = [
+        {
+            "idx": 0,
+            "tool": "book_appointment",
+            "args": {"customer_id": "1234567890"},
+            "ok": False,
+            "error": "not_found",
+        }
+    ]
+    ep.update(
+        episode_id="ambiguous_branch_02-s0-abc",
+        family="ambiguous_branch",
+        outcome="completed",
+        turns=[],
+        scores=[
+            {
+                "scorer": "tool_calls",
+                "passed": False,
+                "advisory": False,
+                "turn_idx": 2,
+                "detail": {"first_missing": {"tool": "lookup_account"}},
+            }
+        ],
+    )
+    (tmp_path / "episodes" / "ambiguous_branch_02-s0-abc.json").write_text(json.dumps(ep))
+    md = buckets_report(tmp_path, target_counts={"lookup_account": 700})
+    assert (
+        "Unverified write attempts" in md
+        and "ambiguous_branch_02-s0-abc: book_appointment customer_id=1234567890 (refused)" in md
+    )

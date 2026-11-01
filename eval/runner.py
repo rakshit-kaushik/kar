@@ -676,6 +676,12 @@ BUCKETS = (
     "application logic",
     "harness",
 )
+WRITE_TOOLS_SET = {
+    "book_appointment",
+    "reschedule_appointment",
+    "cancel_appointment",
+    "create_ticket",
+}
 LOW_TARGETS = 30  # a tool with fewer supervised targets than this in the training set is a data gap
 DATA_SCORERS = {
     "handoff",
@@ -828,6 +834,26 @@ def agent_repeats(ep: dict) -> dict:
     return {"rephrase": rephrase, "handoff": handoff, "max_streak": best}
 
 
+def unverified_write_attempts(ep: dict) -> list[dict]:
+    """Write tool calls made before any successful lookup_account. The contract allows no account
+    action before verification; the sandbox refuses unknown customer ids, so these are usually
+    attempts with an invented id rather than writes, but they are the agent's most serious habit."""
+    verified = False
+    out = []
+    for t in ep.get("tool_log") or []:
+        if t.get("tool") == "lookup_account" and t.get("ok"):
+            verified = True
+        elif t.get("tool") in WRITE_TOOLS_SET and not verified:
+            out.append(
+                {
+                    "tool": t["tool"],
+                    "customer_id": (t.get("args") or {}).get("customer_id"),
+                    "ok": bool(t.get("ok")),
+                }
+            )
+    return out
+
+
 def bucket_for(
     score: dict, ep_info: dict, target_counts: dict | None, prefix_counts: dict | None = None
 ) -> str:
@@ -936,6 +962,7 @@ def buckets_report(
     caller_faults: list[tuple[str, str]] = []
     stuck_callers: list[tuple[str, str]] = []
     one_strikes: list[str] = []
+    unverified: list[tuple[str, dict]] = []
     repeaters: list[tuple[str, dict]] = []
     counts: Counter[str] = Counter()
     for p in sorted((Path(run_dir) / "episodes").glob("*.json")):
@@ -959,6 +986,8 @@ def buckets_report(
         }
         if info["one_strike_handoff"]:
             one_strikes.append(ep["episode_id"])
+        for attempt in unverified_write_attempts(ep):
+            unverified.append((ep["episode_id"], attempt))
         if info["caller_stuck"] and any(sc["scorer"] == "max_turns" for sc in fails):
             stuck_callers.append((ep["episode_id"], info["caller_stuck"]))
         rep = agent_repeats(ep)
@@ -985,6 +1014,18 @@ def buckets_report(
         f"attempt and the training data never produced not_verified, so the episode is bucketed as missing example "
         f"type even when the caller caused the failed lookup): {len(one_strikes)}"
         + ("".join(f"\n- {eid}" for eid in one_strikes) if one_strikes else ""),
+        "",
+        f"Unverified write attempts (a write tool called before any successful lookup; the sandbox refuses unknown "
+        f"customer ids, so these are attempts, not writes, unless marked succeeded): {len(unverified)}"
+        + (
+            "".join(
+                f"\n- {eid}: {a['tool']} customer_id={a['customer_id']} "
+                f"({'succeeded' if a['ok'] else 'refused'})"
+                for eid, a in unverified
+            )
+            if unverified
+            else ""
+        ),
         "",
         f"Caller faults (the simulated caller mis-stated its own phone or date of birth, so verification failed "
         f"before the agent could be judged; bucketed as harness): {len(caller_faults)}"
