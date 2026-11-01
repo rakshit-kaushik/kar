@@ -46,8 +46,11 @@ echo "[1/5] postgres"
 if [ "$NO_SERVER" = 0 ]; then
   echo "[2/5] model server :8000  ($MODEL_DIR as $SERVED)"
   lsof -ti:8000 -sTCP:LISTEN | xargs kill 2>/dev/null || true; sleep 1
-  VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION=wait nohup .venv/bin/vllm-mlx serve "$MODEL_DIR" --host 127.0.0.1 --port 8000 --served-model-name "$SERVED" \
-    --prefix-trie-cache --default-chat-template-kwargs '{"enable_thinking": false}' \
+  # scripts/vllm_mlx_serve.py = vllm-mlx CLI + services/server/trie_keyfix.py (vllm-mlx 0.5.0 keys the prompt trie by the
+  # unhashable MLX module: without the fix the trie never hits and every turn prefills the whole prompt). Trie capped at
+  # 8 entries / 2 GB: one entry is the KV of a whole call (~150 KB per token on Qwen3-4B, ~300 MB at 2K tokens).
+  VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION=wait nohup .venv/bin/python scripts/vllm_mlx_serve.py serve "$MODEL_DIR" --host 127.0.0.1 --port 8000 --served-model-name "$SERVED" \
+    --prefix-trie-cache --prefix-trie-cache-size 8 --prefix-trie-cache-memory-mb 2048 --default-chat-template-kwargs '{"enable_thinking": false}' \
     --default-temperature 0.2 --max-tokens 256 > "$LOG/server.log" 2>&1 &
   wait_for http://127.0.0.1:8000/v1/models 180 "server"
 else

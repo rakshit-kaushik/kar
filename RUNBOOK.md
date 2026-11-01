@@ -75,6 +75,19 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Fallback on the fly: `scripts/gpu_flip.sh hosted`.
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
 
+### Prefix cache: never hit until Nov 1 02:50 (root cause + fix)
+Evidence: server.log showed `prefix_trie_cache=True` at start, zero "Prefix trie cache HIT" lines in 290 live turns, and
+10-token spoken turns taking 0.46-0.55 s server-side (= full prefill of ~1.5K tokens). Cause: vllm-mlx 0.5.0 keys mlx-lm's
+LRUPromptCache by the model object; an MLX nn.Module is a dict subclass and unhashable, so every insert and lookup raised
+TypeError inside a try that counts a "skip" and logs at DEBUG. The System KV cache (system prefix only) hit only on
+[system, user] prewarm requests: live prompts start with the assistant greeting, so the system-prefix check fails there.
+Fix: services/server/trie_keyfix.py keys the trie by id(model); scripts/vllm_mlx_serve.py applies it and runs the CLI;
+restart.sh starts the server through it with `--prefix-trie-cache-size 8 --prefix-trie-cache-memory-mb 2048`.
+Expected effect (tokenizer experiment, tests/services/test_trie_keyfix.py): consecutive turns share all but the dropped
+empty `<think>` block, so turn 2+ prefills 30-150 new tokens instead of 1.5-2.3K. Verify after a restart: a 2-turn
+request pair against :8000 must log "Prefix trie cache HIT (stream_chat): reusing N tokens, prefilling M new" on the
+second request (scripts/deploy_block.sh does this).
+
 ### Hosted fallback is a hedge (Nov 1, 02:20)
 A local turn with no first token after `PROXY_FIRST_TOKEN_TIMEOUT_MS` (3000) no longer gets cancelled: the proxy starts the
 hosted request beside it and serves whichever streams a token first (`fallback` event with `hedged: true`, then
