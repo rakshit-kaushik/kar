@@ -705,3 +705,36 @@ def test_bucket_for_max_turns_with_stuck_caller_is_harness():
     assert bucket_for({"scorer": "max_turns", "detail": {}}, stuck, None) == "harness"
     # only the turn-cap failure is the caller's doing; other scorers keep their own labels
     assert bucket_for({"scorer": "no_jargon", "detail": {}}, stuck, None) == "missing example type"
+
+
+def test_agent_repeats_mirrors_the_loop_guard_rule():
+    from eval.runner import agent_repeats
+
+    def ep(*assistant_lines):
+        msgs = []
+        for line in assistant_lines:
+            msgs.append({"role": "assistant", "content": line})
+            msgs.append({"role": "user", "content": "yes"})
+        return {"messages": msgs}
+
+    # first consecutive repeat -> the guard rephrases; second -> it hands off and the call ends
+    assert agent_repeats(
+        ep("What day is that?", "What day is that?", "what day is that", "x", "x")
+    ) == {
+        "rephrase": 1,
+        "handoff": 1,
+        "max_streak": 3,
+    }
+    assert agent_repeats(ep("Which branch?", "Which branch?", "Marker Street, got it.")) == {
+        "rephrase": 1,
+        "handoff": 0,
+        "max_streak": 2,
+    }
+    assert agent_repeats(ep("One.", "Two.", "Three.")) == {
+        "rephrase": 0,
+        "handoff": 0,
+        "max_streak": 1,
+    }
+    # tool-call-only turns (empty content) are not lines
+    tool_turns = {"messages": [{"role": "assistant", "content": "", "tool_calls": [{}]}] * 3}
+    assert agent_repeats(tool_turns) == {"rephrase": 0, "handoff": 0, "max_streak": 0}

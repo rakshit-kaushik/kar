@@ -706,6 +706,34 @@ def caller_stuck(ep: dict) -> str | None:
     return None
 
 
+def _normalize_line(text: str) -> str:
+    """Same normalization as the agent's loop guard (services/agent/loopguard.normalize)."""
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+
+
+def agent_repeats(ep: dict) -> dict:
+    """How often S's application-side loop guard would have intervened on this transcript: the
+    first consecutive identical assistant line is swallowed and rephrased, the second becomes a
+    handoff that ends the call. The runner talks to the model directly, so it never sees the guard;
+    this is the same rule applied after the fact. Tool-call-only turns are not lines."""
+    lines = [
+        _normalize_line(m.get("content") or "")
+        for m in ep.get("messages") or []
+        if m.get("role") == "assistant" and (m.get("content") or "").strip()
+    ]
+    rephrase = handoff = 0
+    best = run = 1 if lines else 0
+    for a, b in zip(lines, lines[1:]):
+        run = run + 1 if a == b else 1
+        best = max(best, run)
+        if run == 2:
+            rephrase += 1
+        elif run == 3:
+            handoff += 1
+            break
+    return {"rephrase": rephrase, "handoff": handoff, "max_streak": best}
+
+
 def bucket_for(score: dict, ep_info: dict, target_counts: dict | None) -> str:
     """First-pass label for one failing scorer of one episode, from scorer evidence alone."""
     if ep_info.get("outcome") == "error":
@@ -753,6 +781,7 @@ def buckets_report(
     rows = []
     caller_faults: list[tuple[str, str]] = []
     stuck_callers: list[tuple[str, str]] = []
+    repeaters: list[tuple[str, dict]] = []
     counts: Counter[str] = Counter()
     for p in sorted((Path(run_dir) / "episodes").glob("*.json")):
         ep = json.loads(p.read_text())
@@ -774,6 +803,9 @@ def buckets_report(
         }
         if info["caller_stuck"] and any(sc["scorer"] == "max_turns" for sc in fails):
             stuck_callers.append((ep["episode_id"], info["caller_stuck"]))
+        rep = agent_repeats(ep)
+        if rep["rephrase"] or rep["handoff"]:
+            repeaters.append((ep["episode_id"], rep))
         if info["caller_fault"]:
             caller_faults.append((ep["episode_id"], info["caller_fault"]))
         labelled = [
@@ -794,6 +826,15 @@ def buckets_report(
         f"Stuck callers (the simulated caller kept saying goodbye without hanging up, or repeated one line three or more "
         f"times in a row; their max_turns failure is bucketed as harness): {len(stuck_callers)}"
         + ("".join(f"\n- {eid}: {why}" for eid, why in stuck_callers) if stuck_callers else ""),
+        "",
+        f"Adapter repetition (S's loop guard would have intervened: first identical line rephrased, second a handoff): "
+        f"{len(repeaters)} failing episodes, {sum(r['rephrase'] for _, r in repeaters)} rephrases, "
+        f"{sum(r['handoff'] for _, r in repeaters)} handoffs"
+        + (
+            "".join(f"\n- {eid}: streak {r['max_streak']}" for eid, r in repeaters)
+            if repeaters
+            else ""
+        ),
         "",
         "## Bucket counts",
         "",
