@@ -76,8 +76,8 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
 
 ### Nov 1 05:42: claim guard (reviewer item from the run-1 failure labels)
-In 5 of 81 text episodes the candidate said "I've opened your ticket and I'm transferring you" right after create_ticket and
-called request_handoff a turn late or never (the contract counts a transfer announced without the tool as an unsupported
+In 6 of 81 text episodes (E's failures.md: "transfer 6"; the reviewer's label pass counted 5) the candidate said "I've opened
+your ticket and I'm transferring you" right after create_ticket and called request_handoff a turn late or never (the contract counts a transfer announced without the tool as an unsupported
 claim; the same pattern as live call 2). `services/agent/claimguard.py` watches the streamed reply in `R3Agent.llm_node`
 (outside the loop guard): the chunk that completes a transfer phrase waits until request_handoff has been recorded through
 the executor (reason from the call state: suspected_fraud after an unauthorized_transaction ticket, verification_failed
@@ -91,7 +91,8 @@ a sentence (it used to stop at the first, so a supported ticket claim hid the tr
 widened for the verification count (`state_view()` adds it for the guard only). Reviewer's second observation, for the
 scripts: on a single not_verified the candidate transfers instead of asking again, so no demo scenario mis-states the
 date of birth (none does: the five turn scripts give phone and DOB cleanly). `scripts/dry_run_agent.py --real-agent`
-exercises the wiring in text.
+exercises the wiring in text. Not a guard case: the 16 one-strike handoffs in run 1 (transfer after a single not_verified
+instead of a retry, request_handoff correctly called) are a missing example type, covered by E's v5.1 misstate-retry scenarios.
 
 ### Nov 1 05:01: loop guard; demo rehearsal tooling
 - Loop guard (services/agent/loopguard.py, in R3Agent.llm_node): a reply is held only while it is still identical to the previous
