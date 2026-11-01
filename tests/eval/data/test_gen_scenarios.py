@@ -7,6 +7,7 @@ from pathlib import Path
 from data.gen.scenarios import generate, test_signatures, write_dir
 from eval.sandbox import Sandbox
 from eval.simulator.scenario import FAMILIES, load_scenarios, parse_scenario, validate_against_seed
+from eval.simulator.stt_shape import spell_digits
 
 TEST_DIR = Path(__file__).resolve().parents[3] / "eval/scenarios/test"
 
@@ -239,3 +240,19 @@ def test_relative_date_phrases_from_the_seed_clock():
         relative_date(date(2026, 11, 14), today, prefer_ordinal=True)
         == "the fourteenth of november"
     )
+
+
+def test_v51_profile_includes_split_phone_number_scenarios():
+    out = generate(100, seed=52, profile="v51")
+    split = [s for s in out if s["id"].startswith("gen_split_identifier_")]
+    assert len(split) >= 5
+    sb = Sandbox()
+    for s in split:
+        steps = s["expect"]["tool_calls"]
+        assert steps[0]["tool"] == "lookup_account" and steps[0]["ok"] is True
+        phone = steps[0]["args"]["phone"]
+        first, rest = s["script"][0]["do"], s["script"][1]["do"]
+        # the caller says six digits, stops, and gives the last four only when asked for the rest
+        assert spell_digits(phone[:6]) in first and spell_digits(phone[6:]) in rest
+        assert "stop" in s["goal"] and s["family"] == "noisy_transcript"
+        assert not validate_against_seed(parse_scenario(s, s["id"]), sb)

@@ -1070,6 +1070,42 @@ class _Gen:
             },
         )
 
+    def split_identifier(self):
+        """Deepgram plus the turn detector can deliver a phone number as two utterances; the agent
+        must ask for the rest instead of treating six digits as a complete number (S, 07:11 block)."""
+        cust = self.customer()
+        follow = self._goal_after_verification(cust)
+        if not follow:
+            return None
+        goal_text, steps, fs, forbidden = follow
+        first, rest = spell_digits(cust.phone[:6]), spell_digits(cust.phone[6:])
+        expect = {
+            "tool_calls": [self.lookup_step(cust), *steps],
+            "final_state": fs,
+            "max_turns": 14,
+            "handoff": {"required": False, "reason": None},
+        }
+        if forbidden:
+            expect["forbidden_tools"] = forbidden
+        return self.base(
+            "noisy_transcript",
+            f"{cust.first_name}'s phone number arrives in two pieces",
+            "Split identifier: six digits then silence; the agent asks for the rest, never looks up a partial number",
+            self.caller(cust),
+            f"When asked for your phone number, say only '{first}' and stop, as if the line cut you off. When the agent asks for the rest of the number or says it needs ten digits, say '{rest}'. Give your date of birth when asked. Then {goal_text}.",
+            expect,
+            script=[
+                {
+                    "trigger": "agent asks for your phone number",
+                    "do": f"say only '{first}' and stop",
+                },
+                {
+                    "trigger": "agent asks for the rest of the number or for all ten digits",
+                    "do": f"say '{rest}'",
+                },
+            ],
+        )
+
     def frontload_decline(self):
         """Two live-call slices (session S): the caller front-loads every detail, or leaves at the read-back."""
         cust = self.customer()
@@ -1200,6 +1236,7 @@ def generate(
             "two_intents_confirm": _Gen.two_intents_confirm,
             "self_correct_inline": _Gen.self_correct_inline,
             "card_already_blocked": _Gen.card_already_blocked,
+            "split_identifier": _Gen.split_identifier,
         }
         mix = mix or {
             "misstate_retry": 60,
@@ -1207,6 +1244,7 @@ def generate(
             "two_intents_confirm": 30,
             "self_correct_inline": 20,
             "card_already_blocked": 20,
+            "split_identifier": 15,
         }
     weights = mix or dict.fromkeys(FAMILIES, 1)
     out: list[dict] = []
