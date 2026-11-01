@@ -334,3 +334,18 @@ def test_excluded_prefixes_are_read_from_the_excluded_line_anywhere_in_the_file(
     h = tmp_path / "plain.md"
     h.write_text("Excluded 1 scenario x seed episode(s) ...: ordinary_02-s1\n")
     assert excluded_episode_prefixes(h) == ["ordinary_02-s1"]
+
+
+def test_collect_results_prefers_the_scores_file_so_repeats_stay_separate_episodes(tmp_path):
+    from train.eval_hook import collect_results, family_table
+
+    rows = []
+    for seed, ok in ((0, True), (1, False), (2, True)):
+        for scorer in ("final_state", "tool_calls"):
+            rows.append({"run_id": "r", "model_id": "m", "scenario_id": "ordinary_01", "episode_id": f"ordinary_01-s{seed}-x", "repeat_seed": seed,
+                         "family": "ordinary", "scorer": scorer, "pass": ok, "advisory": False, "detail": {}})
+    (tmp_path / "scores.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    got = collect_results("r", "m", tmp_path, database_url="postgresql://nope")  # the file wins; Postgres is never asked
+    assert len(got) == 6 and got[0]["episode_id"] == "ordinary_01-s0-x"
+    sel = family_table(got)["selection"]
+    assert sel["episodes"] == 3 and sel["all_pass"] == 66.67 and family_table(got)["selection"]["grouping"] == "episode"

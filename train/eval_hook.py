@@ -164,28 +164,32 @@ def run_r3_eval(base_url: str, model: str, scenarios: str | Path, out_dir: str |
 
 
 def collect_results(run_id: str, model_id: str, out_dir: str | Path, database_url: str | None, since: float | None = None) -> list[dict]:
+    """The runner's scorer rows for one run. E's scores.jsonl first: it carries episode_id and repeat_seed, which
+    the Postgres eval_results table does not (id, run_id, model_id, scenario_id, family, scorer, pass, detail,
+    created_at), and without them repeats collapse onto their scenario and all-pass is under-counted (the
+    07:40 raw table said 30/81 where the rows say 38/81). Postgres only when no file exists."""
     rows: list[dict] = []
+    for name in ("scores.jsonl", "eval_results.jsonl"):  # E's runner writes scores.jsonl; the stub eval_results.jsonl
+        p = Path(out_dir) / name
+        if p.exists():
+            rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+            mine = [r for r in rows if r.get("run_id") == run_id]
+            rows = mine or rows
+            if rows:
+                return rows
     if database_url:
         try:
             import psycopg
 
             with psycopg.connect(database_url, connect_timeout=5) as conn, conn.cursor() as cur:
                 cur.execute(
-                    "select run_id, model_id, scenario_id, family, scorer, pass, detail from eval_results "
+                    "select id, run_id, model_id, scenario_id, family, scorer, pass, detail from eval_results "
                     "where run_id = %s or (model_id = %s and created_at >= %s) order by id",
                     (run_id, model_id, dt.datetime.fromtimestamp(since or 0, dt.timezone.utc)),
                 )
-                rows = [dict(zip(("run_id", "model_id", "scenario_id", "family", "scorer", "pass", "detail"), r)) for r in cur.fetchall()]
+                rows = [dict(zip(("id", "run_id", "model_id", "scenario_id", "family", "scorer", "pass", "detail"), r)) for r in cur.fetchall()]
         except Exception as e:  # noqa: BLE001
-            print(f"[eval] postgres eval_results unavailable ({type(e).__name__}: {e}); using jsonl", flush=True)
-    if not rows:
-        for name in ("scores.jsonl", "eval_results.jsonl"):  # E's runner writes scores.jsonl; the stub eval_results.jsonl
-            p = Path(out_dir) / name
-            if p.exists():
-                rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
-                mine = [r for r in rows if r.get("run_id") == run_id]
-                rows = mine or rows
-                break
+            print(f"[eval] postgres eval_results unavailable ({type(e).__name__}: {e}); no scores file either", flush=True)
     return rows
 
 
@@ -259,6 +263,7 @@ def family_table(rows: list[dict]) -> dict:
         "tool_calls": _scorer_rate(table, TOOL_ARGS) if _has_scorer(table, TOOL_ARGS) else None,
         "unsupported_success_claims": sum(1 for r in rows if r.get("scorer") == SUCCESS_CLAIM and not r.get("pass")),
         "episodes": len({r.get("episode_id") or (r.get("scenario_id"), r.get("repeat_seed")) for r in rows}),
+        "grouping": "episode" if rows and any(r.get("episode_id") or r.get("repeat_seed") is not None for r in rows) else "scenario (rows carry no episode id: repeats collapsed)",
     }
     return table
 
