@@ -48,6 +48,7 @@ def test_registry_weights_and_advisory():
         "no_jargon",
         "brevity",
         "valid_tool_calls",
+        "calendar_consistency",
     }
     assert set(WEIGHTS) == set(SCORERS) and ADVISORY == {"brevity"}
     assert (
@@ -787,7 +788,7 @@ async def test_calendar_consistency_catches_wrong_weekday_and_past_dates():
     kinds = [(v["kind"], v["spoken"]) for v in r.detail["violations"]]
     assert ("wrong_weekday", "Tuesday, November fourth") in kinds and (
         "past_date",
-        "Saturday, November first",
+        "Sunday, November first",
     ) in kinds
     assert len(kinds) == 2
     assert "calendar_consistency" in WEIGHTS and WEIGHTS["calendar_consistency"] >= 2
