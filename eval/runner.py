@@ -3,6 +3,7 @@
     uv run r3-eval run --base-url http://127.0.0.1:8001/v1 --model r3-voice-base \
         --scenarios eval/scenarios/test/ --repeats 3 --out $R3_ARTIFACTS/runs/<id>/ [--parallel 4]
     uv run r3-eval validate eval/scenarios/test/
+    uv run r3-eval rescore $R3_ARTIFACTS/runs/<id>/   # re-score saved episodes after scorer changes
 
 `run`: every scenario x repeats (caller seeds 0..N-1, caller temperature 0.3), fresh Sandbox per
 episode, hosted caller vs. the agent URL, twelve scorers. Writes <out>/episodes/*.json,
@@ -191,6 +192,26 @@ def summarize(results: list[Result], *, run_id: str, model_id: str) -> str:
             app = [x for x in app if x.detail.get("applicable", True)]
             cells.append(_pct(sum(1 for x in app if x.passed), len(app)))
         lines.append(f"| {fam} | {len(rs)} | {_mean_spread(rs)} | " + " | ".join(cells) + " |")
+    by_scenario: dict[str, list[Result]] = defaultdict(list)
+    for ep, scores in results:
+        by_scenario[ep.scenario_id].append((ep, scores))
+    lines += [
+        "",
+        "## Per scenario",
+        "",
+        "| scenario | family | all-pass seeds | failing scorers (seed, turn) |",
+        "|---|---|---|---|",
+    ]
+    for sid in sorted(by_scenario):
+        rs = sorted(by_scenario[sid], key=lambda r: r[0].repeat_seed)
+        ok = sum(1 for _, sc in rs if all_pass(sc))
+        fails_txt = ", ".join(
+            f"{x.scorer} (s{ep.repeat_seed} t{x.turn_idx if x.turn_idx is not None else '-'})"
+            for ep, sc in rs
+            for x in sc
+            if not x.passed and not x.advisory
+        )
+        lines.append(f"| {sid} | {rs[0][0].family} | {ok}/{len(rs)} | {fails_txt} |")
     lines += [
         "",
         "## Ranked failures (frequency × cost)",
@@ -360,6 +381,34 @@ def validate_dir(directory: str | Path) -> dict[str, list[str]]:
     return problems
 
 
+# ----- rescore -------------------------------------------------------------------------------
+
+
+def rescore_dir(directory: str | Path, scenarios_dir: str | Path | None = None) -> int:
+    """Re-run the scorers over <dir>/episodes/*.json; rewrite scores.jsonl and summary.md. No DB."""
+    from eval.simulator.scenario import parse_scenario
+
+    out = Path(directory)
+    by_id = {s.id: s for s in load_scenarios(scenarios_dir)} if scenarios_dir else {}
+    results: list[Result] = []
+    for p in sorted((out / "episodes").glob("*.json")):
+        data = json.loads(p.read_text())
+        ep = Episode.from_dict(data)
+        sc = by_id.get(ep.scenario_id) or parse_scenario(data["scenario"], f"{p.name}#scenario")
+        scores = score_episode(ep, sc)
+        save_scored(ep, scores, p)
+        results.append((ep, scores))
+    results.sort(key=lambda r: (r[0].scenario_id, r[0].repeat_seed))
+    with (out / "scores.jsonl").open("w") as fh:
+        for ep, scores in results:
+            for row in score_rows(ep, scores):
+                fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    run_id = results[0][0].run_id if results else out.name
+    model_id = results[0][0].model_id if results else "?"
+    (out / "summary.md").write_text(summarize(results, run_id=run_id, model_id=model_id))
+    return len(results)
+
+
 # ----- CLI -----------------------------------------------------------------------------------
 
 
@@ -399,6 +448,13 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--only", default=None, help="regex on scenario id")
     v = sub.add_parser("validate", help="check scenario files against schema.json and the seed")
     v.add_argument("directory")
+    rs = sub.add_parser("rescore", help="re-run the scorers over a run directory's saved episodes")
+    rs.add_argument("directory")
+    rs.add_argument(
+        "--scenarios",
+        default=None,
+        help="scenario dir to re-read expectations from (default: as saved)",
+    )
     return p
 
 
@@ -491,7 +547,13 @@ def _cmd_run(a: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     load_dotenv(ROOT / ".env")
     a = build_parser().parse_args(argv)
-    return _cmd_validate(a) if a.command == "validate" else _cmd_run(a)
+    if a.command == "validate":
+        return _cmd_validate(a)
+    if a.command == "rescore":
+        n = rescore_dir(a.directory, a.scenarios)
+        print(f"rescored {n} episodes -> {Path(a.directory) / 'summary.md'}")
+        return 0
+    return _cmd_run(a)
 
 
 if __name__ == "__main__":

@@ -222,3 +222,39 @@ def test_cli_subcommands_and_api_key_resolution(monkeypatch):
     assert resolve_api_key(None, "https://api.anthropic.com/v1") == "sk-hosted"
     assert resolve_api_key(None, "http://127.0.0.1:8001/v1") == "none"
     assert resolve_api_key("explicit", "https://api.anthropic.com/v1") == "explicit"
+
+
+def test_summary_has_a_per_scenario_matrix():
+    results = [
+        fake_result("a", "ordinary", set(), 0),
+        fake_result("a", "ordinary", {"handoff"}, 1),
+        fake_result("a", "ordinary", set(), 2),
+    ]
+    md = summarize(results, run_id="r1", model_id="m1")
+    sec = md.split("## Per scenario")[1].split("## Ranked")[0]
+    assert "| a | ordinary | 2/3 | handoff (s1 t-) |" in sec
+
+
+@pytest.mark.asyncio
+async def test_rescore_rebuilds_scores_and_summary_from_saved_episodes(tmp_path):
+    from eval.runner import rescore_dir
+
+    results = await run_scenarios(
+        two_scenarios(),
+        agent_factory,
+        caller_factory,
+        out_dir=tmp_path,
+        run_id="r-test",
+        model_id="scripted",
+        parallel=2,
+        repeats=2,
+    )
+    (tmp_path / "summary.md").write_text("stale")
+    (tmp_path / "scores.jsonl").write_text("")
+    n = rescore_dir(tmp_path, scenarios_dir=None)
+    assert n == len(results) == 4
+    rows = [json.loads(line) for line in (tmp_path / "scores.jsonl").read_text().splitlines()]
+    assert len(rows) == 4 * len(WEIGHTS)
+    assert "## Per family" in (tmp_path / "summary.md").read_text()
+    p = build_parser().parse_args(["rescore", str(tmp_path)])
+    assert p.command == "rescore" and p.directory == str(tmp_path)
