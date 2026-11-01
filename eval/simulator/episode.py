@@ -64,6 +64,9 @@ class Episode:
     prompt_source: str = ""
     system_prompt_chars: int = 0
     first_prompt_tokens: int | None = None
+    served_models: list[str] = field(
+        default_factory=list
+    )  # model ids the endpoint reported (proxy fallback shows here)
     latency_ms: list[float] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -260,5 +263,6 @@ async def run_episode(
         prompt_source=prompt_source,
         system_prompt_chars=len(system_prompt),
         first_prompt_tokens=first_prompt_tokens,
+        served_models=sorted(getattr(agent, "served_models", None) or []),
         latency_ms=latencies,
     )

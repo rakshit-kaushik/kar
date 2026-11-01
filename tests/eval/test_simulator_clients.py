@@ -203,3 +203,19 @@ async def test_agent_retries_once_with_a_bigger_budget_on_empty_length_reply():
 def test_caller_default_budget_is_large_enough_for_hidden_tokens():
     client, _ = fake_client([FakeMessage(content="x")])
     assert LLMCaller(SCEN, client=client, model="c1").max_tokens >= 600
+
+
+@pytest.mark.asyncio
+async def test_clients_record_the_served_model_id():
+    class Comp:
+        async def create(self, **kwargs):
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=FakeMessage(content="hi"), finish_reason="stop")],
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+                model="r3-voice-base",
+            )
+
+    client = SimpleNamespace(chat=SimpleNamespace(completions=Comp()))
+    agent = OpenAIAgent(client=client, model="r3-voice-base")
+    await agent.respond([{"role": "user", "content": "hi"}])
+    assert agent.last_model == "r3-voice-base" and agent.served_models == {"r3-voice-base"}

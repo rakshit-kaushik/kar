@@ -268,3 +268,12 @@ async def test_episode_json_round_trip(tmp_path):
     }
     assert data["scenario"]["id"] == "ordinary_01" and "source" not in data["scenario"]
     assert Episode.from_dict(data).outcome == "completed"
+
+
+@pytest.mark.asyncio
+async def test_episode_records_served_models():
+    agent = ScriptedAgent([say("ok"), say("bye")])
+    agent.served_models = {"r3-voice-base"}
+    ep = await make_episode(scenario(), [], ["hi", ("bye", True)], agent=agent)
+    assert ep.served_models == ["r3-voice-base"]
+    assert "served_models" in ep.to_dict()

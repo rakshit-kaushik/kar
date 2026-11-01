@@ -68,6 +68,8 @@ class _ChatBase:
         self.last_usage: dict[str, int] = {}
         self.last_finish_reason: str | None = None
         self.length_retries = 0
+        self.last_model: str | None = None
+        self.served_models: set[str] = set()
 
     MAX_TOKENS_CAP = 2000
 
@@ -126,6 +128,10 @@ class _ChatBase:
             self.usage_totals["prompt_tokens"] += self.last_usage["prompt_tokens"]
             self.usage_totals["completion_tokens"] += self.last_usage["completion_tokens"]
         self.usage_totals["requests"] += 1
+        served = getattr(resp, "model", None)
+        if isinstance(served, str) and served:
+            self.last_model = served
+            self.served_models.add(served)
         return resp
 
 
