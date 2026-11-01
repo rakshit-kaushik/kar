@@ -219,3 +219,16 @@ async def test_clients_record_the_served_model_id():
     agent = OpenAIAgent(client=client, model="r3-voice-base")
     await agent.respond([{"role": "user", "content": "hi"}])
     assert agent.last_model == "r3-voice-base" and agent.served_models == {"r3-voice-base"}
+
+
+def test_clean_caller_text_farewell_only_reply_is_a_hangup():
+    # the local base-model caller never emits [hangup]; a reply that only says goodbye ends the call
+    assert clean_caller_text("goodbye") == ("goodbye", True)
+    assert clean_caller_text("Caller: ok thanks, bye") == ("ok thanks, bye", True)
+    assert clean_caller_text("thanks, have a good day") == ("thanks, have a good day", True)
+    # still talking: a question, a new request or a long reply is not a farewell
+    long_reply = "bye but wait can you also check my balance?"
+    assert clean_caller_text(long_reply) == (long_reply, False)
+    assert clean_caller_text("yes that's correct i think that's all i need thanks you")[1] is False
+    assert clean_caller_text("thank you") == ("thank you", False)
+    assert clean_caller_text("") == ("", False)
