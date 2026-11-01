@@ -1,4 +1,3 @@
-import re
 #!/usr/bin/env python
 """G1 / load-test report: per-stage latency p50/p95 and per-call outcomes from turn_events (CONTRACT.md §6).
 
@@ -18,6 +17,7 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
+import re
 from collections import defaultdict
 
 import psycopg
