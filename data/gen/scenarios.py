@@ -729,6 +729,76 @@ class _Gen:
             },
         )
 
+    def double_fault(self):
+        """tool_timeout variant: the same tool fails twice (timeout/unavailable) -> handoff tool_failure."""
+        tool = self.rng.choice(
+            ["book_appointment", "check_availability", "reschedule_appointment", "create_ticket"]
+        )
+        errs = [self.rng.choice(["timeout", "timeout", "unavailable"]) for _ in range(2)]
+        inject = [
+            {"tool": tool, "call_index": 1, "error": errs[0]},
+            {"tool": tool, "call_index": 2, "error": errs[1]},
+        ]
+        retry = (
+            "If the agent says something did not go through, say 'okay, try again'. If it fails a second time, "
+            "accept being transferred to a person and say goodbye."
+        )
+        handoff = {"tool": "request_handoff", "args": {"reason": "tool_failure"}, "ok": True}
+        if tool in ("book_appointment", "check_availability"):
+            cust = self.customer()
+            parts = self.book_parts(cust)
+            if not parts:
+                return None
+            service, b, d, hhmm, _slot, steps, _fs = parts
+            failed = {"tool": tool, "args": {"branch_id": b}, "ok": False}
+            tool_steps = (
+                [steps[0], failed, failed, handoff]
+                if tool == "check_availability"
+                else [steps[0], steps[1], failed, failed, handoff]
+            )
+            goal = f"Book a {SERVICE_WORDS[service]} at {BRANCH_WORDS[b]} on {spoken_date(d)} at {spoken_time(hhmm)}. {retry}"
+            title = f"{tool.replace('_', ' ')} fails twice for {cust.first_name}"
+        elif tool == "reschedule_appointment":
+            cust = self.customer(with_appointment=True)
+            ap = self.sb.customer_appointments(cust.customer_id)[0]
+            for _ in range(30):
+                d = self.rng.choice([x for x in self.days if x != ap.slot_start.date()])
+                slots = self.sb.open_slots(ap.branch_id, d)
+                if slots:
+                    hhmm = self.rng.choice(slots)
+                    break
+            else:
+                return None
+            failed = {"tool": tool, "args": {"appointment_id": ap.appointment_id}, "ok": False}
+            tool_steps = [self.lookup_step(cust), failed, failed, handoff]
+            goal = (
+                f"Move your {SERVICE_WORDS[ap.service_type]} at {BRANCH_WORDS[ap.branch_id]} from "
+                f"{spoken_date(ap.slot_start.date())} to {spoken_date(d)} at {spoken_time(hhmm)}. {retry}"
+            )
+            title = f"reschedule fails twice for {cust.first_name}"
+        else:
+            cust = self.customer()
+            cats = [c for c in TICKET_GOALS if ("ticket", cust.customer_id, c) not in self.sigs]
+            cat = self.rng.choice(cats)
+            failed = {"tool": tool, "args": {"customer_id": cust.customer_id}, "ok": False}
+            tool_steps = [self.lookup_step(cust), failed, failed, handoff]
+            goal = f"You want to {TICKET_GOALS[cat]}; agree when the agent offers to open a ticket. {retry}"
+            title = f"create ticket fails twice for {cust.first_name}"
+        return self.base(
+            "tool_timeout",
+            title,
+            "Two failures of the same tool: say so plainly, retry once, then hand off with reason tool_failure; never claim success",
+            self.caller(cust),
+            goal,
+            {
+                "tool_calls": tool_steps,
+                "handoff": {"required": True, "reason": "tool_failure"},
+                "final_state": {},
+                "max_turns": 14,
+            },
+            inject=inject,
+        )
+
     def noisy_transcript(self):
         cust = self.customer()
         parts = self.book_parts(cust)
@@ -804,13 +874,17 @@ def generate(
     )
     if profile == "short" and mix is None:
         mix = {"ordinary": 5, "needs_person": 3, "duplicate": 1}
+    builders = dict(_Gen.BUILDERS)
+    if profile == "double_fault":
+        builders["tool_timeout"] = _Gen.double_fault
+        mix = mix or {"tool_timeout": 1}
     weights = mix or dict.fromkeys(FAMILIES, 1)
     out: list[dict] = []
     counters: dict[str, int] = dict.fromkeys(FAMILIES, 0)
     goals: set[str] = set()
     for fam in _quota(n, weights):
         for _ in range(60):
-            d = _Gen.BUILDERS[fam](gen)
+            d = builders[fam](gen)
             key = (d["goal"], d["caller"]["persona"]) if d else None
             if d is None or key in goals:
                 continue

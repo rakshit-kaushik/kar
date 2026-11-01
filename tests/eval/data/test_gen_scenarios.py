@@ -103,3 +103,28 @@ def test_catalog_question_mentions_are_robust_substrings():
     mentions = [tuple(s["expect"]["must_mention"]) for s in out if s["expect"].get("must_mention")]
     assert mentions and all("nine to five" not in m for m in mentions)
     assert all(all(len(x) <= 14 for x in m) for m in mentions)  # single words or short amounts
+
+
+def test_double_fault_profile_expects_tool_failure_handoffs():
+    out = generate(40, seed=21, profile="double_fault")
+    assert len(out) == 40 and all(s["family"] == "tool_timeout" for s in out)
+    tools_used = Counter(s["inject"][0]["tool"] for s in out)
+    assert set(tools_used) == {
+        "book_appointment",
+        "check_availability",
+        "reschedule_appointment",
+        "create_ticket",
+    }
+    sb = Sandbox()
+    for s in out:
+        inj = s["inject"]
+        assert [i["call_index"] for i in inj] == [1, 2] and len({i["tool"] for i in inj}) == 1
+        assert all(i["error"] in ("timeout", "unavailable") for i in inj)
+        e = s["expect"]
+        assert e["handoff"] == {"required": True, "reason": "tool_failure"}
+        assert e["final_state"] == {"no_other_changes": True}  # nothing written
+        steps = [(t["tool"], t.get("ok")) for t in e["tool_calls"]]
+        assert steps[0] == ("lookup_account", True) and steps[-1] == ("request_handoff", True)
+        assert steps.count((inj[0]["tool"], False)) == 2
+        assert not validate_against_seed(parse_scenario(s, s["id"]), sb)
+    assert any(i["error"] == "unavailable" for s in out for i in s["inject"])
