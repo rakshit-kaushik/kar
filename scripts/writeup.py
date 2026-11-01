@@ -170,6 +170,7 @@ def rehearsal_table(con) -> str:
     note = ("\n\n_pass = expected final state reached with no success claim before its tool result, no ids spoken, no structural text; "
             "(guard n) = calls in which the agent's loop guard replaced a repeated line; (claim n) = calls in which the agent's claim guard intervened (recorded request_handoff before an announced transfer, or held back an unsupported booked/moved/cancelled/ticket sentence); (retry n) = calls in which the tool executor absorbed a transient fault with one retry on the same idempotency key, the model seeing only the final result; (policy n) = calls in which the application enforced the contract's fraud-ticket handoff rule after the model's reply, never the model's own transfer "
             "the model announced without the call; both application interventions counted apart from the model. "
+            "Rows whose run id ends in -rules ran with the executor retry and the fraud-ticket policy rule on; earlier rows ran the model with the two guards only. "
             "Recordings per call under $R3_ARTIFACTS/runs/<rehearsal run>/audio; the simulated caller's recordings are labelled recorded, never live._")
     return (md_table(["rehearsal run (model, stamp)"] + list(names) + ["TTS"], rows) + note) if rows else "_no rehearsal yet_"
 
@@ -221,7 +222,7 @@ def main() -> int:
                "## Load test (HTTP level)", load_table(con), "",
                "## Cost", cost_tables(con, rates, eval_ids), "",
                "## Ticket routing (100 hand-checked test tickets)", routing_table(con), "",
-               "## Demo rehearsal (simulated caller, five scripted scenarios; pass = expected final state, no claim without a tool result, no ids spoken)", rehearsal_table(con), "",
+               "## Demo rehearsal (simulated caller, the five scripted scenarios plus the alternative handoff flow 5b; pass = expected final state, no claim without a tool result, no ids spoken)", rehearsal_table(con), "",
                "## Targets vs measured", targets_table(con), ""]
     out = pathlib.Path(args.out or os.path.join(ART, "runs", f"writeup-{time.strftime('%m%d-%H%M')}.md"))
     out.parent.mkdir(parents=True, exist_ok=True)
