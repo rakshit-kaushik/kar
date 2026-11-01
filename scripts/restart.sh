@@ -17,7 +17,7 @@ MODEL_DIR=${MODEL_DIR:-$ART/models/Qwen3-4B-8bit}
 SERVED=${LOCAL_LLM_MODEL:-r3-voice-base}
 PSQL=${PSQL:-/opt/homebrew/opt/postgresql@15/bin/psql}
 NO_AGENT=0; NO_SERVER=0; NO_PROXY=0
-for a in "$@"; do case "$a" in --no-agent) NO_AGENT=1;; --no-server) NO_SERVER=1;; --agent-only) NO_SERVER=1; NO_PROXY=1;; --server-only) NO_PROXY=1; NO_AGENT=1;; esac; done
+for a in "$@"; do case "$a" in --no-agent) NO_AGENT=1;; --no-server) NO_SERVER=1;; --agent-only) NO_SERVER=1; NO_PROXY=1;; --server-only) NO_PROXY=1; NO_AGENT=1;; --proxy-only) NO_SERVER=1; NO_AGENT=1;; esac; done
 
 wait_for() { # url seconds label
   for _ in $(seq 1 "$2"); do curl -sf -m 2 "$1" >/dev/null 2>&1 && { echo "  $3 ok"; return 0; }; sleep 1; done
@@ -26,8 +26,8 @@ wait_for() { # url seconds label
 
 # --- shared-stack guard: never restart under a session that holds the GPU/server lock (scripts/gpu_lock.sh)
 OWNER="${R3_OWNER:-S}"
-if [ "$NO_PROXY" = 1 ] && [ "$NO_SERVER" = 1 ] && [ "$NO_AGENT" = 0 ]; then
-  LOCK_WAS_MINE=1  # agent-only: nothing shared is touched
+if [ "$NO_SERVER" = 1 ] && { [ "$NO_PROXY" = 1 ] || [ "$NO_AGENT" = 1 ]; } && ! { [ "$NO_PROXY" = 1 ] && [ "$NO_AGENT" = 1 ]; }; then
+  LOCK_WAS_MINE=1  # agent-only or proxy-only: the GPU/server is not touched
 elif ! "$(dirname "$0")/gpu_lock.sh" status >/dev/null 2>&1; then
   holder="$("$(dirname "$0")/gpu_lock.sh" status 2>/dev/null || true)"
   if ! echo "$holder" | grep -q "held by $OWNER "; then
@@ -60,7 +60,7 @@ lsof -ti:8001 -sTCP:LISTEN | xargs kill 2>/dev/null || true; sleep 1
 nohup uv run python -m services.proxy.main > "$LOG/proxy.log" 2>&1 &
 wait_for http://127.0.0.1:8001/health 60 "proxy"
 else
-  echo "[3/5] proxy: skipped (--agent-only)"
+  echo "[3/5] proxy: skipped (--agent-only / --server-only)"
 fi
 
 echo "[4/5] prewarm (always: a changed prompt or tool set means a cold system cache, and the first cold request exceeds the proxy's fallback timeout)"

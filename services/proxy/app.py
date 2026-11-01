@@ -42,8 +42,9 @@ def sse(obj: dict) -> str:
 
 
 # Claude 5.5's OpenAI-compatible endpoint returns 400 for sampling knobs ("`temperature` is deprecated for this model"),
-# so a request re-issued to the hosted model goes without them; the local server keeps its own defaults.
-HOSTED_DROP = ("temperature", "top_p")
+# and its hidden reasoning consumes the token budget (a max_tokens=96 request ended with finish_reason=length and no
+# visible token), so a request re-issued to the hosted model goes without them; the local server keeps its own defaults.
+HOSTED_DROP = ("temperature", "top_p", "max_tokens", "max_completion_tokens")
 
 
 class HostedBreaker:
@@ -149,9 +150,13 @@ def create_app(
     fallback_client: httpx.AsyncClient | None = None,
     fallback_model: str | None = None,
     first_token_timeout: float = 2.0,
+    admission_limit: int = 0,
 ) -> Starlette:
+    """admission_limit: concurrent local generations the engine serves within budget (load test); a streamed turn
+    arriving above it is routed to the hosted model when that is available, instead of queueing. 0 disables."""
     turn_counters: dict[str, int] = collections.defaultdict(int)
     breaker = HostedBreaker()
+    inflight = {"local": 0}
 
     async def emit(call_id: str, turn_idx: int, model_id: str, event: str, payload: dict | None = None) -> None:
         ev = {"call_id": call_id, "turn_idx": turn_idx, "model_id": model_id, "event": event, "ts_ms": now_ms(), "payload": payload or {}}
@@ -182,20 +187,34 @@ def create_app(
             await emit(call_id, turn_idx, model_id, "llm_done", {"ms": now_ms() - t0, "prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens"), "stream": False})
             return JSONResponse(data, status_code=r.status_code)
 
-        attempts: list[tuple[httpx.AsyncClient, str, str]] = [(upstream_client, model_id, "local")]
-        if fallback_client is not None and fallback_model and breaker.available():
-            attempts.append((fallback_client, fallback_model, "hosted"))
+        hosted_ok = fallback_client is not None and bool(fallback_model) and breaker.available()
+        attempts: list[tuple[httpx.AsyncClient, str, str]]
+        if admission_limit and hosted_ok and inflight["local"] >= admission_limit:
+            # above the measured concurrency limit: this turn goes to the hosted model instead of waiting a full turn
+            await emit(call_id, turn_idx, model_id, "admission", {"in_flight": inflight["local"], "limit": admission_limit, "routed_to": fallback_model})
+            attempts = [(fallback_client, fallback_model, "hosted")]
+        else:
+            attempts = [(upstream_client, model_id, "local")]
+            if hosted_ok:
+                attempts.append((fallback_client, fallback_model, "hosted"))
 
         s: _Stream | None = None
+        served_source = "local"
         i = 0
         while i < len(attempts):
             client, mid, source = attempts[i]
             has_next = i + 1 < len(attempts)
+            is_local = source != "hosted"
+            if is_local:
+                inflight["local"] += 1
             try:
-                sent = {**body, "model": mid} if source != "hosted" else {k: v for k, v in body.items() if k not in HOSTED_DROP} | {"model": mid}
+                sent = {**body, "model": mid} if is_local else {k: v for k, v in body.items() if k not in HOSTED_DROP} | {"model": mid}
                 s = await open_stream(client, sent, mid, first_token_timeout if has_next else None)
+                served_source = source
                 break
             except (httpx.HTTPError, UpstreamStatus, asyncio.TimeoutError) as e:
+                if is_local:
+                    inflight["local"] -= 1
                 reason = "first_token_timeout" if isinstance(e, asyncio.TimeoutError) else "upstream_error"
                 detail = {"status": e.status, "body": e.body[:500]} if isinstance(e, UpstreamStatus) else {"error": repr(e)}
                 await emit(call_id, turn_idx, mid, "llm_error", {"reason": reason, "source": source, **detail})
@@ -215,13 +234,15 @@ def create_app(
         assert s is not None
         served = s
         if served.first_token_ms is not None:
-            await emit(call_id, turn_idx, served.model_id, "llm_first_token", {"ms": served.first_token_ms - t0, "source": attempts[len(attempts) - 1][2] if served.model_id != model_id else "local"})
+            await emit(call_id, turn_idx, served.model_id, "llm_first_token", {"ms": served.first_token_ms - t0, "source": served_source})
 
         async def stream():
             try:
                 async for piece in served.rest():
                     yield piece
             finally:
+                if served_source != "hosted":
+                    inflight["local"] -= 1
                 await served.resp.aclose()
                 await emit(call_id, turn_idx, served.model_id, "llm_done", {
                     "ms": now_ms() - t0, "prompt_tokens": served.usage.get("prompt_tokens"), "completion_tokens": served.usage.get("completion_tokens"),

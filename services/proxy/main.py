@@ -1,6 +1,6 @@
 """Run the proxy: `uv run python -m services.proxy.main`. Config from .env:
 PROXY_UPSTREAM (default http://127.0.0.1:8000), PROXY_PORT (default 8001), DATABASE_URL (optional),
-PROXY_FALLBACK (default 1; 0 disables), PROXY_FIRST_TOKEN_TIMEOUT_MS (default 2000),
+PROXY_FALLBACK (default 1; 0 disables), PROXY_FIRST_TOKEN_TIMEOUT_MS (default 2000), PROXY_ADMISSION_LIMIT (default 1; 0 disables),
 HOSTED_LLM_BASE_URL / HOSTED_LLM_API_KEY / HOSTED_LLM_MODEL (the fallback target; all three required)."""
 from __future__ import annotations
 
@@ -36,7 +36,9 @@ def build_app():
     timeout_s = float(os.environ.get("PROXY_FIRST_TOKEN_TIMEOUT_MS", "2000")) / 1000
 
     logging.getLogger("r3.proxy").info("upstream=%s turn_events=%s fallback=%s first_token_timeout=%.1fs", upstream, "postgres" if sink else "log only", fallback_model or "off", timeout_s)
-    return create_app(upstream_client=client, event_sink=sink, fallback_client=fallback_client, fallback_model=fallback_model, first_token_timeout=timeout_s)
+    admission = int(os.environ.get("PROXY_ADMISSION_LIMIT", "1"))  # measured Nov 1: the SimpleEngine serves one call within budget
+    logging.getLogger("r3.proxy").info("admission_limit=%d (turns above it go hosted when available)", admission)
+    return create_app(upstream_client=client, event_sink=sink, fallback_client=fallback_client, fallback_model=fallback_model, first_token_timeout=timeout_s, admission_limit=admission)
 
 
 def main() -> None:
