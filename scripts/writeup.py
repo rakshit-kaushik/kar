@@ -168,7 +168,7 @@ def main() -> int:
     from dotenv import load_dotenv
     load_dotenv(pathlib.Path(__file__).resolve().parents[1] / ".env")
     with psycopg.connect(os.environ["DATABASE_URL"]) as con:
-        eval_ids = args.eval_run or [r[0] for r in con.execute("select distinct run_id from eval_results where run_id like 'baseline-%test%' or run_id like 'candidate-%' or run_id like 'eval-%' order by 1").fetchall()]
+        eval_ids = args.eval_run or [r[0] for r in con.execute("select distinct run_id from eval_results where run_id like 'baseline-%test%' or run_id like 'candidate-%' or run_id like 'eval-%' or run_id like '%-eval-%' order by 1").fetchall()]
         rates = load_rates(con)
         doc = [f"# R3 write-up tables — {time.strftime('%Y-%m-%d %H:%M')}", "",
                "## Task completion (eval runner, 27 hand-written test scenarios × repeats)", eval_table(con, eval_ids), "",
