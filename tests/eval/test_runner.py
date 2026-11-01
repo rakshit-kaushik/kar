@@ -765,3 +765,120 @@ def test_compare_disambiguates_runs_that_share_a_model_id(tmp_path):
     _write_run(b, "r3-voice-base", [("ordinary_01", 0, {"handoff"}, good)])
     md = compare_runs([a, b])
     assert "| family | r3-voice-base (hosted-caller) | r3-voice-base (local-caller) |" in md
+
+
+def test_tool_calls_cause_splits_missing_call_from_wrong_args_and_outcome():
+    from eval.runner import tool_calls_cause
+
+    log = [
+        {
+            "idx": 0,
+            "tool": "lookup_account",
+            "args": {"phone": "5550142219", "date_of_birth": "1988-03-12"},
+            "ok": True,
+        },
+        {
+            "idx": 1,
+            "tool": "book_appointment",
+            "args": {
+                "branch_id": "mill_rd",
+                "service_type": "notary",
+                "slot_start": "2026-11-05T16:00",
+            },
+            "ok": True,
+        },
+    ]
+    missing = {
+        "matched": [0],
+        "first_missing": {
+            "step": 1,
+            "tool": "check_availability",
+            "args": {"branch_id": "market_st"},
+            "ok": True,
+        },
+    }
+    assert tool_calls_cause(missing, log) == {
+        "cause": "missing call",
+        "tool": "check_availability",
+        "fields": [],
+    }
+    wrong = {
+        "matched": [0],
+        "first_missing": {
+            "step": 2,
+            "tool": "book_appointment",
+            "args": {
+                "branch_id": "market_st",
+                "service_type": "notary",
+                "date": "2026-11-05",
+                "time": "16:00",
+            },
+            "ok": True,
+        },
+    }
+    assert tool_calls_cause(wrong, log) == {
+        "cause": "wrong args",
+        "tool": "book_appointment",
+        "fields": ["branch_id"],
+    }
+    failed_log = [
+        {
+            "idx": 0,
+            "tool": "lookup_account",
+            "args": {"phone": "5550142219", "date_of_birth": "1988-03-12"},
+            "ok": False,
+            "error": "timeout",
+        }
+    ]
+    outcome = {
+        "matched": [],
+        "first_missing": {
+            "step": 0,
+            "tool": "lookup_account",
+            "args": {"phone": "5550142219", "date_of_birth": "1988-03-12"},
+            "ok": True,
+        },
+    }
+    assert tool_calls_cause(outcome, failed_log) == {
+        "cause": "wrong outcome",
+        "tool": "lookup_account",
+        "fields": [],
+    }
+    assert tool_calls_cause({"matched": [], "first_missing": None}, log) is None
+
+
+def test_failures_report_summarizes_tool_calls_causes(tmp_path):
+    from eval.runner import failures_report
+
+    (tmp_path / "episodes").mkdir()
+    ep = {
+        "episode_id": "ordinary_01-s0-abc",
+        "family": "ordinary",
+        "outcome": "completed",
+        "scenario": {"goal": "book", "caller": {"knows": {}}, "expect": {}},
+        "messages": [],
+        "turns": [],
+        "tool_log": [{"idx": 0, "tool": "lookup_account", "args": {}, "ok": True}],
+        "scores": [
+            {
+                "scorer": "tool_calls",
+                "passed": False,
+                "advisory": False,
+                "turn_idx": 2,
+                "detail": {
+                    "matched": [0],
+                    "first_missing": {
+                        "step": 1,
+                        "tool": "check_availability",
+                        "args": {},
+                        "ok": True,
+                    },
+                },
+            }
+        ],
+    }
+    (tmp_path / "episodes" / "ordinary_01-s0-abc.json").write_text(json.dumps(ep))
+    md = failures_report(tmp_path)
+    assert "**tool_calls failures by cause**" in md
+    assert "| missing call | check_availability | 1 |" in md
+    assert "cause: missing call check_availability" in md

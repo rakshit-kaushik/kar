@@ -29,6 +29,7 @@ from dotenv import load_dotenv
 
 from eval.sandbox import Sandbox
 from eval.scorers import ADVISORY, WEIGHTS, ScorerResult, all_pass, score_episode
+from eval.scorers.normalize import args_match
 from eval.simulator.clients import LLMCaller, OpenAIAgent, make_client
 from eval.simulator.episode import AgentUnderTest, Caller, Episode, run_episode
 from eval.simulator.farewell import is_farewell
@@ -556,17 +557,45 @@ def _render_turns(ep: dict, turns: list[int]) -> list[str]:
     return lines
 
 
+def tool_calls_cause(detail: dict, tool_log: list[dict]) -> dict | None:
+    """Why the tool_calls scorer failed, from its first missing expected step: the tool was never
+    called after the last matched step ("missing call"), it was called with other argument values
+    ("wrong args", with the differing fields), or it was called with the right values but the wrong
+    outcome ("wrong outcome", e.g. expected ok and got an error)."""
+    fm = (detail or {}).get("first_missing")
+    if not fm:
+        return None
+    matched = detail.get("matched") or []
+    after = max(matched) if matched else -1
+    candidates = [
+        c
+        for c in tool_log
+        if c.get("tool") == fm["tool"] and c.get("idx", 0) > after and not c.get("replay")
+    ]
+    if not candidates:
+        return {"cause": "missing call", "tool": fm["tool"], "fields": []}
+    best = min(candidates, key=lambda c: len(args_match(fm.get("args") or {}, c.get("args"))))
+    fields = sorted(args_match(fm.get("args") or {}, best.get("args")))
+    if fields:
+        return {"cause": "wrong args", "tool": fm["tool"], "fields": fields}
+    return {"cause": "wrong outcome", "tool": fm["tool"], "fields": []}
+
+
 def failures_report(run_dir: str | Path) -> str:
     """Markdown: for each failing episode, the non-advisory scorers that failed with their turn, the
     detail, and the transcript around the first failing turn."""
     out = [f"# Failing episodes in `{Path(run_dir).name}`", ""]
     n = 0
+    causes: Counter[tuple[str, str]] = Counter()
+    fields: Counter[str] = Counter()
+    body: list[str] = []
     for p in sorted((Path(run_dir) / "episodes").glob("*.json")):
         ep = json.loads(p.read_text())
         fails = [sc for sc in ep.get("scores", []) if not sc["passed"] and not sc.get("advisory")]
         if not fails:
             continue
         n += 1
+        out = body
         header = f"family {ep['family']} · outcome {ep['outcome']}" + (
             f" · error {ep['error']}" if ep.get("error") else ""
         )
@@ -585,6 +614,16 @@ def failures_report(run_dir: str | Path) -> str:
             out.append(
                 f"- **{sc['scorer']}** at turn {turn if turn is not None else '-'}: {detail[:300]}"
             )
+            if sc["scorer"] == "tool_calls":
+                cause = tool_calls_cause(sc.get("detail") or {}, ep.get("tool_log") or [])
+                if cause:
+                    causes[(cause["cause"], cause["tool"])] += 1
+                    for f in cause["fields"]:
+                        fields[f] += 1
+                    out.append(
+                        f"  - cause: {cause['cause']} {cause['tool']}"
+                        + (f" [{', '.join(cause['fields'])}]" if cause["fields"] else "")
+                    )
         out.append("")
         if first:
             window = sorted({t for t in (first - 1, first, first + 1) if t > 0})
@@ -592,6 +631,25 @@ def failures_report(run_dir: str | Path) -> str:
             window = [t["idx"] for t in ep.get("turns", [])][-3:]
         out += _render_turns(ep, window) or ["(no turns)"]
         out.append("")
+    head = [f"# Failing episodes in `{Path(run_dir).name}`", ""]
+    if causes:
+        head += [
+            "**tool_calls failures by cause**",
+            "",
+            "First missing expected step: never called after the last matched step (missing call), called with "
+            "other argument values (wrong args), or called with the right values and the wrong outcome.",
+            "",
+            "| cause | tool | episodes |",
+            "|---|---|---|",
+        ]
+        head += [f"| {c} | {t} | {k} |" for (c, t), k in causes.most_common()]
+        if fields:
+            head += [
+                "",
+                "Wrong-args fields: " + ", ".join(f"{f} {k}" for f, k in fields.most_common()),
+            ]
+        head.append("")
+    out = head + body
     if n == 0:
         out.append("no failing episodes")
     return "\n".join(out) + "\n"
