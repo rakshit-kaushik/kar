@@ -27,7 +27,7 @@ import time
 from pathlib import Path
 
 from train.env import REPO_ROOT, artifacts_dir, load_env
-from train.eval_hook import evaluate_model_dir, serve_side_stack, table_from_scores
+from train.eval_hook import evaluate_model_dir, precision_gate, serve_side_stack, table_from_scores
 from train.launch import acquire_gpu, release_gpu, services_root
 from train.select import select_candidates
 
@@ -56,6 +56,7 @@ def main(argv=None) -> int:
     ap.add_argument("--no-lock", action="store_true")
     ap.add_argument("--base-table", default=None, help="E's base baseline run dir (scores.jsonl) to include in the ranking")
     ap.add_argument("--local-caller", action="store_true", help="serve the base on port+2/+3 as the simulated caller (credits out)")
+    ap.add_argument("--gate", default=None, help="model id: also score its unfused adapter on the base (1 repeat) and apply the 1-point precision gate")
     ap.add_argument("--no-db", action="store_true", help="runner writes no Postgres rows (tests)")
     a = ap.parse_args(argv)
 
@@ -67,7 +68,7 @@ def main(argv=None) -> int:
     out = artifacts / "runs" / batch_id
     out.mkdir(parents=True, exist_ok=True)
     cands = [parse_candidate(c) for c in a.candidates]
-    minutes = a.lock_minutes or (10 + (8 if a.routing_data else 0) + sum(5 + 25 * r for _, r, _ in cands) + int(a.base_minutes))
+    minutes = a.lock_minutes or (10 + (8 if a.routing_data else 0) + sum(5 + 25 * r for _, r, _ in cands) + (30 if a.gate else 0) + int(a.base_minutes))
     record: dict = {"batch_id": batch_id, "candidates": cands, "steps": [], "started_at": time.time()}
 
     def save():
@@ -137,6 +138,31 @@ def main(argv=None) -> int:
                     if rec and rec.get("model_id") == model_id and rec.get("task") in ("voice", "routing"):
                         (rj.parent / "eval").mkdir(exist_ok=True)
                         (rj.parent / "eval" / "family_table.json").write_text(json.dumps(table, indent=2, default=str) + "\n")
+            except Exception as e:  # noqa: BLE001
+                step["error"] = f"{type(e).__name__}: {e}"
+            step["seconds"] = round(time.time() - t0)
+            record["steps"].append(step)
+            save()
+        if a.gate:
+            model_dir = artifacts / "models" / a.gate
+            run_id = f"{a.gate}-adapter-eval{suffix}"
+            runner_base = (os.environ.get("R3_EVAL_RUNNER") or "/Users/abgup/conductor/workspaces/kar/stockholm/.venv/bin/r3-eval run").split(" --repeats")[0].split(" --caller-base-url")[0]
+            if not os.environ.get("R3_EVAL_FORCE_STUB"):
+                os.environ["R3_EVAL_RUNNER"] = runner_base + f" --repeats 1 --retries 6 --backoff 5{caller_args}"
+            t0 = time.time()
+            step = {"step": "gate", "model_id": a.gate, "adapter": str(model_dir / "adapter"), "run_id": run_id}
+            try:
+                adapter_table = evaluate_model_dir(model_dir, model_name=f"{a.gate}-adapter", run_id=run_id, scenarios=a.scenarios,
+                                                   out_dir=artifacts / "runs" / run_id / "eval", adapter=model_dir / "adapter", base=base,
+                                                   port=a.port, database_url=None if a.no_db else "env", timeout=900, through_proxy=True)
+                fused_table = _safe(artifacts / "runs" / f"{a.gate}-eval{suffix}" / "eval" / "family_table.json")
+                if fused_table:
+                    gate = precision_gate(fused_table, adapter_table)
+                    step["gate"] = gate
+                    (artifacts / "runs" / f"{a.gate}-eval{suffix}" / "eval" / "precision_gate.json").write_text(json.dumps(gate, indent=2) + "\n")
+                    print(f"[batch] precision gate {a.gate}: fused {gate['fused_pass_rate']} vs adapter {gate['adapter_pass_rate']} on {gate['scorer']}: "
+                          f"{'PASS' if gate['pass'] else 'FAIL'}", flush=True)
+                step["selection"] = adapter_table["selection"]
             except Exception as e:  # noqa: BLE001
                 step["error"] = f"{type(e).__name__}: {e}"
             step["seconds"] = round(time.time() - t0)

@@ -45,3 +45,25 @@ def test_candidate_spec_parses_dir_repeats_and_optional_served_name():
     assert parse_candidate("r3-voice-abc:3") == ("r3-voice-abc", 3, "r3-voice-abc")
     assert parse_candidate("Qwen3-4B-8bit:1:r3-voice-base") == ("Qwen3-4B-8bit", 1, "r3-voice-base")
     assert parse_candidate("r3-voice-abc") == ("r3-voice-abc", 3, "r3-voice-abc")
+
+
+def test_gate_step_scores_the_unfused_adapter_on_the_base_and_writes_the_precision_gate(tmp_path, monkeypatch):
+    from train.eval_batch import main
+
+    art = tmp_path / "art"
+    (art / "models" / "r3-voice-abc" / "adapter").mkdir(parents=True)
+    (art / "models" / "Qwen3-4B-8bit").mkdir(parents=True)
+    (tmp_path / "scen").mkdir()
+    (tmp_path / "scen" / "ordinary__x.json").write_text(json.dumps({"id": "ordinary__x", "family": "ordinary"}))
+    monkeypatch.setenv("R3_ARTIFACTS", str(art))
+    monkeypatch.setenv("R3_EVAL_FORCE_STUB", "1")
+    monkeypatch.setenv("R3_EVAL_SERVER_CMD", f"{sys.executable} {HERE / 'fake_server.py'} {{port}} {{name}}")
+    port = _free_port()
+    rc = main(["--candidates", "r3-voice-abc:1", "--gate", "r3-voice-abc", "--no-lock", "--port", str(port), "--scenarios", str(tmp_path / "scen"),
+               "--services-root", str(tmp_path), "--no-db"])
+    assert rc == 0
+    batch = json.loads(next((art / "runs").glob("eval-batch-*/batch.json")).read_text())
+    gate = next(s for s in batch["steps"] if s["step"] == "gate")
+    assert gate["model_id"] == "r3-voice-abc" and gate["adapter"].endswith("r3-voice-abc/adapter") and gate["gate"]["pass"] is True
+    assert (art / "runs" / "r3-voice-abc-adapter-eval" / "eval" / "family_table.json").exists()
+    assert (art / "runs" / "r3-voice-abc-eval" / "eval" / "precision_gate.json").exists()
