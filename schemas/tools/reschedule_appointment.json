@@ -2,29 +2,22 @@
   "type": "function",
   "function": {
     "name": "reschedule_appointment",
-    "description": "Move an existing appointment to a new slot after read-back confirmation. Errors: not_found, conflict, unavailable, timeout.",
+    "description": "Move an appointment after the caller confirmed the read-back.",
     "parameters": {
       "type": "object",
       "properties": {
         "appointment_id": {
-          "type": "string",
-          "description": "From lookup_account"
+          "type": "string"
         },
         "new_slot_start": {
           "type": "string",
-          "description": "YYYY-MM-DDTHH:MM local"
-        },
-        "idempotency_key": {
-          "type": "string",
-          "description": "Caller-generated UUID; repeat returns the original result"
+          "description": "YYYY-MM-DDTHH:MM"
         }
       },
       "required": [
         "appointment_id",
-        "new_slot_start",
-        "idempotency_key"
-      ],
-      "additionalProperties": false
+        "new_slot_start"
+      ]
     }
   }
 }

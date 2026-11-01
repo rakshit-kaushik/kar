@@ -2,17 +2,15 @@
   "type": "function",
   "function": {
     "name": "create_ticket",
-    "description": "Open a service ticket in one taxonomy category with a one-sentence summary. Errors: invalid_argument, timeout.",
+    "description": "Open a ticket in one category with a one-sentence summary.",
     "parameters": {
       "type": "object",
       "properties": {
         "customer_id": {
-          "type": "string",
-          "description": "From lookup_account"
+          "type": "string"
         },
         "category": {
           "type": "string",
-          "description": "Taxonomy label",
           "enum": [
             "card_lost_stolen",
             "card_declined",
@@ -29,21 +27,14 @@
           ]
         },
         "summary": {
-          "type": "string",
-          "description": "One sentence, no PII beyond last4"
-        },
-        "idempotency_key": {
-          "type": "string",
-          "description": "Caller-generated UUID; repeat returns the original result"
+          "type": "string"
         }
       },
       "required": [
         "customer_id",
         "category",
-        "summary",
-        "idempotency_key"
-      ],
-      "additionalProperties": false
+        "summary"
+      ]
     }
   }
 }
