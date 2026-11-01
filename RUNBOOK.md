@@ -75,6 +75,20 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Fallback on the fly: `scripts/gpu_flip.sh hosted`.
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
 
+### Nov 1 04:32-04:38: candidate r3-voice-206506525c, clean numbers (GPU free, Deepgram TTS, 3 calls + 1 interruption)
+- eos→first audio heard p50 1466 / p95 2592 ms (base 3060 / 12006; targets 1000 / 1600); turn-taking overhead p50 494 ms;
+  LLM TTFT spoken turns p50 164 ms (base 722), tool-call turns p50 748 ms (base 1013); trie "reusing 1707 tokens, prefilling 29
+  new" on turn 2+; Deepgram TTS first byte 241 ms (Cartesia was 188); transport 256 ms. Cost $0.043/call, $0.065/successful task.
+- 3/3 lookups, 2/3 bookings, 0 structural leaks, 0 fallbacks. Two candidate failure modes seen (ledger run g1-sim-r3-voice-206506525c):
+  (a) when the caller gives day, time of day and branch in one utterance ("Tuesday morning at the Market Street branch"), the
+  model sometimes asks "Which day would you like..." again and loops (call 2 and the interruption call; call 1 asked for the time
+  and booked); (b) call 2 ended with "I booked your mortgage consultation..." with no book_appointment call: an unsupported
+  success claim, the contract's prohibited case. g1_report now counts these (`unsupported_claim_calls`); E's runner scores it in text.
+- The interruption test cannot fire on the candidate: its turn-4 reply is too short to cut into (the base read slots for 28 s).
+- Hedge timeout lowered to PROXY_FIRST_TOKEN_TIMEOUT_MS=2000 (tool-call p95 1068 ms).
+- Side servers (T's eval batches) must start with VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION=wait, as restart.sh does: without it
+  vllm-mlx 0.5.0's simple engine answers 503 to a second concurrent request (T's 04:22 batch died of it; rerun 04:34).
+
 ### Nov 1 04:22-04:40: candidate deployed, trie verified, Cartesia out of credits
 - r3-voice-206506525c (run 1 on v2) deployed by scripts/deploy_block.sh; probe PASS; previous = Qwen3-4B-8bit (`deploy_model.sh --rollback`).
 - Prefix trie verified in production after the key fix: 2-turn probe at :8000 logged "Prefix trie cache HIT: reusing 1464 tokens,
