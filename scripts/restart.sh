@@ -6,7 +6,12 @@
 # (base by default; a fused adapter dir such as models/r3-voice-<hash> for a deploy).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# values given on the command line win over .env (MODEL_DIR=... LLM_MODEL=... LOCAL_LLM_MODEL=... scripts/restart.sh)
+_OVR_LLM_MODEL="${LLM_MODEL:-}"; _OVR_LOCAL_LLM_MODEL="${LOCAL_LLM_MODEL:-}"; _OVR_LLM_BASE_URL="${LLM_BASE_URL:-}"
 set -a; source .env; set +a
+[ -n "$_OVR_LLM_MODEL" ] && export LLM_MODEL="$_OVR_LLM_MODEL"
+[ -n "$_OVR_LOCAL_LLM_MODEL" ] && export LOCAL_LLM_MODEL="$_OVR_LOCAL_LLM_MODEL"
+[ -n "$_OVR_LLM_BASE_URL" ] && export LLM_BASE_URL="$_OVR_LLM_BASE_URL"
 ART=${R3_ARTIFACTS:-$HOME/r3-artifacts}; LOG=$ART/logs; mkdir -p "$LOG"
 MODEL_DIR=${MODEL_DIR:-$ART/models/Qwen3-4B-8bit}
 SERVED=${LOCAL_LLM_MODEL:-r3-voice-base}

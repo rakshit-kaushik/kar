@@ -201,3 +201,42 @@ async def test_without_fallback_configured_upstream_error_is_a_502(harness):
     c = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
     r = await c.post("/v1/chat/completions", json=BODY)
     assert r.status_code == 500 or r.status_code == 502
+
+
+# ---- hosted unavailable (Nov 1: "400 Your credit balance is too low"): a hosted 4xx opens a breaker; the
+# abandoned local request is re-issued without the first-token timeout, and while the breaker is open the
+# proxy waits on local instead of falling back, so slow turns are not turned into errors.
+
+def hosted_400_upstream(received: list):
+    async def chat(request: Request):
+        received.append(await request.json())
+        return JSONResponse({"error": {"message": "Your credit balance is too low to access the Anthropic API."}}, status_code=400)
+
+    return Starlette(routes=[Route("/v1/chat/completions", chat, methods=["POST"])])
+
+
+async def test_hosted_4xx_opens_breaker_and_local_is_retried_without_timeout():
+    hosted_received, events = [], []
+    upstream = httpx.AsyncClient(transport=httpx.ASGITransport(app=slow_or_dead_upstream("slow")), base_url="http://upstream")
+    hosted = httpx.AsyncClient(transport=httpx.ASGITransport(app=hosted_400_upstream(hosted_received)), base_url="http://hosted")
+
+    async def sink(ev):
+        events.append(ev)
+
+    app = create_app(upstream_client=upstream, event_sink=sink, fallback_client=hosted, fallback_model="claude-sonnet-5-5", first_token_timeout=0.1)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
+
+    r1 = await client.post("/v1/chat/completions", json=BODY, headers={"X-R3-Call-Id": "b1"})
+    assert r1.status_code == 200
+    assert "".join(c["choices"][0]["delta"].get("content") or "" for c in parse_sse(r1.text) if c != "[DONE]") == "late"
+    assert len(hosted_received) == 1
+    assert [e["event"] for e in events].count("fallback_unavailable") == 1
+    assert r1.headers["X-R3-Model"] == "r3-voice-base"
+
+    r2 = await client.post("/v1/chat/completions", json=BODY, headers={"X-R3-Call-Id": "b2"})
+    assert r2.status_code == 200
+    assert "".join(c["choices"][0]["delta"].get("content") or "" for c in parse_sse(r2.text) if c != "[DONE]") == "late"
+    assert len(hosted_received) == 1  # breaker open: hosted not tried again, local waited past the timeout
+
+    h = (await client.get("/health")).json()
+    assert h["fallback"]["available"] is False and "400" in h["fallback"]["unavailable_reason"]
