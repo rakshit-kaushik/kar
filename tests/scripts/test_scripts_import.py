@@ -7,7 +7,7 @@ import pathlib
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-SCRIPTS = ["sim_caller", "g1_report", "demo_check", "cost_report", "writeup", "replay", "dry_run_agent", "probe_dispatch", "load_text", "deploy_model", "bench_base", "rooms", "join_token", "smoke_tools"]
+SCRIPTS = ["sim_caller", "g1_report", "demo_check", "cost_report", "writeup", "replay", "dry_run_agent", "probe_dispatch", "load_text", "deploy_model", "bench_base", "rooms", "join_token", "smoke_tools", "relabel_model"]
 
 
 @pytest.mark.parametrize("name", [s for s in SCRIPTS if (ROOT / "scripts" / f"{s}.py").exists()])
