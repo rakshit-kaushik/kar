@@ -130,3 +130,62 @@ def test_summarize_metrics_corrects_iterations_per_second_on_partial_report_wind
     assert m["iterations_per_second"] == 1.0  # (10 + 4) steps / (10 + 4) seconds
     assert m["total_tokens_per_second"] == 1000.0
     assert m["peak_memory_gb"] == 11.0 and m["final_val_loss"] == 0.9
+
+
+def _fake_services_root(tmp_path, monkeypatch):
+    """A services checkout: real gpu_lock.sh, fake gpu_flip.sh / restart.sh / probe_dispatch.py that log their calls."""
+    import shutil
+    import stat
+
+    root = tmp_path / "services"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy(REPO / "scripts" / "gpu_lock.sh", root / "scripts" / "gpu_lock.sh")
+    (root / "scripts" / "gpu_flip.sh").write_text('#!/bin/bash\necho "$1" >> "$(dirname "$0")/../flips.log"\n')
+    (root / "scripts" / "restart.sh").write_text('#!/bin/bash\necho restart >> "$(dirname "$0")/../events.log"\necho up\n')
+    (root / "scripts" / "probe_dispatch.py").write_text(
+        "import pathlib\np = pathlib.Path(__file__).parent.parent / 'probes'\nn = int(p.read_text()) + 1 if p.exists() else 1\n"
+        "p.write_text(str(n))\nprint('FAIL' if n < 2 else 'PASS')\n")
+    for f in (root / "scripts").iterdir():
+        f.chmod(f.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("R3_ARTIFACTS", str(tmp_path / "art"))
+    (tmp_path / "art").mkdir(exist_ok=True)
+    monkeypatch.delenv("R3_SERVER_START_CMD", raising=False)
+    monkeypatch.delenv("R3_SERVER_PROBE_CMD", raising=False)
+    return root
+
+
+def test_acquire_gpu_waits_for_a_held_lock_and_releases_it(tmp_path, monkeypatch):
+    from train.launch import acquire_gpu, gpu_lock, release_gpu
+
+    root = _fake_services_root(tmp_path, monkeypatch)
+    assert gpu_lock(root, "acquire", "S", "5", "load test")[0] == 0
+    res = acquire_gpu(root, "T", 5, "smoke", wait_minutes=0)
+    assert res["acquired"] is False and "held by S" in res["output"]
+    assert gpu_lock(root, "release", "S")[0] == 0
+    res = acquire_gpu(root, "T", 5, "smoke", wait_minutes=0)
+    assert res["acquired"] is True
+    assert gpu_lock(root, "status")[0] == 1  # held (by T)
+    assert release_gpu(root, "T")[0] == 0 and gpu_lock(root, "status")[0] == 0
+
+
+def test_probe_stack_retries_until_the_dispatch_probe_passes(tmp_path, monkeypatch):
+    from train.launch import probe_stack
+
+    root = _fake_services_root(tmp_path, monkeypatch)
+    res = probe_stack(root, attempts=3, interval=0)
+    assert res["ok"] is True and res["attempts"] == 2
+
+
+def test_rehearse_cycles_the_server_through_the_services_root_under_the_lock(tmp_path, monkeypatch):
+    root = _fake_services_root(tmp_path, monkeypatch)
+    rc = main(["--rehearse", "--services-root", str(root), "--artifacts", str(tmp_path / "art"), "--run-id", "reh1",
+               "--config", str(REPO / "train" / "configs" / "smoke.yaml"), "--data", "unused"])
+    assert rc == 0
+    assert (root / "flips.log").read_text().split() == ["hosted", "local"]
+    assert (root / "events.log").read_text().split() == ["restart"]
+    run = json.loads((tmp_path / "art" / "runs" / "reh1" / "run.json").read_text())
+    assert run["status"] == "rehearsed" and run["lock"]["acquired"] is True and run["lock"]["released"] is True
+    assert run["probe"]["ok"] is True and run["probe"]["attempts"] == 2
+    from train.launch import gpu_lock
+
+    assert gpu_lock(root, "status")[0] == 0  # free again

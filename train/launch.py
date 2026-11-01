@@ -5,13 +5,16 @@
 1. preflight: read the recipe, verify the dataset manifest + loss masks (train/loader.py), size
    `iters` to one epoch and to the GPU window from measured tokens/s, write
    $R3_ARTIFACTS/runs/<id>/{config.resolved.yaml, data_report.json, run.json}
-2. `scripts/gpu_flip.sh hosted` and stop the model server on :8000 (every other session keeps
-   working against the hosted URL)
+2. take the GPU lock (`scripts/gpu_lock.sh acquire T <minutes> <run id>`, waiting while another
+   session holds it), `scripts/gpu_flip.sh hosted` and stop the model server on :8000 (every other
+   session keeps working against the hosted URL; the proxy falls back to the hosted model too)
 3. train: train/lora_driver.py (= mlx_lm.lora train_model, clip 1.0, metrics every 10 steps)
 4. train/fuse/fuse_quantize.py: adapter + 8-bit base -> fused 8-bit model under
    $R3_ARTIFACTS/models/<prefix>-<hash>/ with the unfused adapter kept beside it
-5. `scripts/gpu_flip.sh local` and restart the server (scripts/restart.sh or $R3_SERVER_START_CMD),
-   always, even when a step failed
+5. `scripts/gpu_flip.sh local`, restart the stack (scripts/restart.sh or $R3_SERVER_START_CMD), confirm
+   it with the dispatch probe (scripts/probe_dispatch.py, retried), release the lock: always, even when
+   a step failed. `--services-root <checkout>` selects whose .env and scripts are touched (default
+   $R3_SERVICES_ROOT or this checkout); `--rehearse` runs only this server cycle, no training.
 6. cost_ledger rows + runs/<id>/run.json (config, git hash, data manifest hash, tokens/s, losses)
 7. optionally `--eval`: train/eval_hook.py scores the new model with r3-eval
 
@@ -43,6 +46,68 @@ from train.loader import check_dataset, load_manifest, load_tokenizer, manifest_
 from train.runinfo import config_hash, git_info, model_id, new_run_id
 
 SERVER_PORT = 8000
+LOCK_OWNER = "T"
+
+
+def services_root(explicit: str | None = None) -> Path:
+    """The checkout whose .env, scripts/gpu_flip.sh, scripts/restart.sh and scripts/gpu_lock.sh are used."""
+    load_env()
+    return Path(explicit or os.environ.get("R3_SERVICES_ROOT") or REPO_ROOT).expanduser().resolve()
+
+
+def gpu_lock(root: Path, *args: str) -> tuple[int, str]:
+    script = Path(root) / "scripts" / "gpu_lock.sh"
+    if not script.exists():
+        return 0, f"no {script}; GPU lock not enforced"
+    out = subprocess.run(["bash", str(script), *[str(a) for a in args]], cwd=root, capture_output=True, text=True)
+    return out.returncode, (out.stdout + out.stderr).strip()
+
+
+def acquire_gpu(root: Path, owner: str, minutes: int, purpose: str, wait_minutes: float = 120.0, poll_seconds: float = 30.0) -> dict:
+    """Acquire the GPU lock, polling while another session holds it (announce by message around this)."""
+    t0 = time.time()
+    deadline = t0 + wait_minutes * 60
+    attempts = 0
+    while True:
+        attempts += 1
+        rc, out = gpu_lock(root, "acquire", owner, str(minutes), purpose)
+        if rc == 0:
+            return {"acquired": True, "waited_s": round(time.time() - t0), "attempts": attempts, "output": out, "minutes": minutes}
+        if time.time() >= deadline:
+            return {"acquired": False, "waited_s": round(time.time() - t0), "attempts": attempts, "output": out, "minutes": minutes}
+        if attempts == 1:
+            print(f"[lock] {out}; waiting up to {wait_minutes:.0f} min", flush=True)
+        time.sleep(poll_seconds)
+
+
+def release_gpu(root: Path, owner: str) -> tuple[int, str]:
+    rc, out = gpu_lock(root, "release", owner)
+    print(f"[lock] {out}", flush=True)
+    return rc, out
+
+
+def probe_stack(root: Path, attempts: int = 3, interval: float = 20.0) -> dict:
+    """After restart.sh: session S's dispatch probe (joins a room, expects the agent to greet). The
+    worker's first job process takes ~20 s to spawn after a start, so retry. PASS is in stdout."""
+    custom = os.environ.get("R3_SERVER_PROBE_CMD")
+    script = Path(root) / "scripts" / "probe_dispatch.py"
+    if not custom and not script.exists():
+        return {"ok": None, "attempts": 0, "output": f"no {script}", "skipped": True}
+    outputs = []
+    for i in range(1, attempts + 1):
+        if custom:
+            proc = subprocess.run(custom, shell=True, cwd=root, capture_output=True, text=True)
+        else:
+            proc = subprocess.run([sys.executable, str(script)], cwd=root, capture_output=True, text=True)
+        text = (proc.stdout + proc.stderr).strip()
+        outputs.append(text[-400:])
+        ok = proc.returncode == 0 and "PASS" in text
+        print(f"[server] dispatch probe {i}/{attempts}: {'PASS' if ok else 'FAIL'}", flush=True)
+        if ok:
+            return {"ok": True, "attempts": i, "output": outputs[-1]}
+        if i < attempts:
+            time.sleep(interval)
+    return {"ok": False, "attempts": attempts, "output": outputs[-1] if outputs else ""}
 
 
 def load_recipe(path: str | Path) -> dict:
@@ -282,9 +347,9 @@ def run_record(ctx: dict, status: str, **extra) -> dict:
     }
 
 
-def flip(mode: str) -> None:
-    print(f"[server] scripts/gpu_flip.sh {mode}", flush=True)
-    subprocess.run(["bash", "scripts/gpu_flip.sh", mode], cwd=REPO_ROOT, check=True)
+def flip(mode: str, root: Path = REPO_ROOT) -> None:
+    print(f"[server] {root}/scripts/gpu_flip.sh {mode}", flush=True)
+    subprocess.run(["bash", "scripts/gpu_flip.sh", mode], cwd=root, check=True)
 
 
 def _listening_pids(port: int) -> list[int]:
@@ -313,10 +378,10 @@ def stop_server(port: int = SERVER_PORT, timeout: float = 30.0) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
-def start_server() -> int:
+def start_server(root: Path = REPO_ROOT) -> int:
     cmd = os.environ.get("R3_SERVER_START_CMD") or "bash scripts/restart.sh"
-    print(f"[server] start: {cmd}", flush=True)
-    rc = subprocess.run(cmd, shell=True, cwd=REPO_ROOT).returncode
+    print(f"[server] start in {root}: {cmd}", flush=True)
+    rc = subprocess.run(cmd, shell=True, cwd=root).returncode
     if rc != 0:
         print(f"[server] WARNING: start command exited {rc} (scripts/restart.sh is session S's); start the server by hand", flush=True)
     return rc
@@ -367,10 +432,71 @@ def fuse_step(ctx: dict, device: str) -> dict:
     )
 
 
+def server_cycle(root: Path, opts, ctx: dict, work) -> dict:
+    """lock -> flip hosted -> stop :8000 -> work() -> flip local -> restart -> probe -> release, with
+    the restore steps in a finally block so nobody waits on a human. Returns what happened."""
+    state = {"lock": None, "probe": None, "flipped": False, "stopped": False, "restarted": None, "error": None}
+    minutes = int(opts.lock_minutes or math.ceil(((ctx.get("sizing") or {}).get("est_train_seconds") or 600) / 60) + 15)
+    try:
+        if not opts.no_lock:
+            state["lock"] = acquire_gpu(root, LOCK_OWNER, minutes, ctx["run_id"], wait_minutes=opts.lock_wait_minutes)
+            print(f"[lock] {state['lock']['output']}", flush=True)
+            if not state["lock"]["acquired"]:
+                raise RuntimeError(f"GPU lock not acquired within {opts.lock_wait_minutes} min: {state['lock']['output']}")
+        if not opts.no_flip:
+            flip("hosted", root)
+            state["flipped"] = True
+        if not opts.no_server:
+            stop_server()
+            state["stopped"] = True
+        work()
+    except BaseException as e:  # noqa: BLE001 - restore first, report after
+        state["error"] = f"{type(e).__name__}: {e}"
+        print(f"[launch] FAILED: {state['error']}", flush=True)
+    finally:
+        if state["flipped"]:
+            try:
+                flip("local", root)
+            except Exception as e:  # noqa: BLE001
+                print(f"[server] WARNING: gpu_flip.sh local failed: {e}", flush=True)
+        if state["stopped"]:
+            state["restarted"] = start_server(root)
+            if state["restarted"] == 0:
+                state["probe"] = probe_stack(root)
+        if state["lock"] and state["lock"]["acquired"]:
+            rc, _ = release_gpu(root, LOCK_OWNER)
+            state["lock"]["released"] = rc == 0
+    return state
+
+
+def rehearse(opts) -> int:
+    """The server cycle alone (no training): proves lock, flip, stop, restart and probe on the live stack."""
+    load_env()
+    root = services_root(opts.services_root)
+    artifacts = Path(opts.artifacts).expanduser() if opts.artifacts else artifacts_dir()
+    run_id = opts.run_id or new_run_id("rehearse")
+    run_dir = artifacts / "runs" / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    ctx = {"run_id": run_id, "sizing": {"est_train_seconds": 0}}
+    t0 = time.time()
+    state = server_cycle(root, opts, ctx, lambda: print("[rehearse] (no training)", flush=True))
+    status = "rehearsed" if not state["error"] else "failed"
+    write_run_json(run_dir, {"run_id": run_id, "status": status, "task": "rehearse", "services_root": str(root),
+                             "started_at": t0, "finished_at": time.time(), "lock": state["lock"], "probe": state["probe"],
+                             "restarted": state["restarted"], "error": state["error"], "command": sys.argv})
+    print(f"[rehearse] {status}: lock {state['lock']} · restart rc {state['restarted']} · probe {state['probe']}")
+    return 0 if status == "rehearsed" else 1
+
+
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", required=True, help="train/configs/{smoke,voice_run1,routing}.yaml")
     ap.add_argument("--data", required=True, help="dataset directory with manifest.json")
+    ap.add_argument("--services-root", default=None, help="checkout whose .env and scripts are used (default $R3_SERVICES_ROOT or this one)")
+    ap.add_argument("--no-lock", action="store_true", help="skip scripts/gpu_lock.sh (dry runs beside the idle server)")
+    ap.add_argument("--lock-minutes", type=int, default=None, help="lock duration; default: estimated training time + 15")
+    ap.add_argument("--lock-wait-minutes", type=float, default=120.0, help="how long to wait for a held lock")
+    ap.add_argument("--rehearse", action="store_true", help="server cycle only: lock, flip, stop, restart, probe, release")
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--artifacts", default=None, help="override $R3_ARTIFACTS")
     ap.add_argument("--window-minutes", type=float, default=None, help="GPU window; default from the recipe's r3.window_minutes")
@@ -388,46 +514,34 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     opts = parse_args(argv)
+    if opts.rehearse:
+        return rehearse(opts)
     ctx = preflight(opts)
     if opts.dry_run:
         print("[plan] dry run: nothing started")
         return 0
     run_dir = ctx["run_dir"]
-    status, error = "running", None
-    metrics: dict = {}
-    fuse_meta = None
-    flipped = stopped = False
+    root = services_root(opts.services_root)
+    results: dict = {"metrics": {}, "fuse": None}
     t_start = time.time()
-    try:
-        if not opts.no_flip:
-            flip("hosted")
-            flipped = True
-        if not opts.no_server:
-            stop_server()
-            stopped = True
+
+    def work():
         write_run_json(run_dir, run_record(ctx, "training", started_at=t_start))
         summary = train_step(ctx, opts.device)
-        metrics = summarize_metrics(run_dir / "metrics.jsonl", summary, ctx["sizing"]["batch_size"], ctx["data"]["stats"]["mean_tokens"],
-                                    steps_per_report=int(ctx["cfg"].get("steps_per_report", 10)))
-        write_run_json(run_dir, run_record(ctx, "fusing", started_at=t_start, metrics=metrics))
-        fuse_meta = fuse_step(ctx, opts.device)
-        status = "done"
-    except BaseException as e:  # noqa: BLE001 - always restore the server, then report
-        status, error = "failed", f"{type(e).__name__}: {e}"
-        print(f"[launch] FAILED: {error}", flush=True)
-    finally:
-        if flipped:
-            try:
-                flip("local")
-            except Exception as e:  # noqa: BLE001
-                print(f"[server] WARNING: gpu_flip.sh local failed: {e}", flush=True)
-        if stopped:
-            start_server()
+        results["metrics"] = summarize_metrics(run_dir / "metrics.jsonl", summary, ctx["sizing"]["batch_size"],
+                                               ctx["data"]["stats"]["mean_tokens"], steps_per_report=int(ctx["cfg"].get("steps_per_report", 10)))
+        write_run_json(run_dir, run_record(ctx, "fusing", started_at=t_start, metrics=results["metrics"]))
+        results["fuse"] = fuse_step(ctx, opts.device)
+
+    state = server_cycle(root, opts, ctx, work)
+    status, error = ("done", None) if not state["error"] else ("failed", state["error"])
+    metrics, fuse_meta = results["metrics"], results["fuse"]
     database_url = None if opts.no_db else os.environ.get("DATABASE_URL")
     rows = ledger_rows(ctx, metrics, fuse_meta, status)
     ledger = write_ledger(rows, ctx["run_id"], ctx["model_id"] if status == "done" else None, database_url, run_dir / "ledger.jsonl")
     record = run_record(ctx, status, started_at=t_start, finished_at=time.time(), wall_seconds=time.time() - t_start,
-                        metrics=metrics, fuse=fuse_meta, ledger=ledger, error=error)
+                        metrics=metrics, fuse=fuse_meta, ledger=ledger, error=error, services_root=str(root),
+                        lock=state["lock"], probe=state["probe"], restarted=state["restarted"])
     write_run_json(run_dir, record)
     print(f"[launch] {status}: run.json {run_dir / 'run.json'} · ledger {'postgres + ' if ledger['db'] else ''}{ledger['jsonl']}"
           + (f" (db error: {ledger['error']})" if ledger["error"] else ""))

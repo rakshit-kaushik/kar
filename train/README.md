@@ -18,6 +18,11 @@ uv run python -m train.eval_hook --model-dir $R3_ARTIFACTS/models/r3-voice-<hash
 uv run python -m train.eval_hook --model-dir ... --base-url http://127.0.0.1:8001/v1          # score the live stack instead
 ```
 
+Server cycle (from any worktree; `--services-root` = the checkout whose .env, restart.sh and gpu_lock.sh are used):
+`uv run python -m train.launch --rehearse --services-root /Users/abgup/Documents/Code/kar/kar --config train/configs/smoke.yaml --data -`
+takes the GPU lock (`scripts/gpu_lock.sh acquire T …`, waiting while another session holds it), flips .env to hosted, stops
+:8000, flips back, runs restart.sh, retries the dispatch probe, releases the lock. Every real run does the same around training.
+
 Before any run: `uv run python -m train.loader --data <dir> --model $R3_ARTIFACTS/models/Qwen3-4B-8bit --n 20`
 prints 20 decoded loss masks and the token budget; the launcher runs the same checks and refuses over-length data.
 

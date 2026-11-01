@@ -42,7 +42,7 @@ def test_one_command_trains_fuses_quantizes_and_versions(synth_dir, dry_model, t
     art = tmp_path / "art"
 
     rc = main(["--config", str(cfg_path), "--data", str(synth_dir), "--artifacts", str(art), "--run-id", "dry",
-               "--device", device, "--no-flip", "--no-server", "--no-db"])
+               "--device", device, "--no-flip", "--no-server", "--no-db", "--no-lock"])
     assert rc == 0
 
     run = json.loads((art / "runs" / "dry" / "run.json").read_text())
