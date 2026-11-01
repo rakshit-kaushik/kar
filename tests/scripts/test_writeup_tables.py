@@ -51,3 +51,26 @@ def test_targets_table_has_a_column_for_the_latest_rehearsal_batch_beside_the_ba
     row = next(line for line in md.splitlines() if line.startswith("| End of speech → first audio heard (caller clock) p50"))
     cells = [c.strip() for c in row.strip("|").split("|")]
     assert cells[2].startswith("3060") and cells[3].startswith("1572")
+
+
+PASS_LEDGER = [
+    ("cost-pass-rehearsal-x-0840", "r3-voice-x", "cost.total_per_call_usd", 0.0434, "30 calls"), ("cost-pass-rehearsal-x-0840", "r3-voice-x", "cost.per_pass_usd", 0.0814, "16 of 30 passed the scenario check (correct handoffs included)"),
+    ("cost-pass-rehearsal-x-0840", "r3-voice-x", "cost.per_success_usd", 0.0930, "14 completed"), ("cost-pass-rehearsal-x-0840", "r3-voice-x", "cost.pass_calls", 16, "of 30"),
+    ("cost-rehearsal-x-0840", "r3-voice-x", "cost.total_per_call_usd", 0.0434, "30 calls"),  # no pass row: not a headline row
+]
+
+
+class FakePassCon(FakeCon):
+    def execute(self, sql, params=()):
+        if "cost.per_pass_usd" in sql:
+            return FakeCursor([r for r in PASS_LEDGER if r[0] in {x[0] for x in PASS_LEDGER if x[2] == "cost.per_pass_usd"}])
+        return super().execute(sql, params)
+
+
+def test_pass_cost_table_shows_cost_per_passing_call_with_both_denominators_stated():
+    md = writeup.pass_cost_table(FakePassCon())
+    header = md.splitlines()[0]
+    assert "$/passing call" in header and "$/completed booking" in header
+    row = next(line for line in md.splitlines() if "cost-pass-rehearsal-x-0840" in line)
+    assert "0.0814" in row and "0.0930" in row and "16" in row
+    assert "cost-rehearsal-x-0840 |" not in md

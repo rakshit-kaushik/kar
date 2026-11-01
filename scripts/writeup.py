@@ -131,15 +131,36 @@ def cost_tables(con, rates: dict, eval_ids: list[str]) -> str:
     rows = [price_group(us, rates, m) for m, us in sorted(groups.items()) if us]
     parts = []
     if rows:
-        parts.append(md_table(["served model", "calls", "ok", "min/call", "audio $/call", "LLM $/call", "total $/call", "$/successful task", "LLM basis"],
+        parts.append(md_table(["served model", "calls", "ok", "min/call", "audio $/call", "LLM $/call", "total $/call", "$/completed booking or ticket (outcome completed)", "LLM basis"],
                               [[r["model"], r["calls"], r["successes"], fmt(r["avg_min"], 2), fmt(r["audio_usd"], 4), fmt(r["llm_usd"], 4), fmt(r["total_usd"], 4),
                                 fmt(r["per_success_usd"], 4) if r["per_success_usd"] is not None else "n/a", r["llm_basis"]] for r in rows]))
     ev = eval_runs(con, eval_ids, rates)
     if ev:
-        parts.append(md_table(["text-eval run", "model", "episodes", "passed", "LLM $", "$/episode", "$/successful episode", "basis"],
+        parts.append(md_table(["text-eval run", "model", "episodes", "passed", "LLM $", "$/episode", "$/episode passing all scorers", "basis"],
                               [[e["run_id"], e["model"], fmt(e["episodes"]), fmt(e["passed"]), fmt(e["llm_usd"], 4), fmt(e["per_episode_usd"], 4), fmt(e["per_success_usd"], 4) if e["per_success_usd"] else "n/a", e["basis"]] for e in ev]))
     parts.append(f"_Rates: cost_rates (list prices with source and date; Mac ${mac_hourly_usd(rates):.3f}/h = purchase / {rates['mac.amortization_hours']:.0f} h + power; admission limit {int(rates['admission.concurrent_calls'])}). Measured quantities, estimated bases marked._")
     return "\n\n".join(parts)
+
+
+def pass_cost_table(con) -> str:
+    """The plan's headline: cost per call that passed its scenario check (a correct handoff is a completed task), from
+    scripts/cost_report.py --passes-from rows; the completed-booking figure beside it with its denominator stated."""
+    rows_db = con.execute("select run_id, model_id, item, qty, note from cost_ledger where run_id in (select distinct run_id from cost_ledger where item = 'cost.per_pass_usd') "
+                          "and item in ('cost.per_pass_usd','cost.total_per_call_usd','cost.per_success_usd','cost.pass_calls') order by id").fetchall()
+    runs: dict[str, dict] = {}
+    for run_id, model, item, qty, note in rows_db:
+        d = runs.setdefault(run_id, {"model": model}); d[item] = float(qty); d[item + ".note"] = note or ""
+    rows = []
+    for run_id, d in runs.items():
+        if "cost.per_pass_usd" not in d:
+            continue
+        rows.append([run_id, d["model"], d.get("cost.pass_calls.note", "").split(";")[0].replace("of ", "").strip() or "?", fmt(d.get("cost.pass_calls")),
+                     fmt(d.get("cost.total_per_call_usd"), 4), fmt(d["cost.per_pass_usd"], 4), fmt(d.get("cost.per_success_usd"), 4) if d.get("cost.per_success_usd") is not None else "n/a"])
+    if not rows:
+        return "_no per-passing-call cost yet (scripts/cost_report.py --passes-from <rehearsal run>)_"
+    return md_table(["cost run", "model", "calls", "passed check", "$/call", "$/passing call", "$/completed booking or ticket"], rows) + (
+        "\n\n_$/passing call = the batch's whole cost over the calls that passed their scenario check (expected final state, no claim before its tool result, no ids spoken; "
+        "a correct handoff counts). $/completed booking or ticket divides by outcome=completed only, so handoffs are not in that denominator._")
 
 
 def rehearsal_table(con) -> str:
@@ -225,7 +246,7 @@ def main() -> int:
                "## Task completion (eval runner, 27 hand-written test scenarios × repeats)", eval_table(con, eval_ids), "",
                "## Latency per simulated-call batch", latency_table(con), "",
                "## Load test (HTTP level)", load_table(con), "",
-               "## Cost", cost_tables(con, rates, eval_ids), "",
+               "## Cost", "### Headline: cost per call that passed its scenario check (rehearsal batches)", pass_cost_table(con), "", "### All live calls by served model, and the text evals", cost_tables(con, rates, eval_ids), "",
                "## Ticket routing (100 hand-checked test tickets)", routing_table(con), "",
                "## Demo rehearsal (simulated caller, the five scripted scenarios plus the alternative handoff flow 5b; pass = expected final state, no claim without a tool result, no ids spoken)", rehearsal_table(con), "",
                "## Targets vs measured", targets_table(con), ""]

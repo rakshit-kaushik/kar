@@ -67,3 +67,17 @@ def price_call(u: dict, rates: dict, path: str, avg_call_min: float, workday: bo
         llm = mac_hourly_usd(rates, workday) / calls_per_hour
         basis = f"estimated: Mac hourly cost / calls per hour at admission limit {adm}"
     return {"audio_usd": audio, "tts_usd": u["agent_chars"] * tts_rate(u, rates), "llm_usd": llm, "total_usd": audio + llm, "llm_basis": basis, "audio_basis": f"measured minutes and characters at list price (TTS: {u.get('tts_vendor', 'cartesia')})"}
+
+
+def passes_from_ledger(rows) -> tuple[int, int]:
+    """(passed, runs) summed over scripts/demo_check.py's rehearsal.<scenario>.pass and .runs ledger rows of one rehearsal run.
+    A pass is the scenario check: expected final state, no claim before its tool result, no ids spoken; a correct handoff counts."""
+    passed = sum(int(q) for item, q in rows if item.startswith("rehearsal.") and item.endswith(".pass"))
+    runs = sum(int(q) for item, q in rows if item.startswith("rehearsal.") and item.endswith(".runs"))
+    return passed, runs
+
+
+def per_pass_usd(total_usd_per_call: float, calls: int, passes: int) -> float | None:
+    """Cost per call that passed its scenario check: the batch's whole cost spread over its passing calls (the plan's headline,
+    cost per successfully completed task, with a correct handoff counted as completed). None when nothing passed."""
+    return (total_usd_per_call * calls / passes) if passes else None

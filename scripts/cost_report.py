@@ -19,7 +19,7 @@ import sys
 from collections import defaultdict
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from services.cost.report import HOSTED_MODEL, call_usage, local_llm_seconds, mac_hourly_usd, price_call  # noqa: E402
+from services.cost.report import HOSTED_MODEL, call_usage, local_llm_seconds, mac_hourly_usd, passes_from_ledger, per_pass_usd, price_call  # noqa: E402
 
 
 def load_rates(con) -> dict:
@@ -95,6 +95,7 @@ def main() -> int:
     ap.add_argument("--eval-run", action="append", default=[], help="text-eval run_id (repeatable)")
     ap.add_argument("--set-admission", type=int, default=None)
     ap.add_argument("--ledger", action="store_true"); ap.add_argument("--run-id", default="cost-report")
+    ap.add_argument("--passes-from", default=None, help="rehearsal run_id whose rehearsal.*.pass/.runs ledger rows give the passing-call denominator (use with --like on the same calls)")
     args = ap.parse_args()
     import psycopg
     from dotenv import load_dotenv
@@ -114,6 +115,14 @@ def main() -> int:
             for r in rows:
                 ps = f"{r['per_success_usd']:.4f}" if r["per_success_usd"] is not None else "n/a"
                 print(f"{r['model']:<28}{r['calls']:>6}{r['successes']:>4}{r['avg_min']:>9.2f}{r['audio_usd']:>9.4f}{r['llm_usd']:>9.4f}{r['total_usd']:>9.4f}{ps:>11}  {r['llm_basis']}" + (f" (+${r['fallback_llm_usd']:.4f} hosted fallback tokens)" if r["fallback_llm_usd"] else ""))
+        passes = runs_n = None
+        if args.passes_from:
+            passes, runs_n = passes_from_ledger(con.execute("select item, qty from cost_ledger where run_id=%s and item like 'rehearsal.%%'", (args.passes_from,)).fetchall())
+            for r in rows:
+                r["per_pass_usd"] = per_pass_usd(r["total_usd"], r["calls"], passes)
+                pp = f"${r['per_pass_usd']:.4f}" if r["per_pass_usd"] is not None else "n/a"
+                print(f"\n{r['model']}: ${r['total_usd']:.4f}/call x {r['calls']} calls over {passes} of {runs_n} that passed the scenario check (correct handoffs included) = {pp} per passing call; "
+                      f"${r['per_success_usd']:.4f} per completed booking or ticket ({r['successes']} outcome=completed)" if r["per_success_usd"] is not None else f"\n{r['model']}: {pp} per passing call")
         evals = eval_runs(con, args.eval_run, rates)
         if evals:
             print("\nText-eval runs (LLM only; no audio vendors):")
@@ -128,6 +137,12 @@ def main() -> int:
                     for item, val, measured in (("cost.audio_per_call_usd", r["audio_usd"], True), ("cost.llm_per_call_usd", r["llm_usd"], r["path"] == "hosted"), ("cost.total_per_call_usd", r["total_usd"], False), ("cost.per_success_usd", r["per_success_usd"], False)):
                         if val is not None:
                             cur.execute("insert into cost_ledger(run_id, model_id, item, qty, unit, measured, note) values (%s,%s,%s,%s,'USD',%s,%s)", (args.run_id, r["model"], item, val, measured, f"{r['calls']} calls, {r['successes']} ok; {r['llm_basis']}"))
+                if args.passes_from:
+                    for r in rows:
+                        if r.get("per_pass_usd") is not None:
+                            note = f"{passes} of {runs_n} passed the scenario check (correct handoffs included); {r['calls']} calls priced; passes from {args.passes_from}"
+                            cur.execute("insert into cost_ledger(run_id, model_id, item, qty, unit, measured, note) values (%s,%s,%s,%s,'USD',false,%s)", (args.run_id, r["model"], "cost.per_pass_usd", r["per_pass_usd"], note))
+                            cur.execute("insert into cost_ledger(run_id, model_id, item, qty, unit, measured, note) values (%s,%s,%s,%s,'calls',true,%s)", (args.run_id, r["model"], "cost.pass_calls", passes, f"of {runs_n}; {args.passes_from}"))
                 for e in evals:
                     for item, val in (("cost.eval_llm_per_episode_usd", e["per_episode_usd"]), ("cost.eval_llm_per_success_usd", e["per_success_usd"])):
                         if val is not None:

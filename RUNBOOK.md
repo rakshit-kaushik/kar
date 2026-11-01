@@ -155,7 +155,7 @@ the application after the ticket" and the timeout flow as "transient write fault
 idempotency key"; the scorecard's `retry=` and `policy=` columns and the write-up's (retry n) / (policy n) marks say which calls
 needed them. Nothing in those two rows is the model's recovery.
 
-Write-up tables generated at the end: `/Users/abgup/r3-artifacts/runs/writeup-1101-0933.md` (scripts/writeup.py; eval, latency incl. the combined rehearsal batch, load, cost, routing, rehearsal, targets).
+Write-up tables generated at the end: `/Users/abgup/r3-artifacts/runs/writeup-1101-0937.md` (scripts/writeup.py; eval, latency incl. the combined rehearsal batch, load, cost, routing, rehearsal, targets).
 
 ### Nov 1 07:58: gate-fail fallback ready
 If run 2's fused 8-bit artifact fails the precision gate, `scripts/serve_unfused.sh $R3_ARTIFACTS/models/r3-voice-730f8ba68e`

@@ -1,3 +1,4 @@
+import pytest
 """Cost per successfully completed task (plan §Demo, economics). Per call: Deepgram minutes, Cartesia characters,
 LiveKit minutes (caller + agent), LLM tokens by model; the local path is the Mac's hourly cost divided by calls
 per hour at the admission limit; the hosted path is list-price tokens. Measured and estimated are kept apart."""
@@ -76,3 +77,20 @@ def test_tts_characters_priced_by_the_vendor_that_spoke_them():
     assert round(p["tts_usd"], 4) == 0.03
     u["tts_vendor"] = "cartesia"
     assert round(price_call(u, rates, path="local", avg_call_min=1.0)["tts_usd"], 4) == round(1000 * RATES["cartesia.sonic.usd_per_char"], 4)
+
+
+# Reviewer, Nov 1 09:36: the headline is cost per call that passed its scenario check (a correct handoff is a completed task);
+# "per completed booking" stays as a second figure with its denominator stated.
+from services.cost.report import passes_from_ledger, per_pass_usd  # noqa: E402
+
+
+def test_passes_from_ledger_sums_the_demo_checkers_pass_and_runs_rows():
+    rows = [("rehearsal.ordinary.pass", 3), ("rehearsal.ordinary.runs", 5), ("rehearsal.handoff_person.pass", 5), ("rehearsal.handoff_person.runs", 5),
+            ("rehearsal.ordinary.guarded", 2), ("rehearsal.handoff_person.claim_guarded", 1)]
+    assert passes_from_ledger(rows) == (8, 10)
+    assert passes_from_ledger([]) == (0, 0)
+
+
+def test_per_pass_usd_spreads_the_batch_cost_over_its_passing_calls():
+    assert per_pass_usd(0.0434, 30, 16) == pytest.approx(0.0434 * 30 / 16)
+    assert per_pass_usd(0.0434, 30, 0) is None
