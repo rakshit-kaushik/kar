@@ -23,6 +23,7 @@ from openai import (
 )
 
 from eval.sandbox import TOOL_SCHEMAS, load_seed
+from eval.simulator.farewell import is_farewell
 from eval.simulator.prompts import PROMPT_DIR
 from eval.simulator.scenario import Scenario
 
@@ -177,14 +178,16 @@ _STAGE = re.compile(r"\*[^*]{0,80}\*|\([^)]{0,80}\)")
 
 
 def clean_caller_text(raw: str) -> tuple[str, bool]:
-    """Strip labels, quotes and stage directions; detect [hangup]. Empty text is NOT a hangup."""
+    """Strip labels, quotes and stage directions; detect [hangup]. Empty text is NOT a hangup, but a
+    reply that only says goodbye is one: a caller who says "bye" has put the phone down, and the
+    local base-model caller never emits the marker."""
     hangup = bool(_HANGUP.search(raw or ""))
     text = _HANGUP.sub(" ", raw or "")
     text = _STAGE.sub(" ", text)
     text = _LABEL.sub("", text.strip())
     text = text.strip().strip('"“”').strip()
     text = re.sub(r"\s+", " ", text)
-    return text, hangup
+    return text, hangup or is_farewell(text)
 
 
 def _render_knows(knows: dict) -> str:
