@@ -120,22 +120,42 @@ consumed; and 5b `handoff_person` (Dana asks for a person, then insists; expecte
 nothing written) was added as the reviewer's alternative handoff flow, since the direct fraud report (5) opened the ticket but did
 not transfer in its one live call on run 2. The rehearsal runs six scenarios; the demo uses whichever handoff flow passes.
 
-### Nov 1 08:40-09:25: rehearsal on the final model, and the executor retry
-Rehearsal `rehearsal-r3-voice-730f8ba68e-1101-0840` (six scenarios x 5, Deepgram caller voice, recordings under its run dir). Early
-rows: ordinary 3/5 (the model re-asked the day the caller had given in 2 calls; the loop guard caught the resulting repeat and the
-claim guard held a false "I booked" at the scripted "no, that's everything" in both; nothing unsupported was spoken), correction 5/5,
-timeout 0/5: after the injected book_appointment timeout the model asks "Would you like me to try again?" and then never calls
-book_appointment again when the caller says yes (repeats the apology, or drifts); two calls ended in a transfer line without the
-tool, which the transfer guard made real. The final model does not retry a failed write on request.
+### Nov 1 08:40-09:45: rehearsal on the final model, the re-runs, and what the table means
+Rehearsal `rehearsal-r3-voice-730f8ba68e-1101-0840`: six scenarios (demo/scenarios.md rows 1-5 plus 5b) x 5 simulated calls, Deepgram
+caller voice and agent TTS, one call at a time, recordings under its run dir. The model ran with the two guards only; the executor
+retry and the fraud-ticket policy rule were committed during the run and went live at the 09:19 restart, so the re-run rows
+(`rehearsal-r3-voice-730f8ba68e-1101-0919-rules`) are the agent with those two rules, the earlier rows the model with the guards.
 
-Response, same category and conditions as the guards (identical for every model, its own count, never shown as the model's
-recovery): `services/tools/executor.py` retries a tool once when the sandbox answers timeout or unavailable (state.INFRA_ERRORS),
-same arguments and idempotency key; the model sees only the final result; events: tool_end attempt 1 (ok false), tool_retry,
-tool_start/tool_end attempt 2; `AGENT_TOOL_RETRY=0` turns it off; `scripts/demo_check.py` prints `retry=` per call and writes
-`rehearsal.<scenario>.retried`. The agent was restarted with it only after the rehearsal's lock was released; the timeout scenario
-was then re-run five times and both rows are reported. The handoff reason after an infrastructure failure is now tool_failure
-(`state_view` carries tool_failures and business_errors; the timeout had been counted as an infrastructure failure, so the earlier
-business_errors rule never fired).
+| scenario | model + guards (08:40) | + executor retry + policy rule (09:19) | what failed, model alone |
+| --- | --- | --- | --- |
+| ordinary | 3/5 (guard 2, claim 2) | not re-run | re-asked the weekday the caller had given (relative-date gap); fixed-script caller fell a turn behind; two false "I booked" at the scripted closing, both held by the claim guard |
+| correction | 5/5 | not re-run | nothing; no intervention |
+| timeout (book_appointment fault) | 0/5 (guard 2, claim 2) | 5/5 (retry 5) | asked "Would you like me to try again?" then never retried when told yes; 2 calls ended in a transfer line the claim guard made real |
+| interruption | 2/5 (claim 1) | not re-run | 2 barge-ins whose utterance never produced a transcript, so both sides waited; 1 STT credential misread -> one-strike transfer |
+| handoff (fraud ticket) | 1/5 (claim 1) | 5/5 (policy 5) | opened the right ticket 5/5, transferred 0/5 on its own; the pass was the transfer guard's |
+| handoff_person (5b) | 5/5 (claim 1) | not re-run | nothing; the model's own request_handoff(caller_requested) on the second ask; one conditional "I'll transfer you if needed" tripped the transfer guard a turn early |
+
+Unsupported success claims spoken: 0 of 30 (and 0 of the 10 re-run calls). Over the 30 calls (181 turns): first audio
+heard p50 1572 / p95 2880 ms; turn-taking 524 ms; LLM TTFT 138 ms on spoken turns, 706 ms for a whole tool call; decode 75 tok/s;
+Deepgram TTS first byte 163 ms; hosted fallbacks 0; structural speech 0. Cost per call $0.0434 (audio $0.0397 + local LLM $0.0037 at
+the Mac's $0.171/h and admission 1), $0.0930 per successful call by the cost report's outcome-based count (14 of 30).
+
+Two caveats on the timeout re-run. The injected fault answers `timeout` in about 2 ms, so the retry cost the turn nothing; a real
+timeout would add its wait to the turn and the filler line would have to cover it. And the caller script was written for the
+no-retry path: after the agent had already confirmed the booking, the scripted "yes, please try again" made the model repeat its
+confirmation line twice before the goodbye; the state and the claim were right, so the checker passed the call.
+
+Three gaps the rehearsal added to the write-up's failure table, all model-side: no retry of a failed write when asked (0/5), no
+transfer after a fraud ticket (0/5 own transfers), and the weekday re-ask (2/5 ordinary). Two agent-side items for the next sprint:
+re-prompt after a barge-in that produced no transcript (about 4 s of mutual silence today), and tighten the transfer phrase set so a
+conditional "I'll transfer you if needed" is not an announcement.
+
+The live demo's handoff scenario is 5b (the model's own transfer). The fraud flow is shown or recorded as "contract rule enforced by
+the application after the ticket" and the timeout flow as "transient write fault absorbed by the executor, one retry, same
+idempotency key"; the scorecard's `retry=` and `policy=` columns and the write-up's (retry n) / (policy n) marks say which calls
+needed them. Nothing in those two rows is the model's recovery.
+
+Write-up tables generated at the end: `/Users/abgup/r3-artifacts/runs/writeup-1101-0933.md` (scripts/writeup.py; eval, latency incl. the combined rehearsal batch, load, cost, routing, rehearsal, targets).
 
 ### Nov 1 07:58: gate-fail fallback ready
 If run 2's fused 8-bit artifact fails the precision gate, `scripts/serve_unfused.sh $R3_ARTIFACTS/models/r3-voice-730f8ba68e`
