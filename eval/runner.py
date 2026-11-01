@@ -130,8 +130,10 @@ def summarize(results: list[Result], *, run_id: str, model_id: str) -> str:
     lines = [
         f"# r3-eval summary — run `{run_id}`",
         "",
-        f"model: `{model_id}` · episodes: {n} · scenarios: {len({ep.scenario_id for ep, _ in results})}"
-        f" · generated {datetime.now().isoformat(timespec='seconds')}",
+        (
+            f"model: `{model_id}` · episodes: {n} · scenarios: {len({ep.scenario_id for ep, _ in results})}"
+            f" · generated {datetime.now().isoformat(timespec='seconds')}"
+        ),
         "",
         f"**All scorers pass: {all_pass}/{n} ({_pct(all_pass, n)})**",
         "",
