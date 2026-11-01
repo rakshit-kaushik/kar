@@ -116,4 +116,5 @@ def call_summary(events) -> dict[str, Any]:
     model's) and the TTS vendor."""
     end = next((e[5] for e in events if e[3] == "call_end"), {}) or {}
     return {"guard": sum(1 for e in events if e[3] == "loop_guard"), "claim_guard": sum(1 for e in events if e[3] == "claim_guard"),
-            "retry": sum(1 for e in events if e[3] == "tool_retry"), "tts": str(end.get("tts_vendor") or "?")}
+            "retry": sum(1 for e in events if e[3] == "tool_retry"), "policy": sum(1 for e in events if e[3] == "policy_handoff"),
+            "tts": str(end.get("tts_vendor") or "?")}
