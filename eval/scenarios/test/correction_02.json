@@ -1,0 +1,81 @@
+{
+  "id": "correction_02",
+  "family": "correction",
+  "title": "Fatima corrects the branch from Market Street to Mill Road",
+  "tests": "Branch correction must propagate to the availability check and the booking",
+  "caller": {
+    "customer_id": "C-1007",
+    "name": "Fatima El-Sayed",
+    "persona": "Warm, a little distracted",
+    "knows": {
+      "phone": "5550122290",
+      "phone_spoken": "five five five zero one two two two nine zero",
+      "date_of_birth": "1983-12-02",
+      "first_name": "Fatima",
+      "cards": [
+        "6645"
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Book an account opening appointment on Thursday November 5th at 11 in the morning. First say Market Street; when the agent confirms or checks Market Street, say 'sorry, I meant Mill Road'. Confirm the final booking at Mill Road.",
+  "script": [
+    {
+      "trigger": "agent mentions Market Street as the branch",
+      "do": "correct to Mill Road"
+    }
+  ],
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1007",
+          "branch_id": "mill_rd",
+          "service_type": "account_opening",
+          "slot_start": "2026-11-05T11:00"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550122290",
+          "date_of_birth": "1983-12-02"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "mill_rd",
+          "service_type": "account_opening",
+          "date": "2026-11-05"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1007",
+          "branch_id": "mill_rd",
+          "service_type": "account_opening",
+          "slot_start": "2026-11-05T11:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14,
+    "corrections_hold": [
+      {
+        "field": "branch_id",
+        "value": "mill_rd"
+      }
+    ]
+  }
+}

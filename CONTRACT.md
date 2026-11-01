@@ -8,7 +8,7 @@ Status: DRAFT v0.1 for review · Oct 31, 2026 · Every session reads this before
 | --- | --- |
 | Machine | M5 Max, 36 GB unified memory (plan assumed 64; micro-batch stays 1, no spec-decode test until load tests say there is headroom) |
 | Base model | `mlx-community/Qwen3-4B-8bit`, thinking disabled, served via vllm-mlx (oMLX fallback) |
-| System prompt | `schemas/system_prompt.md`, one file loaded byte-for-byte by S, E and T (placeholders `{weekday}`, `{today_long}`, `{today}`, `{now}`); ~375 tokens. Prefix budget: system prompt + the 7 tool schemas + first caller turn ≈ 1,430 tokens of the 2,048 window, leaving ~615 for the rest of the call |
+| System prompt | `schemas/system_prompt.md`, one file loaded byte-for-byte by S, E and T; single placeholder `{today}` = `seed.json["clock_spoken"]`. Prefix budget: prompt + 7 tools + first caller turn ≈ 1484 tokens of the 2,048 window, leaving ≈ 564 for the rest of the call |
 | Hosted model | Anthropic `claude-sonnet-5-5` through the OpenAI-compatible endpoint; plays the caller, the teacher agent, the fallback, the baseline |
 | Voice | Deepgram STT → model → Cartesia `sonic-3.6` TTS inside LiveKit Agents `AgentSession`; browser only |
 | Ports | model server 8000 · proxy 8001 · UI 3000 · Postgres 5432 · agent (LiveKit worker) no port |
@@ -22,6 +22,8 @@ Status: DRAFT v0.1 for review · Oct 31, 2026 · Every session reads this before
 ## 1. Workflow spec
 
 **Business.** Marlow Mutual Bank, a fictional retail bank in the fictional city of Marlow. Four branches, deliberately confusable names: Market Street, Marlow Street, Marker Street, Mill Road. Hours Mon–Fri 9:00–17:00, Sat 9:00–13:00, closed Sun. Appointments are 30-minute slots. All data is synthetic (Faker); no real PII anywhere, ever.
+
+**Sandbox clock.** Every episode starts at **Monday 2026-11-02 10:00** local. "Tomorrow" is Tuesday Nov 3, "Thursday" is Nov 5, "next week" begins Monday Nov 9. Scenarios and expected states use absolute dates; the simulator, the agent prompt and the sandbox all read the clock from `eval/sandbox/seed.json`. Seed customers, cards, appointments and slot availability are fixed in that file, not random, so expected final states are exact.
 
 **Callers.** Existing customers calling the service line. They identify with phone number + date of birth. Non-customers get general hours and a handoff.
 
@@ -62,7 +64,7 @@ No other prices, rates or fees exist; anything else is "I can't quote that, a ba
 2. Nothing account-specific is spoken until `lookup_account` has returned `verified: true`.
 3. Before any write (`book`, `reschedule`, `cancel`, `create_ticket`) read back every argument in one sentence and get an explicit yes.
 4. Replies are one or two sentences, at most 35 words.
-5. Numbers as spoken: times "two thirty in the afternoon", dates "Tuesday, November fourth", card digits "ending in four two one nine", never "14:30" or "11/04".
+5. Numbers as spoken: times "two thirty in the afternoon", dates "Tuesday, November third", card digits "ending in four two one nine", never "14:30" or "11/04".
 6. On a correction: acknowledge in half a sentence, replace the fact, re-confirm the whole action before writing. A corrected fact wins over an earlier one everywhere.
 7. On a tool failure: say what did not work in plain words, offer one retry or a person; never imply success.
 8. Verified facts (from tools) and claimed facts (from the caller) are kept apart; only verified facts are stated as true.
@@ -83,12 +85,12 @@ A: Thanks Dana, you're verified. What can I help with today?
 C: i need to see someone about a mortgage next week
 A: Happy to. Which day next week works, and is Market Street still the best branch?
 C: tuesday morning market street is fine
-→ `check_availability(branch_id="market_st", service_type="mortgage_consultation", date="2026-11-04")` → `{slots:["09:00","09:30","11:00"]}`
+→ `check_availability(branch_id="market_st", service_type="mortgage_consultation", date="2026-11-03")` → `{slots:["09:00","09:30","11:00"]}`
 A: Tuesday I have nine, nine thirty, or eleven in the morning. Which one?
 C: nine thirty
-A: So that's a mortgage consultation at Market Street on Tuesday, November fourth at nine thirty in the morning. Shall I book it?
+A: So that's a mortgage consultation at Market Street on Tuesday, November third at nine thirty in the morning. Shall I book it?
 C: yes
-→ `book_appointment(customer_id="C-1042", branch_id="market_st", service_type="mortgage_consultation", slot_start="2026-11-04T09:30", idempotency_key=…)` → `{appointment_id:"A-7731"}`
+→ `book_appointment(customer_id="C-1042", branch_id="market_st", service_type="mortgage_consultation", slot_start="2026-11-03T09:30")` → `{appointment_id:"A-7731"}`
 A: Booked. You'll see a banker at Market Street on Tuesday at nine thirty. Anything else?
 C: no that's it
 A: Thanks Dana, see you Tuesday. Goodbye.
@@ -99,12 +101,12 @@ Final state: one appointment A-7731; completed_actions=[book]; handoff=false.
 C: book me a notary appointment thursday at two at marlow street
 A: Just to check, did you mean Marlow Street or Market Street?
 C: marlow street
-→ `check_availability(branch_id="marlow_st", service_type="notary", date="2026-11-06")` → `{slots:["14:00","14:30"]}`
-A: Two in the afternoon is open. A notary appointment at Marlow Street on Thursday, November sixth at two. Shall I book it?
+→ `check_availability(branch_id="marlow_st", service_type="notary", date="2026-11-05")` → `{slots:["14:00","14:30"]}`
+A: Two in the afternoon is open. A notary appointment at Marlow Street on Thursday, November fifth at two. Shall I book it?
 C: actually make it two thirty
-A: Two thirty it is. Notary at Marlow Street, Thursday November sixth at two thirty in the afternoon. Book it?
+A: Two thirty it is. Notary at Marlow Street, Thursday November fifth at two thirty in the afternoon. Book it?
 C: yes
-→ `book_appointment(…, slot_start="2026-11-06T14:30", …)` → ok
+→ `book_appointment(…, slot_start="2026-11-05T14:30", …)` → ok
 Final state: appointment at 14:30 (not 14:00); stale-detail scorer passes.
 
 **G3 — lost card with fraud mention → handoff.**
@@ -114,7 +116,7 @@ A: I'm sorry to hear that. Which card is it, the last four digits?
 C: four two one nine
 A: I'll open a fraud case for the card ending in four two one nine and get you to our fraud team, who will block it. Go ahead?
 C: yes please
-→ `create_ticket(customer_id="C-1042", category="unauthorized_transaction", summary="Lost card 4219; caller reports a charge they did not make", idempotency_key=…)` → `{ticket_id:"T-5520"}`
+→ `create_ticket(customer_id="C-1042", category="unauthorized_transaction", summary="Lost card 4219; caller reports a charge they did not make")` → `{ticket_id:"T-5520"}`
 → `request_handoff(reason="suspected_fraud", summary="Ticket T-5520 opened; lost card 4219 not yet blocked; caller reports unauthorized charge")`
 A: I've opened a fraud case, number five five two zero, and I'm connecting you to our fraud team now to block the card. Please hold.
 Final state: ticket category unauthorized_transaction; handoff=true; no card state changed.
@@ -132,19 +134,19 @@ Scorers: corrected-detail scorer fails; tool-argument scorer fails.
 
 ## 4. Tool schemas
 
-Files in `schemas/tools/*.json` are the source of truth; the simulator, the agent and the eval runner all load the same files. Each is OpenAI function-calling format, trimmed to names, types, required lists and enums (no `additionalProperties`, no error lists, no boilerplate property text): the Qwen3 template renders the seven files to ≈1,040 tokens, measured with the base tokenizer. Every write takes `idempotency_key` (string, caller-generated UUID); the sandbox returns the original result on a repeated key.
+Files in `schemas/tools/*.json` are the source of truth; the simulator, the agent and the eval runner all load the same files. Each is OpenAI function-calling format, trimmed to names, types, required lists and enums (no `additionalProperties`, no error lists, no boilerplate property text): the Qwen3 template renders the seven files to ≈916 tokens, measured with the base tokenizer. Every write carries an idempotency key, but it is generated by the tool layer (`services/tools/executor.py`), never by the model: the model-facing schemas omit it (decided Nov 1 — it cost ~20 generated tokens per write and the base model produced junk keys). The sandbox returns the original result on a repeated key.
 
 | Tool | Writes | Error codes |
 | --- | --- | --- |
 | `lookup_account(phone, date_of_birth)` | no | `not_found`, `not_verified`, `timeout` |
 | `check_availability(branch_id, service_type, date)` | no | `invalid_argument`, `unavailable`, `timeout` |
-| `book_appointment(customer_id, branch_id, service_type, slot_start, idempotency_key)` | yes | `conflict`, `unavailable`, `invalid_argument`, `timeout` |
-| `reschedule_appointment(appointment_id, new_slot_start, idempotency_key)` | yes | `not_found`, `conflict`, `unavailable`, `timeout` |
-| `cancel_appointment(appointment_id, idempotency_key)` | yes | `not_found`, `timeout` |
-| `create_ticket(customer_id, category, summary, idempotency_key)` | yes | `invalid_argument`, `timeout` |
+| `book_appointment(customer_id, branch_id, service_type, slot_start)` | yes | `conflict`, `unavailable`, `invalid_argument`, `timeout` |
+| `reschedule_appointment(appointment_id, new_slot_start)` | yes | `not_found`, `conflict`, `unavailable`, `timeout` |
+| `cancel_appointment(appointment_id)` | yes | `not_found`, `timeout` |
+| `create_ticket(customer_id, category, summary)` | yes | `invalid_argument`, `timeout` |
 | `request_handoff(reason, summary)` | yes | none |
 
-Error shape: `{"error": "<code>", "message": "<short text>"}`. The simulator injects `timeout` on a schedule for the tool-timeout family. `block_card` was cut on 2026-11-01 for the prompt budget; lost or stolen cards go to `create_ticket` + `request_handoff`.
+Error shape: `{"error": "<code>", "message": "<short text>"}`. The simulator injects `timeout` on a schedule for the tool-timeout family. `block_card` was cut on 2026-11-01 for the prompt budget (8 tools + prompt exceeded seq 2,048); lost or stolen cards go to `create_ticket` + `request_handoff`.
 
 ## 5. Session state (`schemas/state.json`)
 
@@ -171,13 +173,15 @@ Derived latencies: end-of-speech→first-audio = `tts_first_audio − speech_end
 ## 7. Interfaces and storage
 
 - The model is always an OpenAI-compatible chat-completions URL with `tools`; streaming; tool calls arrive as `tool_calls` deltas (the proxy on 8001 guarantees this and strips `<think>`).
-- Simulator, agent, eval runner and training data all load the system prompt from `schemas/system_prompt.md` and the tools from `schemas/tools/`; sandbox data from `eval/sandbox/`. The serving prompt must be a byte-for-byte prefix of every training example.
+- Simulator, agent, eval runner and training data all load the system prompt from `schemas/system_prompt.md` and the tools from `schemas/tools/`; sandbox data from `eval/sandbox/`. The serving prompt must be a byte-for-byte prefix of every training example; any episode that renders over 2,048 tokens is dropped, never truncated.
 - Postgres tables: `customers`, `appointments`, `cards`, `tickets` (sandbox seed, reset per episode) · `sessions`, `turn_events`, `eval_results` (run_id, model_id, scenario_id, family, scorer, pass, detail), `cost_ledger` (run_id, model_id, item, qty, unit_cost, measured bool).
 - Eval runner CLI: `r3-eval --base-url … --model … --scenarios eval/scenarios/test/ --out runs/<id>/` — scores any URL identically.
 
-## 8. Scenario families (test set = 27, three per family, hand-written, never used for generation)
+## 8. Scenario families (test set = 27, three per family, never used for generation)
 
 ordinary · missing information · correction · ambiguous branch · tool timeout · duplicate request · multi-intent detour · needs a person · noisy transcript. Seeds for caller phrasing: Taskmaster-1 and SGD (appointment dialogues) → persona and paraphrase banks; utterances used for test paraphrases never seed training personas.
+
+Scenario format: `eval/scenarios/schema.json`; the 27 live in `eval/scenarios/test/` (drafted by session S, reviewed and owned by the human; no session writes there). Generation scenarios live in `eval/scenarios/gen/` and must not reuse a test persona, goal or correction. **Every model runs each test scenario 3 times** (caller temperature 0.3, seeds 0/1/2); tables report the mean and the per-run spread. Human rubric at T+12: the human rates 20 adapter episodes on usefulness of the question asked, spoken brevity, naturalness (1–5 each).
 
 ## 9. Ticket routing taxonomy (12 categories)
 

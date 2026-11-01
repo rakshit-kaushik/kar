@@ -1,0 +1,74 @@
+{
+  "id": "noisy_transcript_03",
+  "family": "noisy_transcript",
+  "title": "Helena: 'alone application', 'next monday'",
+  "tests": "Relative date resolved from the clock (next Monday = Nov 9) and a misheard service name",
+  "caller": {
+    "customer_id": "C-1010",
+    "name": "Helena Vogt",
+    "persona": "Soft-spoken; the line clips words",
+    "knows": {
+      "phone": "5550111123",
+      "phone_spoken": "five five five zero one one one one two three",
+      "date_of_birth": "1968-10-10",
+      "first_name": "Helena",
+      "cards": [
+        "5151"
+      ]
+    },
+    "noise": "high",
+    "stt_quirks": [
+      "the transcript renders 'loan application' as 'alone application' once",
+      "say 'next monday' rather than a date",
+      "lowercase, no punctuation"
+    ]
+  },
+  "goal": "First ask whether you have any upcoming appointments (you have none). Then book a loan application at Marlow Street next Monday, November 9th, at 2 in the afternoon.",
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1010",
+          "branch_id": "marlow_st",
+          "service_type": "loan_application",
+          "slot_start": "2026-11-09T14:00"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550111123",
+          "date_of_birth": "1968-10-10"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "marlow_st",
+          "service_type": "loan_application",
+          "date": "2026-11-09"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1010",
+          "branch_id": "marlow_st",
+          "service_type": "loan_application",
+          "slot_start": "2026-11-09T14:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14
+  }
+}

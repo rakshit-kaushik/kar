@@ -1,0 +1,72 @@
+{
+  "id": "multi_intent_01",
+  "family": "multi_intent",
+  "title": "Fatima asks about hours and fees mid-booking",
+  "tests": "Detours answered from the catalog only, then the booking completes",
+  "caller": {
+    "customer_id": "C-1007",
+    "name": "Fatima El-Sayed",
+    "persona": "Chatty; asks side questions",
+    "knows": {
+      "phone": "5550122290",
+      "phone_spoken": "five five five zero one two two two nine zero",
+      "date_of_birth": "1983-12-02",
+      "first_name": "Fatima",
+      "cards": [
+        "6645"
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Book a notary appointment at Marker Street on Friday November 6th at 9 in the morning. Along the way ask 'what are your Saturday hours?' and 'is the notary free?'. Expect answers (Saturday nine to one; ten dollars per document) and continue.",
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1007",
+          "branch_id": "marker_st",
+          "service_type": "notary",
+          "slot_start": "2026-11-06T09:00"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550122290",
+          "date_of_birth": "1983-12-02"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "marker_st",
+          "service_type": "notary",
+          "date": "2026-11-06"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1007",
+          "branch_id": "marker_st",
+          "service_type": "notary",
+          "slot_start": "2026-11-06T09:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 16,
+    "must_mention": [
+      "ten dollars"
+    ]
+  }
+}

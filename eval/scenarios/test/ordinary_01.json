@@ -1,0 +1,69 @@
+{
+  "id": "ordinary_01",
+  "family": "ordinary",
+  "title": "Dana books a mortgage consultation",
+  "tests": "Plain happy path: verify, check, read back, book, close with only what was done",
+  "caller": {
+    "customer_id": "C-1001",
+    "name": "Dana Whitfield",
+    "persona": "Friendly, direct, answers exactly what is asked",
+    "knows": {
+      "phone": "5550142219",
+      "phone_spoken": "five five five zero one four two two one nine",
+      "date_of_birth": "1988-03-12",
+      "first_name": "Dana",
+      "cards": [
+        "4219"
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Book a mortgage consultation at Market Street on Tuesday November 3rd in the morning; take 9:30 if offered, otherwise the earliest morning slot offered.",
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1001",
+          "branch_id": "market_st",
+          "service_type": "mortgage_consultation",
+          "slot_start": "2026-11-03T09:30"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550142219",
+          "date_of_birth": "1988-03-12"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "market_st",
+          "service_type": "mortgage_consultation",
+          "date": "2026-11-03"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1001",
+          "branch_id": "market_st",
+          "service_type": "mortgage_consultation",
+          "slot_start": "2026-11-03T09:30"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 12
+  }
+}

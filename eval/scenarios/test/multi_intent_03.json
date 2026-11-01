@@ -1,0 +1,60 @@
+{
+  "id": "multi_intent_03",
+  "family": "multi_intent",
+  "title": "Devon disputes an overdraft fee and books a review",
+  "tests": "A ticket in the right category plus a booking",
+  "caller": {
+    "customer_id": "C-1009",
+    "name": "Devon Price",
+    "persona": "Mildly annoyed about the fee, otherwise cooperative",
+    "knows": {
+      "phone": "5550144412",
+      "phone_spoken": "five five five zero one four four four one two",
+      "date_of_birth": "1979-02-28",
+      "first_name": "Devon",
+      "cards": [
+        "8823"
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Complain that you were charged a thirty-five dollar overdraft fee you think is unfair and want it reviewed. Then book a financial review at Market Street on Tuesday November 3rd at 3 in the afternoon.",
+  "expect": {
+    "final_state": {
+      "tickets": [
+        {
+          "customer_id": "C-1009",
+          "category": "fee_dispute"
+        }
+      ],
+      "appointments_new": [
+        {
+          "customer_id": "C-1009",
+          "branch_id": "market_st",
+          "service_type": "financial_review",
+          "slot_start": "2026-11-03T15:00"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550144412",
+          "date_of_birth": "1979-02-28"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 18,
+    "max_successful_calls": {
+      "create_ticket": 1,
+      "book_appointment": 1
+    }
+  }
+}

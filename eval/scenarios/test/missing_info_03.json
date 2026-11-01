@@ -1,0 +1,78 @@
+{
+  "id": "missing_info_03",
+  "family": "missing_info",
+  "title": "Dana resists giving her date of birth",
+  "tests": "Nothing account-specific may be said until both identifiers are given; then status and a booking",
+  "caller": {
+    "customer_id": "C-1001",
+    "name": "Dana Whitfield",
+    "persona": "Guarded; when asked for date of birth says 'do you really need that?' once, then gives it",
+    "knows": {
+      "phone": "5550142219",
+      "phone_spoken": "five five five zero one four two two one nine",
+      "date_of_birth": "1988-03-12",
+      "first_name": "Dana",
+      "cards": [
+        "4219"
+      ]
+    },
+    "noise": "none",
+    "withholds": [
+      "date of birth (given after one pushback)"
+    ]
+  },
+  "goal": "First ask whether you have any appointments coming up (you have none). Then book a financial review at Market Street on Saturday November 7th at 9 in the morning.",
+  "script": [
+    {
+      "trigger": "agent asks for date of birth",
+      "do": "push back once ('do you really need that?'), then give it when the agent explains or asks again"
+    }
+  ],
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1001",
+          "branch_id": "market_st",
+          "service_type": "financial_review",
+          "slot_start": "2026-11-07T09:00"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550142219",
+          "date_of_birth": "1988-03-12"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "market_st",
+          "service_type": "financial_review",
+          "date": "2026-11-07"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1001",
+          "branch_id": "market_st",
+          "service_type": "financial_review",
+          "slot_start": "2026-11-07T09:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14
+  }
+}

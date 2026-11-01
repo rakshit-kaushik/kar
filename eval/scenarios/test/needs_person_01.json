@@ -1,0 +1,54 @@
+{
+  "id": "needs_person_01",
+  "family": "needs_person",
+  "title": "Robert insists on a human",
+  "tests": "First ask -> one offer to help; second ask -> handoff with caller_requested; no writes, no verification required",
+  "caller": {
+    "customer_id": "C-1006",
+    "name": "Robert Lindqvist",
+    "persona": "Elderly, polite, distrusts automated systems",
+    "knows": {
+      "phone": "5550166642",
+      "phone_spoken": "five five five zero one six six six four two",
+      "date_of_birth": "1949-05-15",
+      "first_name": "Robert",
+      "cards": [
+        "1188"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2003",
+          "what": "safe_deposit_box at Marlow Street on 2026-11-03T10:00"
+        }
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Say you would rather speak to a person. If the agent offers to help, say 'no thank you, I'd like a person please'. Accept the transfer.",
+  "expect": {
+    "final_state": {
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "request_handoff",
+        "args": {
+          "reason": "caller_requested"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": true,
+      "reason": "caller_requested"
+    },
+    "max_turns": 8,
+    "forbidden_tools": [
+      "book_appointment",
+      "reschedule_appointment",
+      "cancel_appointment",
+      "block_card",
+      "create_ticket"
+    ]
+  }
+}

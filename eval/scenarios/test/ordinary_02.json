@@ -1,0 +1,77 @@
+{
+  "id": "ordinary_02",
+  "family": "ordinary",
+  "title": "Marcus moves his Thursday notary to Friday",
+  "tests": "Reschedule path: find the existing appointment from the lookup, check the new day, confirm, move",
+  "caller": {
+    "customer_id": "C-1002",
+    "name": "Marcus Okafor",
+    "persona": "Busy, slightly impatient, knows he has a notary appointment Thursday afternoon",
+    "knows": {
+      "phone": "5550198823",
+      "phone_spoken": "five five five zero one nine eight eight two three",
+      "date_of_birth": "1975-07-04",
+      "first_name": "Marcus",
+      "cards": [
+        "7781",
+        "0034"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2001",
+          "what": "notary at Marlow Street on 2026-11-05T14:00"
+        }
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Move your Thursday November 5th notary appointment at Marlow Street to Friday November 6th at 10 in the morning, same branch.",
+  "expect": {
+    "final_state": {
+      "appointments_changed": [
+        {
+          "appointment_id": "A-2001",
+          "slot_start": "2026-11-06T10:00",
+          "status": "booked"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550198823",
+          "date_of_birth": "1975-07-04"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "marlow_st",
+          "service_type": "notary",
+          "date": "2026-11-06"
+        },
+        "ok": true
+      },
+      {
+        "tool": "reschedule_appointment",
+        "args": {
+          "appointment_id": "A-2001",
+          "new_slot_start": "2026-11-06T10:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 12,
+    "forbidden_tools": [
+      "cancel_appointment",
+      "book_appointment"
+    ]
+  }
+}

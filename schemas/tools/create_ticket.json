@@ -28,17 +28,12 @@
         },
         "summary": {
           "type": "string"
-        },
-        "idempotency_key": {
-          "type": "string",
-          "description": "new UUID per write"
         }
       },
       "required": [
         "customer_id",
         "category",
-        "summary",
-        "idempotency_key"
+        "summary"
       ]
     }
   }

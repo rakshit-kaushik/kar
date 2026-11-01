@@ -12,16 +12,11 @@
         "new_slot_start": {
           "type": "string",
           "description": "YYYY-MM-DDTHH:MM"
-        },
-        "idempotency_key": {
-          "type": "string",
-          "description": "new UUID per write"
         }
       },
       "required": [
         "appointment_id",
-        "new_slot_start",
-        "idempotency_key"
+        "new_slot_start"
       ]
     }
   }

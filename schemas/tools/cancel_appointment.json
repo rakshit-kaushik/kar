@@ -8,15 +8,10 @@
       "properties": {
         "appointment_id": {
           "type": "string"
-        },
-        "idempotency_key": {
-          "type": "string",
-          "description": "new UUID per write"
         }
       },
       "required": [
-        "appointment_id",
-        "idempotency_key"
+        "appointment_id"
       ]
     }
   }
