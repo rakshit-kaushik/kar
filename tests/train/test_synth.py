@@ -73,3 +73,35 @@ def test_tools_and_lost_card_flow_follow_the_schema_directory(synth_dir):
     called = {c["function"]["name"] for ex in rows for m in ex["messages"] if m["role"] == "assistant" for c in m.get("tool_calls", [])}
     assert called <= set(expected)
     assert ("block_card" in called) == ("block_card" in expected)  # the lost-card scenarios switch with the contract
+
+
+def test_tool_call_arguments_match_the_schemas_exactly(synth_dir):
+    from train.synth import load_tools
+
+    schemas = {t["function"]["name"]: t["function"]["parameters"] for t in load_tools()}
+    n = 0
+    for ex in _read(synth_dir / "train.jsonl") + _read(synth_dir / "valid.jsonl"):
+        for m in ex["messages"]:
+            for call in m.get("tool_calls", []) if m["role"] == "assistant" else []:
+                name, args = call["function"]["name"], json.loads(call["function"]["arguments"])
+                assert set(args) <= set(schemas[name]["properties"]), (name, args)
+                assert set(schemas[name].get("required", [])) <= set(args), (name, args)
+                n += 1
+    assert n > 0
+
+
+def test_dates_and_clock_follow_the_sandbox_calendar(synth_dir):
+    import datetime as dt
+
+    from train.prompt import sandbox_clock
+
+    spoken = sandbox_clock()["clock_spoken"]
+    for ex in _read(synth_dir / "train.jsonl"):
+        assert f"Today is {spoken}." in ex["messages"][0]["content"]
+        for m in ex["messages"]:
+            for call in m.get("tool_calls", []) if m["role"] == "assistant" else []:
+                args = json.loads(call["function"]["arguments"])
+                for key in ("date", "slot_start", "new_slot_start"):
+                    if key in args:
+                        d = dt.date.fromisoformat(args[key][:10])
+                        assert dt.date(2026, 11, 3) <= d <= dt.date(2026, 11, 14) and d.weekday() != 6, (key, args[key])

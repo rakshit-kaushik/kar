@@ -66,7 +66,7 @@ def test_precision_gate_is_within_one_point_of_the_unfused_adapter():
 def test_server_commands_use_the_installed_servers_with_thinking_off():
     fused = server_command(model="/m/r3-voice-abc", port=8010, name="r3-voice-abc")
     assert fused[:3] == ["vllm-mlx", "serve", "/m/r3-voice-abc"]
-    assert "--served-model-name" in fused and "--tool-call-parser" in fused and "qwen3" in fused
+    assert "--served-model-name" in fused and "--tool-call-parser" not in fused  # the proxy parses tool calls, as in production
     assert '{"enable_thinking": false}' in fused
     adapter = server_command(model="/m/base", port=8010, name="r3-voice-abc", adapter="/m/r3-voice-abc/adapter")
     assert adapter[0] == "mlx_lm.server" and "--adapter-path" in adapter and '{"enable_thinking": false}' in adapter
@@ -100,3 +100,45 @@ def test_evaluate_model_dir_starts_the_server_waits_and_records_the_table(tmp_pa
     assert table["overall"]["pass_rate"] == 100.0 and set(table["families"]) == {"ordinary", "correction"}
     assert table["runner"] == "stub" and table["server"]["started"] is True and table["server"]["stopped"] is True
     assert (tmp_path / "eval" / "family_table.md").exists() and (tmp_path / "eval" / "family_table.json").exists()
+
+
+def test_server_command_defaults_match_the_production_restart_script():
+    from train.eval_hook import request_model_for
+
+    fused = server_command(model="/m/r3-voice-abc", port=8010, name="r3-voice-abc")
+    assert "--prefix-trie-cache" in fused and "--continuous-batching" not in fused and "--tool-call-parser" not in fused
+    assert fused[fused.index("--default-temperature") + 1] == "0.2" and fused[fused.index("--max-tokens") + 1] == "256"
+    assert request_model_for(fused, "r3-voice-abc") == "r3-voice-abc"
+    adapter = server_command(model="/m/base", port=8010, name="r3-voice-abc", adapter="/m/r3-voice-abc/adapter")
+    assert request_model_for(adapter, "r3-voice-abc") == "default_model"  # mlx_lm.server loads other names as repos
+
+
+def test_run_r3_eval_passes_run_id_and_no_db(tmp_path, monkeypatch):
+    monkeypatch.setenv("R3_EVAL_FORCE_STUB", "1")
+    res = run_r3_eval(base_url=f"http://127.0.0.1:{_free_port()}/v1", model="m", scenarios=_scenarios(tmp_path),
+                      out_dir=tmp_path / "o", run_id="rid", database_url=None)
+    cmd = res["command"]
+    assert cmd[cmd.index("--run-id") + 1] == "rid" and "--no-db" in cmd
+
+
+def test_collect_results_prefers_rows_of_the_run_id(tmp_path):
+    out = tmp_path / "o"
+    out.mkdir()
+    rows = [{"run_id": "rid", "model_id": "default_model", "scenario_id": "s", "family": "ordinary", "scorer": "x", "pass": True},
+            {"run_id": "other", "model_id": "default_model", "scenario_id": "s", "family": "ordinary", "scorer": "x", "pass": False}]
+    (out / "eval_results.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    got = collect_results(run_id="rid", model_id="r3-voice-abc", out_dir=out, database_url=None)
+    assert [r["run_id"] for r in got] == ["rid"]
+
+
+def test_evaluate_model_dir_scores_through_the_real_proxy(tmp_path, monkeypatch):
+    monkeypatch.setenv("R3_EVAL_FORCE_STUB", "1")
+    monkeypatch.setenv("R3_EVAL_SERVER_CMD", f"{sys.executable} {HERE / 'fake_server.py'} {{port}} {{name}}")
+    port = _free_port()
+    table = evaluate_model_dir(tmp_path / "r3-voice-abc", model_name="r3-voice-abc", run_id="eval-t3", scenarios=_scenarios(tmp_path),
+                               out_dir=tmp_path / "eval", port=port, database_url=None, timeout=60, through_proxy=True)
+    assert table["overall"]["pass_rate"] == 100.0
+    assert table["server"]["proxy"]["base_url"] == f"http://127.0.0.1:{port + 1}/v1" and table["server"]["proxy"]["stopped"] is True
+    assert table["server"]["base_url"] == f"http://127.0.0.1:{port + 1}/v1"  # scored through the proxy
+    rows = collect_results("eval-t3", "r3-voice-abc", tmp_path / "eval", None)
+    assert rows[0]["detail"]["ms"] > 0

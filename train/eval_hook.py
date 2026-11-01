@@ -5,15 +5,20 @@
         --scenarios eval/scenarios/test --out $R3_ARTIFACTS/runs/<id>/eval --run-id <id>
     uv run python -m train.eval_hook --model-dir ... --gate      # precision gate: fused vs adapter-on-base
 
-Servers (installed versions, flags read from their argparse):
-  fused 8-bit dir  -> vllm-mlx 0.5.0: `vllm-mlx serve <dir> --served-model-name <id> --continuous-batching
-                      --enable-auto-tool-choice --tool-call-parser qwen3 --reasoning-parser qwen3
-                      --default-chat-template-kwargs '{"enable_thinking": false}'`
+Servers (installed versions, flags read from their argparse and from scripts/restart.sh):
+  fused 8-bit dir  -> vllm-mlx 0.5.0 with session S's production flags: `vllm-mlx serve <dir> --served-model-name
+                      <id> --prefix-trie-cache --default-chat-template-kwargs '{"enable_thinking": false}'
+                      --default-temperature 0.2 --max-tokens 256` (no continuous batching, no tool parser:
+                      the proxy handles tool calls, as in production)
   adapter on base  -> mlx_lm.server 0.32.2: `mlx_lm.server --model <base> --adapter-path <dir>/adapter
-                      --chat-template-args '{"enable_thinking": false}'` (vllm-mlx has no adapter flag)
-Override either with $R3_EVAL_SERVER_CMD, a template with {model} {port} {name} {adapter} placeholders.
-Results come from Postgres `eval_results` (run_id / model_id) when the runner wrote there, else from
-<out>/eval_results.jsonl. Selection is by this table on the test set, never by loss.
+                      --chat-template-args '{"enable_thinking": false}'` (vllm-mlx has no adapter flag);
+                      requests must name the model `default_model`, so the runner is given that name
+By default session S's proxy (services.proxy.main) runs on port+1 in front of the model server
+(PROXY_UPSTREAM / PROXY_PORT) and the runner scores through it, exactly like the live :8000/:8001
+stack, on side ports. Override the model server with $R3_EVAL_SERVER_CMD, a template with {model}
+{port} {name} {adapter} placeholders. Results come from Postgres `eval_results` (run_id, else model_id
+since the start) when the runner wrote there, else from <out>/eval_results.jsonl. Selection is by this
+table on the test set, never by loss.
 """
 from __future__ import annotations
 
@@ -35,12 +40,19 @@ from train.env import REPO_ROOT, load_env
 
 CHAT_KWARGS = '{"enable_thinking": false}'
 DEFAULT_FUSED_CMD = (
-    "vllm-mlx serve {model} --host 127.0.0.1 --port {port} --served-model-name {name} --continuous-batching "
-    "--enable-auto-tool-choice --tool-call-parser qwen3 --reasoning-parser qwen3 --default-chat-template-kwargs '{chat_kwargs}'"
+    "vllm-mlx serve {model} --host 127.0.0.1 --port {port} --served-model-name {name} --prefix-trie-cache "
+    "--default-chat-template-kwargs '{chat_kwargs}' --default-temperature 0.2 --max-tokens 256"
 )
 DEFAULT_ADAPTER_CMD = (
-    "mlx_lm.server --model {model} --adapter-path {adapter} --host 127.0.0.1 --port {port} --chat-template-args '{chat_kwargs}'"
+    "mlx_lm.server --model {model} --adapter-path {adapter} --host 127.0.0.1 --port {port} "
+    "--chat-template-args '{chat_kwargs}' --temp 0.2 --max-tokens 256"
 )
+
+
+def request_model_for(cmd: list[str], name: str) -> str:
+    """The `model` the runner must send: mlx_lm.server maps only `default_model` to its --model
+    (+ --adapter-path) and tries to download any other name as a Hugging Face repo."""
+    return "default_model" if cmd and Path(cmd[0]).name == "mlx_lm.server" else name
 
 
 def server_command(model: str, port: int, name: str, adapter: str | None = None, template: str | None = None) -> list[str]:
@@ -99,16 +111,21 @@ def runner_available() -> bool:
         return False
 
 
-def run_r3_eval(base_url: str, model: str, scenarios: str | Path, out_dir: str | Path, run_id: str, timeout: float = 3600.0) -> dict:
+def run_r3_eval(base_url: str, model: str, scenarios: str | Path, out_dir: str | Path, run_id: str,
+                timeout: float = 3600.0, database_url: str | None = None) -> dict:
+    """`r3-eval --base-url --model --scenarios --out --run-id [--no-db]` (eval/runner.py's CLI), or
+    train/eval_stub.py with the same arguments when the runner is not importable."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    common = ["--base-url", base_url, "--model", model, "--scenarios", str(scenarios), "--out", str(out_dir)]
+    common = ["--base-url", base_url, "--model", model, "--scenarios", str(scenarios), "--out", str(out_dir), "--run-id", run_id]
+    if not database_url:
+        common.append("--no-db")
     if runner_available():
         exe = Path(sys.executable).with_name("r3-eval")
         cmd = [str(exe) if exe.exists() else "r3-eval", *common]
         runner = "r3-eval"
     else:
-        cmd = [sys.executable, "-m", "train.eval_stub", *common, "--run-id", run_id]
+        cmd = [sys.executable, "-m", "train.eval_stub", *common]
         runner = "stub"
     log = out_dir / "eval.log"
     print(f"[eval] {runner}: {' '.join(cmd)}", flush=True)
@@ -128,8 +145,8 @@ def collect_results(run_id: str, model_id: str, out_dir: str | Path, database_ur
             with psycopg.connect(database_url, connect_timeout=5) as conn, conn.cursor() as cur:
                 cur.execute(
                     "select run_id, model_id, scenario_id, family, scorer, pass, detail from eval_results "
-                    "where model_id = %s and (run_id = %s or created_at >= %s) order by id",
-                    (model_id, run_id, dt.datetime.fromtimestamp(since or 0, dt.timezone.utc)),
+                    "where run_id = %s or (model_id = %s and created_at >= %s) order by id",
+                    (run_id, model_id, dt.datetime.fromtimestamp(since or 0, dt.timezone.utc)),
                 )
                 rows = [dict(zip(("run_id", "model_id", "scenario_id", "family", "scorer", "pass", "detail"), r)) for r in cur.fetchall()]
         except Exception as e:  # noqa: BLE001
@@ -138,7 +155,20 @@ def collect_results(run_id: str, model_id: str, out_dir: str | Path, database_ur
         p = Path(out_dir) / "eval_results.jsonl"
         if p.exists():
             rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+            mine = [r for r in rows if r.get("run_id") == run_id]
+            rows = mine or rows
     return rows
+
+
+def start_proxy(upstream_port: int, proxy_port: int, log_path: Path) -> subprocess.Popen:
+    """Session S's proxy (services/proxy) on a side port, fronting the side model server."""
+    env = {**os.environ, "PROXY_UPSTREAM": f"http://127.0.0.1:{upstream_port}", "PROXY_PORT": str(proxy_port)}
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log = log_path.open("a")
+    log.write(f"$ PROXY_UPSTREAM={env['PROXY_UPSTREAM']} PROXY_PORT={proxy_port} python -m services.proxy.main\n")
+    log.flush()
+    return subprocess.Popen([sys.executable, "-m", "services.proxy.main"], cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT,
+                            env=env, start_new_session=True)
 
 
 def _rate(passed: int, n: int) -> float:
@@ -196,37 +226,56 @@ def precision_gate(fused: dict, adapter: dict, tolerance_points: float = 1.0, sc
 
 def evaluate_model_dir(model_dir: str | Path, model_name: str, run_id: str, scenarios: str | Path, out_dir: str | Path,
                        base_url: str | None = None, adapter: str | Path | None = None, base: str | Path | None = None,
-                       port: int = 8010, database_url: str | None = "env", timeout: float = 600.0) -> dict:
+                       port: int = 8010, database_url: str | None = "env", timeout: float = 600.0,
+                       through_proxy: bool = True) -> dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     if database_url == "env":
         load_env()
         database_url = os.environ.get("DATABASE_URL")
-    server: dict = {"started": False, "stopped": False, "command": None, "base_url": base_url}
-    proc = None
+    server: dict = {"started": False, "stopped": False, "command": None, "base_url": base_url, "proxy": None}
+    request_model = model_name
+    proc = proxy = None
     if base_url is None:
         cmd = server_command(model=str(base or model_dir), port=port, name=model_name, adapter=str(adapter) if adapter else None)
-        base_url = f"http://127.0.0.1:{port}/v1"
-        server.update(command=cmd, base_url=base_url, log=str(out_dir / "server.log"))
+        request_model = request_model_for(cmd, model_name)
+        model_url = f"http://127.0.0.1:{port}/v1"
+        server.update(command=cmd, model_url=model_url, log=str(out_dir / "server.log"))
         print(f"[eval] starting server: {' '.join(cmd)}", flush=True)
         proc = start_server(cmd, out_dir / "server.log")
         server["started"] = True
         t0 = time.time()
-        if not wait_for_health(base_url, timeout=timeout, proc=proc):
+        if not wait_for_health(model_url, timeout=timeout, proc=proc):
             stop_server(proc)
             raise RuntimeError(f"server did not become healthy within {timeout:.0f}s; see {out_dir / 'server.log'}")
         server["health_seconds"] = round(time.time() - t0, 1)
         print(f"[eval] healthy after {server['health_seconds']}s", flush=True)
+        base_url = model_url
+        if through_proxy:
+            proxy_port = port + 1
+            proxy = start_proxy(port, proxy_port, out_dir / "proxy.log")
+            proxy_url = f"http://127.0.0.1:{proxy_port}/v1"
+            server["proxy"] = {"port": proxy_port, "base_url": proxy_url, "started": True, "stopped": False, "log": str(out_dir / "proxy.log")}
+            if not wait_for_health(proxy_url, timeout=60, proc=proxy):
+                stop_server(proxy)
+                stop_server(proc)
+                raise RuntimeError(f"proxy did not become healthy on :{proxy_port}; see {out_dir / 'proxy.log'}")
+            base_url = proxy_url
+            print(f"[eval] proxy on :{proxy_port} -> :{port}; scoring through the proxy", flush=True)
+        server["base_url"] = base_url
     since = time.time()
     try:
-        res = run_r3_eval(base_url, model_name, scenarios, out_dir, run_id)
-        rows = collect_results(run_id, model_name, out_dir, database_url, since=since)
+        res = run_r3_eval(base_url, request_model, scenarios, out_dir, run_id, database_url=database_url)
+        rows = collect_results(run_id, request_model, out_dir, database_url, since=since)
     finally:
+        if proxy is not None:
+            stop_server(proxy)
+            server["proxy"]["stopped"] = True
         if proc is not None:
             stop_server(proc)
             server["stopped"] = True
     table = family_table(rows)
-    table.update(model=model_name, model_dir=str(model_dir), adapter=str(adapter) if adapter else None, run_id=run_id,
+    table.update(model=model_name, request_model=request_model, model_dir=str(model_dir), adapter=str(adapter) if adapter else None, run_id=run_id,
                  scenarios=str(scenarios), runner=res["runner"], returncode=res["returncode"], server=server,
                  rows_source="postgres" if database_url and rows and "id" in rows[0] else "jsonl",
                  created_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
@@ -247,7 +296,8 @@ def main(argv=None) -> int:
     ap.add_argument("--scenarios", default="eval/scenarios/test")
     ap.add_argument("--out", type=Path, default=None, help="default: <model-dir>/eval/<run-id>")
     ap.add_argument("--base-url", default=None, help="score an already running endpoint instead of starting one")
-    ap.add_argument("--port", type=int, default=8010, help="port for the server this hook starts (not :8000, the live one)")
+    ap.add_argument("--port", type=int, default=8010, help="side port for the model server (the proxy takes port+1); the live stack stays on :8000/:8001")
+    ap.add_argument("--no-proxy", action="store_true", help="score the model server directly instead of through services/proxy")
     ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("--gate", action="store_true", help="also serve base + <model-dir>/adapter and apply the 1-point precision gate")
     ap.add_argument("--base", default=None, help="base model dir for --gate (default: r3.json base_model)")
@@ -259,7 +309,8 @@ def main(argv=None) -> int:
     run_id = a.run_id or f"eval-{name}-{time.strftime('%Y%m%d-%H%M%S')}"
     out = a.out or (a.model_dir / "eval" / run_id)
     db = None if a.no_db else "env"
-    fused = evaluate_model_dir(a.model_dir, name, run_id, a.scenarios, out, base_url=a.base_url, port=a.port, database_url=db, timeout=a.timeout)
+    fused = evaluate_model_dir(a.model_dir, name, run_id, a.scenarios, out, base_url=a.base_url, port=a.port, database_url=db,
+                               timeout=a.timeout, through_proxy=not a.no_proxy)
     if not a.gate:
         return 0
     meta = json.loads((a.model_dir / "r3.json").read_text()) if (a.model_dir / "r3.json").exists() else {}
@@ -267,7 +318,8 @@ def main(argv=None) -> int:
     if not base:
         raise SystemExit("--gate needs --base (no r3.json base_model)")
     adapter_table = evaluate_model_dir(a.model_dir, f"{name}-adapter", f"{run_id}-adapter", a.scenarios, out / "adapter",
-                                       adapter=a.model_dir / "adapter", base=base, port=a.port, database_url=db, timeout=a.timeout)
+                                       adapter=a.model_dir / "adapter", base=base, port=a.port, database_url=db, timeout=a.timeout,
+                                       through_proxy=not a.no_proxy)
     gate = precision_gate(fused, adapter_table, a.tolerance, a.scorer)
     (out / "precision_gate.json").write_text(json.dumps(gate, indent=2) + "\n")
     print(f"[gate] fused {gate['fused_pass_rate']} vs adapter-on-base {gate['adapter_pass_rate']} on {gate['scorer']}: "

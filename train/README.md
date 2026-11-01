@@ -12,9 +12,10 @@ uv run python -m train.launch --config train/configs/voice_run1.yaml --data $R3_
 # T+13 routing adapter (data from train/routing_format.py)
 uv run python -m train.launch --config train/configs/routing.yaml --data $R3_ARTIFACTS/datasets/routing-v1
 
-# score a versioned model (starts a server on :8010, waits for /health, runs r3-eval or the stub)
+# score a versioned model: vllm-mlx on :8010 with S's production flags, S's proxy on :8011 in front, r3-eval through the proxy
 uv run python -m train.eval_hook --model-dir $R3_ARTIFACTS/models/r3-voice-<hash> --scenarios eval/scenarios/test
-uv run python -m train.eval_hook --model-dir $R3_ARTIFACTS/models/r3-voice-<hash> --gate     # fused vs adapter-on-base, 1 point
+uv run python -m train.eval_hook --model-dir $R3_ARTIFACTS/models/r3-voice-<hash> --gate     # + adapter-on-base via mlx_lm.server, 1 point
+uv run python -m train.eval_hook --model-dir ... --base-url http://127.0.0.1:8001/v1          # score the live stack instead
 ```
 
 Before any run: `uv run python -m train.loader --data <dir> --model $R3_ARTIFACTS/models/Qwen3-4B-8bit --n 20`

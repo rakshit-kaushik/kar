@@ -75,6 +75,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--timeout", type=float, default=30.0)
+    ap.add_argument("--no-db", action="store_true", help="accepted for CLI parity with r3-eval; the stub never writes to Postgres")
     a = ap.parse_args(argv)
     run_id = a.run_id or f"stub-{int(time.time())}"
     a.out.mkdir(parents=True, exist_ok=True)

@@ -83,7 +83,8 @@ def read_jsonl(path: str | Path) -> list[dict]:
 
 
 def validate_example(ex: dict, require_tools: bool = True) -> list[str]:
-    """Structural problems that would break the Qwen3 template or put loss in the wrong place."""
+    """Structural problems that would break the Qwen3 template or put loss in the wrong place, and
+    tool-call arguments that do not match the example's own tool schemas (the contract's files)."""
     errors: list[str] = []
     msgs = ex.get("messages")
     if not isinstance(msgs, list) or not msgs:
@@ -115,6 +116,35 @@ def validate_example(ex: dict, require_tools: bool = True) -> list[str]:
                     errors.append(f"message {i}: tool_calls[{j}].function.arguments must be a JSON string or object")
         elif m.get("tool_calls"):
             errors.append(f"message {i} ({role}): only assistant messages may carry tool_calls")
+    if isinstance(tools, list) and tools:
+        schemas = {}
+        for t in tools:
+            fn = t.get("function") or {}
+            if isinstance(fn.get("name"), str):
+                schemas[fn["name"]] = fn.get("parameters") or {}
+        for i, m in enumerate(msgs):
+            if m.get("role") != "assistant":
+                continue
+            for j, call in enumerate(m.get("tool_calls") or []):
+                fn = call.get("function") or {}
+                name, args = fn.get("name"), fn.get("arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        continue  # reported above
+                if name not in schemas:
+                    errors.append(f"message {i}: tool_calls[{j}] calls {name!r}, not one of the example's tools")
+                    continue
+                if not isinstance(args, dict):
+                    continue
+                params = schemas[name]
+                extra = set(args) - set(params.get("properties") or {})
+                missing = set(params.get("required") or []) - set(args)
+                if extra:
+                    errors.append(f"message {i}: tool_calls[{j}] ({name}) has arguments not in the schema: {sorted(extra)}")
+                if missing:
+                    errors.append(f"message {i}: tool_calls[{j}] ({name}) is missing required arguments: {sorted(missing)}")
     last = msgs[-1]
     if last.get("role") != "assistant":
         errors.append(f"last message must be the target assistant turn, got role={last.get('role')!r}")

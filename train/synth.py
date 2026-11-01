@@ -3,7 +3,8 @@
 Not training data. Session E generates the real data at T+5 to T+9; this exists so the loader,
 driver, fuse and eval hooks can be exercised end to end before the T+7 window. Shapes follow
 CONTRACT.md §1-§3 and the contract system prompt (schemas/system_prompt.md, loaded byte-for-byte,
-placeholders filled for a fixed synthetic "today"): the greeting and the phone-number question are
+`{today}` = the sandbox clock from eval/sandbox/seed.json, dates inside the prompt's two-week calendar,
+tool-call arguments exactly as the live schemas define them): the greeting and the phone-number question are
 already spoken, so every conversation starts with the caller's phone turn; STT-shaped caller turns;
 nothing account-specific before `lookup_account` verifies; read-back before every write; tool calls
 as OpenAI `tool_calls` with JSON-string arguments; tool results as `tool` messages; the seven
@@ -24,12 +25,13 @@ import uuid
 from pathlib import Path
 
 from train.env import repo_root
-from train.prompt import placeholder_values, render_system_prompt, system_prompt_path
+from train.prompt import placeholder_values, render_system_prompt, sandbox_clock, system_prompt_path
 
 TOOLS_DIR = repo_root() / "schemas" / "tools"
 HAS_BLOCK_CARD = (TOOLS_DIR / "block_card.json").exists()  # the lost-card scenarios follow the live contract
-SYNTH_NOW = dt.datetime(2026, 10, 31, 10, 15)  # Saturday; appointments fall in the following two weeks
+SYNTH_NOW = dt.datetime.fromisoformat(sandbox_clock()["clock"])  # the sandbox clock: Monday 2026-11-02 10:00
 TODAY = SYNTH_NOW.date()
+CALENDAR_END = TODAY + dt.timedelta(days=12)  # the prompt's two-week calendar ends Saturday November 14
 
 BRANCHES = {
     "market_st": "Market Street",
@@ -87,12 +89,15 @@ TIMES = {
 
 
 def load_tools() -> list[dict]:
-    """The seven contract tools, sorted by file name (schemas/tools/*.json is the source of truth)."""
+    """The contract tools, sorted by file name (schemas/tools/*.json is the source of truth)."""
     return [json.loads(p.read_text()) for p in sorted(TOOLS_DIR.glob("*.json"))]
 
 
+SCHEMAS = {t["function"]["name"]: t["function"].get("parameters") or {} for t in load_tools()}
+
+
 def system_prompt() -> str:
-    return render_system_prompt(SYNTH_NOW)
+    return render_system_prompt()  # {today} = the sandbox clock, like S and E
 
 
 def spoken_digits(s: str) -> str:
@@ -111,10 +116,11 @@ def short_time(hhmm: str) -> str:
     return TIMES[hhmm][1]
 
 
-def _weekday(rng: random.Random, offset_days: int = 3, span: int = 12) -> dt.date:
+def _weekday(rng: random.Random, offset_days: int = 1, span: int = 11) -> dt.date:
+    """A weekday inside the prompt's calendar (tomorrow .. the second Saturday), never a Sunday."""
     while True:
         d = TODAY + dt.timedelta(days=rng.randint(offset_days, offset_days + span))
-        if d.weekday() < 5:
+        if d.weekday() < 5 and d <= CALENDAR_END:
             return d
 
 
@@ -134,6 +140,17 @@ def assistant(text: str) -> dict:
     return {"role": "assistant", "content": text}
 
 
+def schema_args(name: str, args: dict) -> dict:
+    """Arguments as the live schema defines them: keys outside the schema are dropped (idempotency
+    keys moved to the tool layer on 2026-11-01), required keys must be present."""
+    params = SCHEMAS[name]
+    props = params.get("properties") or {}
+    out = {k: v for k, v in args.items() if k in props}
+    missing = set(params.get("required") or []) - set(out)
+    assert not missing, (name, missing)
+    return out
+
+
 def tool_calls(rng: random.Random, *calls: tuple[str, dict], content: str = "") -> dict:
     """An assistant turn made of tool calls. `content` is a string, never null: the Qwen3 chat
     template runs string operations on assistant content."""
@@ -144,7 +161,7 @@ def tool_calls(rng: random.Random, *calls: tuple[str, dict], content: str = "") 
             {
                 "id": _call_id(rng),
                 "type": "function",
-                "function": {"name": name, "arguments": json.dumps(args, separators=(",", ":"))},
+                "function": {"name": name, "arguments": json.dumps(schema_args(name, args), separators=(",", ":"))},
             }
             for name, args in calls
         ],
@@ -343,8 +360,8 @@ def lost_card(rng: random.Random):
 
 
 def reschedule(rng: random.Random):
-    old_day = _weekday(rng, 2, 4)
-    new_day = _weekday(rng, 7, 6)
+    old_day = _weekday(rng, 1, 4)
+    new_day = _weekday(rng, 7, 5)
     appt = {"appointment_id": f"A-{rng.randint(1000, 9999)}", "service_type": "notary", "branch_id": "mill_rd", "slot_start": f"{old_day.isoformat()}T14:00"}
     c = Caller(rng, appointments=[appt])
     turns = _verified_opening(rng, c)
@@ -408,7 +425,7 @@ def unknown_account(rng: random.Random):
 
 def no_availability(rng: random.Random):
     c = Caller(rng)
-    day = _weekday(rng, 3, 8)
+    day = _weekday(rng, 1, 7)
     next_day = day + dt.timedelta(days=1 if day.weekday() < 4 else 3)
     turns = _verified_opening(rng, c)
     turns += [
@@ -501,7 +518,7 @@ def write_dataset(out_dir: Path, n_train: int = 20, n_valid: int = 4, seed: int 
         "counts": {"train": len(train), "valid": len(valid)},
         "targets_per_conversation": 3,
         "system_prompt": {"path": str(system_prompt_path()), "sha256": sha256_file(system_prompt_path()),
-                          "placeholders": placeholder_values(SYNTH_NOW)},
+                          "placeholders": {"today": placeholder_values()["today"]}},
         "tools": {p.stem: sha256_file(p) for p in sorted(TOOLS_DIR.glob("*.json"))},
         "note": "synthetic dry-run data from the contract's example dialogues; never train a candidate on it",
     }

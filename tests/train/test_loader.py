@@ -126,3 +126,20 @@ def test_cli_prints_20_masks_and_exits_zero(synth_dir, base_4b):
     assert out.returncode == 0, out.stderr[-2000:]
     assert out.stdout.count("=== example") == 20
     assert "ALL CHECKS PASSED" in out.stdout
+
+
+def test_validate_example_checks_tool_call_arguments_against_the_schemas(synth_dir):
+    ok = _first(_examples(synth_dir), "tool_call")
+    assert validate_example(ok) == []
+    bad = json.loads(json.dumps(ok))
+    call = bad["messages"][-1]["tool_calls"][0]["function"]
+    args = json.loads(call["arguments"])
+    args["idempotency_key"] = "abc"
+    call["arguments"] = json.dumps(args)
+    assert any("idempotency_key" in e for e in validate_example(bad))
+    bad = json.loads(json.dumps(ok))
+    call = bad["messages"][-1]["tool_calls"][0]["function"]
+    args = json.loads(call["arguments"])
+    args.pop(sorted(args)[0])
+    call["arguments"] = json.dumps(args)
+    assert any("required" in e for e in validate_example(bad))

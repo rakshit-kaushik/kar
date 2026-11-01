@@ -1,28 +1,26 @@
-"""The contract system prompt: schemas/system_prompt.md loaded byte-for-byte, placeholders filled.
+"""The contract system prompt: schemas/system_prompt.md loaded byte-for-byte, `{today}` filled.
 
-CONTRACT.md §0: one file for S, E and T with placeholders {weekday} {today_long} {today} {now}; the
-serving prompt must be a byte-for-byte prefix of every training example, so everyone must fill the
-placeholders the same way. Formats used here (to be confirmed with S and E):
-    weekday    -> "Saturday"            (%A)
-    today_long -> "November 1, 2026"    (%B D, YYYY)
-    today      -> "2026-11-01"          (ISO)
-    now        -> "10:15"               (%H:%M)
-The file's trailing newline is kept (byte-for-byte). Placeholders absent from the file are simply not
-filled (a prompt with only {today} works). The path follows the contract (schemas/system_prompt.md),
-then services/agent/system_prompt.md, or $R3_SYSTEM_PROMPT_PATH.
+CONTRACT.md §0: one file for S, E and T; single placeholder `{today}` = `eval/sandbox/seed.json["clock_spoken"]`
+("Monday, November second, 2026, ten in the morning"). The serving prompt must be a byte-for-byte
+prefix of every training example, so the value comes from the same seed file everyone reads; the
+file's trailing newline is kept. Legacy placeholders {weekday} {today_long} {now} are filled from the
+sandbox clock if a prompt still has them; unknown braces are left alone. The path follows the
+contract (schemas/system_prompt.md), then services/agent/system_prompt.md, or $R3_SYSTEM_PROMPT_PATH.
 """
 from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import json
 import os
 from pathlib import Path
 
 from train.env import load_env, repo_root
 
-PLACEHOLDERS = ("weekday", "today_long", "today", "now")
-# first existing file wins; $R3_SYSTEM_PROMPT_PATH overrides (the human may move the file to services/agent/)
+PLACEHOLDERS = ("today", "weekday", "today_long", "now")
 CANDIDATE_PATHS = ("schemas/system_prompt.md", "services/agent/system_prompt.md")
+SEED_PATH = repo_root() / "eval" / "sandbox" / "seed.json"
+CONTRACT_CLOCK = {"clock": "2026-11-02T10:00", "clock_spoken": "Monday, November second, 2026, ten in the morning"}
 
 
 def system_prompt_path() -> Path:
@@ -40,26 +38,38 @@ def system_prompt_path() -> Path:
 SYSTEM_PROMPT_PATH = repo_root() / CANDIDATE_PATHS[0]  # the contract's location (for messages and manifests)
 
 
+def sandbox_clock() -> dict:
+    """`clock` (ISO) and `clock_spoken` from eval/sandbox/seed.json ($R3_SANDBOX_SEED overrides);
+    the contract's stated clock when the seed file is not merged yet."""
+    load_env()
+    path = Path(os.environ.get("R3_SANDBOX_SEED") or SEED_PATH)
+    if path.exists():
+        seed = json.loads(path.read_text())
+        return {"clock": seed["clock"], "clock_spoken": seed["clock_spoken"]}
+    return dict(CONTRACT_CLOCK)
+
+
 def system_prompt_template() -> str:
     return system_prompt_path().read_text()
 
 
-def placeholder_values(now: dt.datetime) -> dict[str, str]:
+def placeholder_values(now: dt.datetime | None = None, clock_spoken: str | None = None) -> dict[str, str]:
+    clock = sandbox_clock()
+    now = now or dt.datetime.fromisoformat(clock["clock"])
     return {
+        "today": clock_spoken or clock["clock_spoken"],
         "weekday": now.strftime("%A"),
         "today_long": f"{now.strftime('%B')} {now.day}, {now.year}",
-        "today": now.date().isoformat(),
         "now": now.strftime("%H:%M"),
     }
 
 
-def render_system_prompt(now: dt.datetime, template: str | None = None) -> str:
+def render_system_prompt(now: dt.datetime | None = None, template: str | None = None, **overrides: str) -> str:
     text = template if template is not None else system_prompt_template()
-    for key, value in placeholder_values(now).items():
+    values = placeholder_values(now)
+    values.update(overrides)
+    for key, value in values.items():
         text = text.replace("{" + key + "}", value)
-    missing = [k for k in PLACEHOLDERS if "{" + k + "}" in text]
-    if missing:
-        raise ValueError(f"unfilled placeholders in system prompt: {missing}")
     return text
 
 
