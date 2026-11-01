@@ -108,7 +108,7 @@ def latency_table(con) -> str:
         rows.append([run_id, fmt(n)] + [f"{fmt(m.get(k + '.p50'))} / {fmt(m.get(k + '.p95'))}" for k, _ in cols] + [flags])
     return md_table(header, rows) + ("\n\n_Milliseconds (prompt tok = tokens). Caller-clock numbers include the Mac's network path; see RUNBOOK (hotspot). "
             "claims = calls with a spoken success claim and no matching tool result; loop guard = calls where the agent replaced a repeated line; "
-            "claim guard = calls where the agent recorded request_handoff before a transfer the model announced without calling it "
+            "claim guard = calls where the agent intervened on a claim the model made without a tool result: recorded request_handoff before an announced transfer, or held back a booked/moved/cancelled/ticket sentence and asked instead "
             "(both application interventions, identical for every model, never the model's own recovery). Known turn-taking limitation: the endpointing window "
             "(0.25-2.0 s) splits digit strings read with pauses into two caller turns; not tuned further in this sprint._")
 
@@ -144,7 +144,7 @@ def cost_tables(con, rates: dict, eval_ids: list[str]) -> str:
 
 def rehearsal_table(con) -> str:
     """Per demo scenario from scripts/demo_check.py's ledger rows: passed/runs, calls where the loop or claim guard intervened, TTS vendor."""
-    names = ("ordinary", "correction", "timeout", "interruption", "handoff")
+    names = ("ordinary", "correction", "timeout", "interruption", "handoff", "handoff_person")
     runs: dict[str, dict[str, tuple[float, str]]] = {}
     for run_id, item, qty, note in con.execute("select run_id, item, qty, note from cost_ledger where run_id like 'rehearsal-%' and item like 'rehearsal.%' order by id").fetchall():
         runs.setdefault(run_id, {})[item] = (float(qty), note or "")
@@ -166,7 +166,7 @@ def rehearsal_table(con) -> str:
                 vendors.add(m.group(1))
         rows.append([run_id] + cells + ["/".join(sorted(vendors)) or "?"])
     note = ("\n\n_pass = expected final state reached with no success claim before its tool result, no ids spoken, no structural text; "
-            "(guard n) = calls in which the agent's loop guard replaced a repeated line; (claim n) = calls in which the agent recorded request_handoff before a transfer "
+            "(guard n) = calls in which the agent's loop guard replaced a repeated line; (claim n) = calls in which the agent's claim guard intervened (recorded request_handoff before an announced transfer, or held back an unsupported booked/moved/cancelled/ticket sentence) "
             "the model announced without the call; both application interventions counted apart from the model. "
             "Recordings per call under $R3_ARTIFACTS/runs/<rehearsal run>/audio; the simulated caller's recordings are labelled recorded, never live._")
     return (md_table(["rehearsal run (model, stamp)"] + list(names) + ["TTS"], rows) + note) if rows else "_no rehearsal yet_"
