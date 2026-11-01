@@ -179,3 +179,30 @@ def test_external_runner_command_template_and_cwd_are_honoured(tmp_path, monkeyp
     assert res["runner"] == "r3-eval" and res["returncode"] == 0 and res["cwd"] == str(cwd)
     rows = collect_results("rid", "r3-voice-x", tmp_path / "out", None)
     assert rows[0]["pass"] is True and rows[0]["detail"] == {"cwd": str(cwd), "no_db": True}
+
+
+def test_serve_only_keeps_the_side_stack_up_until_the_stop_file(tmp_path, monkeypatch):
+    from train.eval_hook import serve_side_stack
+
+    monkeypatch.setenv("R3_EVAL_SERVER_CMD", f"{sys.executable} {HERE / 'fake_server.py'} {{port}} {{name}}")
+    port = _free_port()
+    out = tmp_path / "serve"
+    stop = out / "STOP"
+    import threading
+
+    def stopper():
+        import time as _t
+
+        for _ in range(100):
+            if (out / "serving.json").exists():
+                break
+            _t.sleep(0.2)
+        stop.write_text("")
+
+    threading.Thread(target=stopper, daemon=True).start()
+    info = serve_side_stack(tmp_path / "base", "r3-voice-base", port=port, out_dir=out, minutes=5, poll_seconds=0.2)
+    assert info["proxy"]["base_url"] == f"http://127.0.0.1:{port + 1}/v1" and info["warmup"]["ok"] is True
+    assert info["stopped_by"] == "stop_file" and info["model_pid"] and info["proxy_pid"]
+    served = json.loads((out / "serving.json").read_text())
+    assert served["base_url"] == f"http://127.0.0.1:{port + 1}/v1"
+    assert wait_for_health(info["proxy"]["base_url"], timeout=2) is False  # both are down again

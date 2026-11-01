@@ -124,7 +124,7 @@ def runner_command() -> tuple[list[str], Path]:
         cwd = Path(os.environ.get("R3_EVAL_RUNNER_CWD") or REPO_ROOT)
         return cmd, cwd
     exe = Path(sys.executable).with_name("r3-eval")
-    return [str(exe) if exe.exists() else "r3-eval"], REPO_ROOT
+    return [str(exe) if exe.exists() else "r3-eval", "run"], REPO_ROOT  # E's CLI: `r3-eval run ...`
 
 
 def run_r3_eval(base_url: str, model: str, scenarios: str | Path, out_dir: str | Path, run_id: str,
@@ -327,6 +327,60 @@ def evaluate_model_dir(model_dir: str | Path, model_name: str, run_id: str, scen
     return table
 
 
+def serve_side_stack(model_dir: str | Path, model_name: str, port: int, out_dir: str | Path, minutes: float = 60.0,
+                     adapter: str | Path | None = None, base: str | Path | None = None, poll_seconds: float = 5.0,
+                     timeout: float = 600.0) -> dict:
+    """Keep a model server + S's proxy (fallback off) up on side ports for another session's eval:
+    writes <out>/serving.json (urls, pids) once warm, then waits until <out>/STOP exists or `minutes`
+    pass, and stops both. Hold the GPU lock around it."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stop_file = out_dir / "STOP"
+    if stop_file.exists():
+        stop_file.unlink()
+    cmd = server_command(model=str(base or model_dir), port=port, name=model_name, adapter=str(adapter) if adapter else None)
+    request_model = request_model_for(cmd, model_name)
+    model_url = f"http://127.0.0.1:{port}/v1"
+    proxy_port = port + 1
+    proxy_url = f"http://127.0.0.1:{proxy_port}/v1"
+    info = {"model_dir": str(model_dir), "model_name": model_name, "request_model": request_model, "command": cmd,
+            "model_url": model_url, "proxy": {"port": proxy_port, "base_url": proxy_url}, "base_url": proxy_url,
+            "out_dir": str(out_dir), "stop_file": str(stop_file), "started_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")}
+    print(f"[serve] {' '.join(cmd)}", flush=True)
+    proc = start_server(cmd, out_dir / "server.log")
+    proxy = None
+    try:
+        if not wait_for_health(model_url, timeout=timeout, proc=proc):
+            raise RuntimeError(f"model server not healthy within {timeout:.0f}s; see {out_dir / 'server.log'}")
+        info["warmup"] = warm_up(model_url, request_model)
+        if not info["warmup"]["ok"]:
+            raise RuntimeError(f"warm-up failed: {info['warmup'].get('error')}")
+        proxy = start_proxy(port, proxy_port, out_dir / "proxy.log")
+        if not wait_for_health(proxy_url, timeout=60, proc=proxy):
+            raise RuntimeError(f"proxy not healthy on :{proxy_port}; see {out_dir / 'proxy.log'}")
+        info.update(model_pid=proc.pid, proxy_pid=proxy.pid, ready_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+        (out_dir / "serving.json").write_text(json.dumps(info, indent=2) + "\n")
+        print(f"[serve] up: score at {proxy_url} with model {request_model!r}; stop with `touch {stop_file}` or after {minutes:g} min", flush=True)
+        deadline = time.time() + minutes * 60
+        info["stopped_by"] = "timeout"
+        while time.time() < deadline:
+            if stop_file.exists():
+                info["stopped_by"] = "stop_file"
+                break
+            if proc.poll() is not None or proxy.poll() is not None:
+                info["stopped_by"] = "process_exit"
+                break
+            time.sleep(poll_seconds)
+    finally:
+        if proxy is not None:
+            stop_server(proxy)
+        stop_server(proc)
+        info["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+        (out_dir / "serving.json").write_text(json.dumps(info, indent=2) + "\n")
+        print(f"[serve] down ({info.get('stopped_by', 'error')})", flush=True)
+    return info
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model-dir", required=True, type=Path, help="versioned fused model dir ($R3_ARTIFACTS/models/<id>)")
@@ -343,8 +397,14 @@ def main(argv=None) -> int:
     ap.add_argument("--tolerance", type=float, default=1.0)
     ap.add_argument("--scorer", default=None, help="gate on one scorer (default: overall pass rate)")
     ap.add_argument("--no-db", action="store_true")
+    ap.add_argument("--serve-only", action="store_true", help="keep the side stack up for another session's eval (no scoring)")
+    ap.add_argument("--minutes", type=float, default=60.0, help="--serve-only: stop after this many minutes (or when <out>/STOP exists)")
     a = ap.parse_args(argv)
     name = a.model_name or a.model_dir.name
+    if a.serve_only:
+        out = a.out or (a.model_dir / "serve")
+        serve_side_stack(a.model_dir, name, port=a.port, out_dir=out, minutes=a.minutes, timeout=a.timeout)
+        return 0
     run_id = a.run_id or f"eval-{name}-{time.strftime('%Y%m%d-%H%M%S')}"
     out = a.out or (a.model_dir / "eval" / run_id)
     db = None if a.no_db else "env"
