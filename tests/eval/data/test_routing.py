@@ -135,7 +135,7 @@ def test_routing_prompt_matches_session_t_byte_for_byte():
     ns: dict = {}
     body = src.split("ROUTING_SYSTEM_PROMPT = (")[1].split("\n)\n")[0]
     defs = src.split("DEFINITIONS = {")[1].split("\n}\n")[0]
-    exec(
+    exec(  # noqa: S102
         "LABELS = "
         + repr(LABELS)
         + "\nDEFINITIONS = {"

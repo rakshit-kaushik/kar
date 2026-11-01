@@ -55,6 +55,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-length-check", action="store_true", help="skip the 2,048-token filter (no tokenizer)"
     )
     p.add_argument("--scenarios-only", action="store_true", help="write the scenarios and stop")
+    p.add_argument(
+        "--profile",
+        default="default",
+        choices=["default", "short"],
+        help="short = status/cancel/handoff calls only",
+    )
+    p.add_argument(
+        "--no-build", action="store_true", help="run the episodes, skip the dataset build"
+    )
     return p
 
 
@@ -63,7 +72,7 @@ def main(argv: list[str] | None = None) -> int:
     a = build_parser().parse_args(argv)
     out = Path(a.out)
     name = a.name or out.name
-    scenarios = generate(a.n, seed=a.seed, mix=a.mix)
+    scenarios = generate(a.n, seed=a.seed, mix=a.mix, profile=a.profile)
     write_dir(scenarios, out / "scenarios")
     loaded = load_scenarios(out / "scenarios")
     print(f"{len(loaded)} scenarios -> {out / 'scenarios'}", file=sys.stderr)
@@ -105,6 +114,8 @@ def main(argv: list[str] | None = None) -> int:
             progress=lambda line: print(line, file=sys.stderr),
         )
     )
+    if a.no_build:
+        return 0
     fits = None
     if not a.no_length_check:
         from data.format.length import LengthChecker

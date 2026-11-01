@@ -101,7 +101,7 @@ async def test_build_filters_failed_episodes_and_writes_dataset(tmp_path):
         "stt_rule_version",
         "scenario_ids",
         "scorer_verdicts",
-        "run_dir",
+        "run_dirs",
         "built_at",
         "teacher_model_id",
     }
@@ -170,3 +170,45 @@ def test_generation_cli_parser():
         ["--n", "10", "--out", "/tmp/y", "--mix", "ordinary=4,correction=1", "--no-length-check"]
     )
     assert b.mix == {"ordinary": 4.0, "correction": 1.0} and b.no_length_check is True
+
+
+@pytest.mark.asyncio
+async def test_build_reports_closing_coverage_and_accepts_several_run_dirs(tmp_path):
+    r1, r2 = tmp_path / "run1", tmp_path / "run2"
+    await run_scenarios(
+        scenarios()[:1],
+        agent_factory,
+        caller_factory,
+        out_dir=r1,
+        run_id="g1",
+        model_id="teacher",
+        parallel=1,
+        repeats=1,
+    )
+    await run_scenarios(
+        scenarios()[1:2],
+        agent_factory,
+        caller_factory,
+        out_dir=r2,
+        run_id="g2",
+        model_id="teacher",
+        parallel=1,
+        repeats=1,
+    )
+    stats = build_dataset(
+        [r1, r2],
+        tmp_path / "ds",
+        name="two",
+        fits=lambda ex: ex["meta"]["kind"] != "closing",
+        valid_frac=0.0,
+        seed=0,
+    )
+    assert stats["episodes"]["generated"] == 2 and stats["closing_coverage"] == 0.0
+    m = json.loads((tmp_path / "ds" / "manifest.json").read_text())
+    assert m["closing_coverage"] == 0.0 and m["provenance"]["run_dirs"] == [str(r1), str(r2)]
+    assert m["provenance"]["batches"] == {
+        "g1": {"generated": 1, "kept": 1},
+        "g2": {"generated": 1, "kept": 1},
+    }
+    stats2 = build_dataset(r1, tmp_path / "ds2", name="one", fits=None, valid_frac=0.0, seed=0)
+    assert stats2["closing_coverage"] == 1.0

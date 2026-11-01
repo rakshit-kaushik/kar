@@ -116,8 +116,9 @@ def test_signatures(test_dir: str | Path = TEST_DIR) -> set[tuple]:
 
 
 class _Gen:
-    def __init__(self, seed: int, sb: Sandbox, sigs: set[tuple]):
+    def __init__(self, seed: int, sb: Sandbox, sigs: set[tuple], short: bool = False):
         self.rng = random.Random(seed)
+        self.short = short
         self.sb = sb
         self.sigs = set(sigs)
         self.used: set[tuple] = set()
@@ -255,6 +256,8 @@ class _Gen:
 
     def ordinary(self):
         roll = self.rng.random()
+        if self.short:
+            roll = self.rng.choice([0.1, 0.3, 0.9])  # status, cancel or a catalog question
         if roll < 0.2:
             cust = self.customer(with_appointment=True)
             return self.base(
@@ -339,6 +342,31 @@ class _Gen:
                         ]
                     },
                     "max_turns": 12,
+                },
+            )
+        if self.short and roll >= 0.85:
+            cust = self.customer()
+            q, mention = self.rng.choice(
+                [
+                    ("what the Saturday opening hours are", "nine"),
+                    ("how much a notary appointment costs", "ten dollars"),
+                    ("how much a safe deposit box costs", "sixty dollars"),
+                    ("whether a financial review costs anything", "free"),
+                    ("what the weekday hours are", "nine to five"),
+                ]
+            )
+            return self.base(
+                "ordinary",
+                f"{cust.first_name} asks a catalog question",
+                "Catalog fact spoken correctly, no tool writes, short close",
+                self.caller(cust),
+                f"After verification ask {q}. Accept the answer, say thanks and hang up. Nothing else.",
+                {
+                    "tool_calls": [self.lookup_step(cust)],
+                    "forbidden_tools": WRITE_TOOLS,
+                    "must_mention": [mention],
+                    "final_state": {},
+                    "max_turns": 8,
                 },
             )
         cust = self.customer()
@@ -480,7 +508,7 @@ class _Gen:
         )
 
     def duplicate(self):
-        if self.rng.random() < 0.5:
+        if self.short or self.rng.random() < 0.5:
             cust = self.customer(with_appointment=True)
             ap = self.sb.customer_appointments(cust.customer_id)[0]
             return self.base(
@@ -744,11 +772,17 @@ def _quota(n: int, weights: dict[str, float]) -> list[str]:
 
 
 def generate(
-    n: int, seed: int = 0, mix: dict[str, float] | None = None, test_dir: str | Path = TEST_DIR
+    n: int,
+    seed: int = 0,
+    mix: dict[str, float] | None = None,
+    test_dir: str | Path = TEST_DIR,
+    profile: str = "default",
 ) -> list[dict]:
     """n schema-valid generation scenarios; `mix` = family weights (default: equal), met by quota."""
     sb = Sandbox()
-    gen = _Gen(seed, sb, test_signatures(test_dir))
+    gen = _Gen(seed, sb, test_signatures(test_dir), short=profile == "short")
+    if profile == "short" and mix is None:
+        mix = {"ordinary": 5, "needs_person": 3, "duplicate": 1}
     weights = mix or dict.fromkeys(FAMILIES, 1)
     out: list[dict] = []
     counters: dict[str, int] = dict.fromkeys(FAMILIES, 0)
@@ -756,9 +790,10 @@ def generate(
     for fam in _quota(n, weights):
         for _ in range(60):
             d = _Gen.BUILDERS[fam](gen)
-            if d is None or d["goal"] in goals:
+            key = (d["goal"], d["caller"]["persona"]) if d else None
+            if d is None or key in goals:
                 continue
-            goals.add(d["goal"])
+            goals.add(key)
             k = counters[fam]
             counters[fam] += 1
             d["id"] = f"gen_{fam}_{_batch_letters(k // 100)}_{k % 100:02d}"

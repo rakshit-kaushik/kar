@@ -68,25 +68,30 @@ def build_dataset(
     seed: int = 0,
     max_targets: int = 3,
 ) -> dict:
-    run_dir, out = Path(run_dir), Path(out_dir)
+    run_dirs = [Path(r) for r in (run_dir if isinstance(run_dir, list) else [run_dir])]
+    out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    results = _load_run(run_dir)
+    results = [r for d in run_dirs for r in _load_run(d)]
+    batches: dict[str, dict] = {}
     by_kind = {
         k: {"generated": 0, "kept": 0, "brevity": 0, "length": 0} for k in KINDS if k != "other"
     }
     verdicts: dict[str, dict] = {}
     rows: dict[str, list[dict]] = {"train": [], "valid": []}
     tpc: Counter[int] = Counter()
-    n_failed = 0
+    n_failed = n_closing = 0
     teacher = results[0][0].model_id if results else None
     system_text = None
     for ep, scores in results:
         key = f"{ep.scenario_id}-s{ep.repeat_seed}"
         failed = [s.scorer for s in scores if not s.passed and not s.advisory]
         verdicts[key] = {"all_pass": all_pass(scores), "failed": failed, "outcome": ep.outcome}
+        b = batches.setdefault(ep.run_id, {"generated": 0, "kept": 0})
+        b["generated"] += 1
         if not all_pass(scores):
             n_failed += 1
             continue
+        b["kept"] += 1
         if system_text is None and ep.messages and ep.messages[0].get("role") == "system":
             system_text = ep.messages[0]["content"]
         chosen, dropped = select_targets(ep, fits=fits, max_targets=max_targets)
@@ -98,6 +103,8 @@ def build_dataset(
             by_kind[t.kind]["generated"] += 1
             by_kind[t.kind][t.reason] += 1
         tpc[len(chosen)] += 1
+        if any(t.kind == "closing" for t in chosen):
+            n_closing += 1
     for split, items in rows.items():
         with (out / f"{split}.jsonl").open("w") as fh:
             for ex in items:
@@ -114,6 +121,7 @@ def build_dataset(
         "histogram": {str(k): v for k, v in sorted(tpc.items())},
     }
     stats = {
+        "closing_coverage": round(n_closing / kept_eps, 3) if kept_eps else 0.0,
         "episodes": {"generated": len(results), "kept": kept_eps, "scorer_failed": n_failed},
         "targets": {
             "generated": generated_t,
@@ -133,6 +141,7 @@ def build_dataset(
         "n_examples": {s: len(items) for s, items in rows.items()},
         "max_seq_length": 2048,
         "targets_per_conversation": tpc_stats,
+        "closing_coverage": stats["closing_coverage"],
         "drops": {
             "scorer_failed_episodes": n_failed,
             "brevity_targets": dropped["brevity"],
@@ -149,7 +158,8 @@ def build_dataset(
             "stt_rule_version": STT_RULE_VERSION,
             "scenario_ids": sorted({ep.scenario_id for ep, _ in results}),
             "scorer_verdicts": verdicts,
-            "run_dir": str(run_dir),
+            "run_dirs": [str(d) for d in run_dirs],
+            "batches": batches,
             "built_at": datetime.now().isoformat(timespec="seconds"),
             "teacher_model_id": teacher,
             "episodes": stats["episodes"],

@@ -68,3 +68,15 @@ def test_write_dir_round_trips_through_the_loader(tmp_path):
     loaded = load_scenarios(tmp_path)
     assert [s.id for s in loaded] == sorted(s["id"] for s in out)
     assert json.loads(paths[0].read_text())["id"] == out[0]["id"]
+
+
+def test_short_profile_yields_short_call_scenarios_only():
+    out = generate(40, seed=11, profile="short")
+    fams = Counter(s["family"] for s in out)
+    assert set(fams) <= {"ordinary", "needs_person", "duplicate"} and fams["ordinary"] >= 15
+    for s in out:
+        tools = [t["tool"] for t in s["expect"]["tool_calls"]]
+        assert "book_appointment" not in tools and "reschedule_appointment" not in tools
+        assert s["expect"]["max_turns"] <= 12
+    sb = Sandbox()
+    assert all(not validate_against_seed(parse_scenario(d, d["id"]), sb) for d in out)
