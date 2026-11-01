@@ -44,6 +44,12 @@ def fmt(xs, unit="ms"):
     return f"p50 {pct(xs, 0.5):.0f} {unit} · p95 {pct(xs, 0.95):.0f} {unit} · n={len(xs)}"
 
 
+def loop_guard_interventions(events) -> int:
+    """`loop_guard` turn events: the agent swallowed an exact repeat (rephrase, then handoff). An application intervention, never
+    the model's own recovery; reported beside unsupported_claim_calls (reviewer condition, Nov 1)."""
+    return sum(1 for e in events if e[3] == "loop_guard")
+
+
 def filler_timing(turn_events, anchor):
     """For a turn that spoke a filler before a tool call: (eos -> filler audible, eos -> first audible reply) in ms on the agent
     clock, each None when that audio never came; (None, None) for turns without a filler_start event."""
@@ -150,13 +156,13 @@ def main() -> None:
                 if e[3] == "tts_first_audio" and e[5].get("ttfb") is not None: M["tts_ttfb"].append(e[5]["ttfb"] * 1000)
                 if e[3] == "stt_final" and not first("caller_speech_end"): pass
         s = sessions.get(call_id)
-        per_call.append((call_id, model, n_turns, lookup_ok, leaks, fallbacks, ",".join(tools) or "-", s[1] if s else "?", claims))
+        per_call.append((call_id, model, n_turns, lookup_ok, leaks, fallbacks, ",".join(tools) or "-", s[1] if s else "?", claims, loop_guard_interventions(evs)))
 
     kind = "simulated audio calls" if simulated == len(per_call) else ("live browser calls" if simulated == 0 else "mixed live/simulated calls")
     print(f"calls: {len(per_call)} ({kind})   model: {per_call[0][1]}")
-    print(f"{'call_id':<24} {'turns':>5} {'lookup':>6} {'leaks':>5} {'fallbk':>6}  outcome    tools")
+    print(f"{'call_id':<24} {'turns':>5} {'lookup':>6} {'leaks':>5} {'fallbk':>6} {'claims':>6} {'guard':>5}  outcome    tools")
     for c in per_call:
-        print(f"{c[0]:<24} {c[2]:>5} {'ok' if c[3] else 'NO':>6} {c[4]:>5} {c[5]:>6}  {str(c[7]):<10} {c[6]}")
+        print(f"{c[0]:<24} {c[2]:>5} {'ok' if c[3] else 'NO':>6} {c[4]:>5} {c[5]:>6} {c[8]:>6} {c[9]:>5}  {str(c[7]):<10} {c[6]}")
     print()
     print(f"end of speech -> first audio heard   {fmt(M['eos_to_first_audio_heard'])}   (target p50 ≤ 1000, p95 ≤ 1600)")
     print(f"end of speech -> first audible TTS   {fmt(M['eos_to_tts_audible'])}   (agent clock)")
@@ -174,12 +180,13 @@ def main() -> None:
         print(f"agent joined after caller            {fmt(M['agent_dispatch'])}")
     ok_calls = sum(1 for c in per_call if c[3]); leak_calls = sum(1 for c in per_call if c[4]); fb_total = sum(c[5] for c in per_call)
     claim_calls = sum(1 for c in per_call if c[8])
+    guard_calls = sum(1 for c in per_call if c[9]); guard_total = sum(c[9] for c in per_call)
     print(f"\nG1: lookups completed {ok_calls}/{len(per_call)}; calls with structural speech {leak_calls}; hosted fallbacks {fb_total}; "
-          f"unsupported success claims {claim_calls} calls; {'PASS' if ok_calls >= 10 and leak_calls == 0 and claim_calls == 0 else 'not yet'}")
+          f"unsupported success claims {claim_calls} calls; loop guard {guard_total} interventions in {guard_calls} calls; {'PASS' if ok_calls >= 10 and leak_calls == 0 and claim_calls == 0 else 'not yet'}")
 
     if args.ledger:
         note = args.note or f"{kind} matching {args.like}"
-        items = [("calls", len(per_call), "calls"), ("lookups_ok", ok_calls, "calls"), ("structural_leak_calls", leak_calls, "calls"), ("unsupported_claim_calls", claim_calls, "calls"), ("filler_turns", filler_turns, "turns"), ("fallbacks", fb_total, "requests")]
+        items = [("calls", len(per_call), "calls"), ("lookups_ok", ok_calls, "calls"), ("structural_leak_calls", leak_calls, "calls"), ("unsupported_claim_calls", claim_calls, "calls"), ("loop_guard_calls", guard_calls, "calls"), ("loop_guard_interventions", guard_total, "turns"), ("filler_turns", filler_turns, "turns"), ("fallbacks", fb_total, "requests")]
         for name in ("eos_to_first_audio_heard", "eos_to_tts_audible", "eos_to_filler_audible", "eos_to_reply_audible", "transport", "turn_taking_overhead", "eou_delay", "transcription_delay", "llm_ttft_local", "llm_ttft_hosted", "llm_ttft_tool", "llm_ttft_spoken", "decode_tok_s", "tts_ttfb", "prompt_tokens", "completion_tokens", "agent_dispatch"):
             xs = M.get(name) or []
             unit = "tok/s" if name == "decode_tok_s" else ("tok" if "tokens" in name else "ms")

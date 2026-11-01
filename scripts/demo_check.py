@@ -14,7 +14,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import psycopg  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
-from services.demo.check import SCENARIOS, check_call  # noqa: E402
+from services.demo.check import SCENARIOS, call_summary, check_call  # noqa: E402
 
 load_dotenv(pathlib.Path(__file__).resolve().parents[1] / ".env")
 
@@ -31,21 +31,26 @@ def main() -> int:
         if not calls:
             print(f"no sessions match {args.like}")
             return 1
-        passed, model = 0, calls[0][1]
+        passed, guarded, vendors, model = 0, 0, set(), calls[0][1]
         print(f"scenario {args.scenario}   model {model}   calls {len(calls)}")
         for call_id, _, outcome, state in calls:
             evs = con.execute("select call_id, turn_idx, model_id, event, ts_ms, payload from turn_events where call_id = %s order by ts_ms, id", (call_id,)).fetchall()
             reasons = check_call(args.scenario, state or {}, evs)
+            info = call_summary(evs)
             passed += not reasons
-            print(f"  {call_id:<42} {str(outcome):<10} {'PASS' if not reasons else 'FAIL: ' + '; '.join(reasons)}")
-        print(f"{args.scenario}: {passed}/{len(calls)} passed")
+            guarded += bool(info["guard"])
+            vendors.add(info["tts"])
+            print(f"  {call_id:<42} {str(outcome):<10} guard={info['guard']} tts={info['tts']:<9} {'PASS' if not reasons else 'FAIL: ' + '; '.join(reasons)}")
+        print(f"{args.scenario}: {passed}/{len(calls)} passed; loop guard intervened in {guarded} call(s); tts {'/'.join(sorted(vendors))}")
         if args.ledger:
             run_id = args.run_id or f"rehearsal-{model}"
-            for item, qty in ((f"rehearsal.{args.scenario}.pass", passed), (f"rehearsal.{args.scenario}.runs", len(calls))):
+            note = f"tts={'/'.join(sorted(vendors))}; scripts/demo_check.py --like {args.like!r}"
+            rows = ((f"rehearsal.{args.scenario}.pass", passed), (f"rehearsal.{args.scenario}.runs", len(calls)), (f"rehearsal.{args.scenario}.guarded", guarded))
+            for item, qty in rows:
                 con.execute("insert into cost_ledger(run_id, model_id, item, qty, unit, measured, note) values (%s,%s,%s,%s,%s,true,%s)",
-                            (run_id, model, item, qty, "calls", f"scripts/demo_check.py --like {args.like!r}"))
+                            (run_id, model, item, qty, "calls", note))
             con.commit()
-            print(f"ledger: 2 rows under {run_id}")
+            print(f"ledger: {len(rows)} rows under {run_id}")
     return 0
 
 

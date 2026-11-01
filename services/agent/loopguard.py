@@ -4,7 +4,8 @@ E's run-1 eval found 6 of 81 episodes repeating one assistant line three or more
 instead of handing off); the first live calls on the candidate showed the same loop in 2 of 4 calls. The guard holds a
 streaming reply only while it is still identical to the previous assistant line (ordinary replies diverge within the first
 words, so they stream untouched); an exact repeat is swallowed and REPHRASE is spoken instead, a second consecutive repeat
-becomes HANDOFF_LINE plus a request_handoff recorded by the agent. The model never sees the guard: what was spoken is what
+becomes HANDOFF_LINE plus a request_handoff recorded by the agent. A repeated farewell is exempt (the caller kept saying
+goodbye without hanging up). The model never sees the guard: what was spoken is what
 enters the chat context. AGENT_LOOP_GUARD=0 turns it off; every intervention is a `loop_guard` turn event."""
 from __future__ import annotations
 
@@ -17,8 +18,16 @@ REPHRASE = os.environ.get("AGENT_LOOP_REPHRASE", "Sorry, I may have missed that.
 HANDOFF_LINE = os.environ.get("AGENT_LOOP_HANDOFF_LINE", "I'm sorry, I'm having trouble with this one. Let me get a colleague to help you.")
 
 
+FAREWELL_RE = re.compile(r"\b(goodbye|good bye|bye|take care|have a (good|great|nice) (day|one|evening|afternoon|morning))\b")
+
+
 def normalize(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
+
+
+def is_farewell(norm: str | None) -> bool:
+    """A repeated closing line is not a loop: the caller kept saying goodbye without hanging up."""
+    return bool(norm) and FAREWELL_RE.search(norm) is not None
 
 
 class TurnFilter:
@@ -70,7 +79,7 @@ async def guarded_stream(source: AsyncIterable[Any], guard: LoopGuard, on_loop: 
         async for chunk in source:
             yield chunk
         return
-    turn, held = TurnFilter(guard.prev), []
+    turn, held = TurnFilter(None if is_farewell(guard.prev) else guard.prev), []
     async for chunk in source:
         text = _text_of(chunk)
         if not text:

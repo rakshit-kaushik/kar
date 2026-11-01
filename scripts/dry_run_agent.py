@@ -63,10 +63,26 @@ async def episode(args, idx: int, quiet: bool, turns: list[str] | None = None, c
     api_key = os.environ.get("HOSTED_LLM_API_KEY", "local") if "anthropic" in args.base_url else "local"
     client = AsyncOpenAI(base_url=args.base_url, api_key=api_key, default_headers={"X-R3-Call-Id": call_id}, timeout=httpx.Timeout(60.0, connect=5.0))
     llm_kwargs = {"temperature": args.temperature} if args.temperature is not None else {}  # hosted Claude rejects temperature; local default is 0.2
-    session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, parallel_tool_calls=False, **llm_kwargs), userdata=Data(executor))
-    await session.start(Agent(instructions=SYSTEM_PROMPT, tools=build_livekit_tools(lambda ctx: ctx.userdata.executor)))
+    out = {"verified": False, "booked": False, "leaks": 0, "unsupported_claims": 0, "turn_ms": [], "tool_calls": [], "turns": [], "agent_events": []}
+    if getattr(args, "real_agent", False):
+        # the production wiring (services/agent/main.py): CallData userdata, R3Agent with the loop guard, tools with the filler hook;
+        # fire() collects the agent's own events (filler_start, loop_guard) instead of writing turn_events
+        from services.agent import main as agent_main
 
-    out = {"verified": False, "booked": False, "leaks": 0, "unsupported_claims": 0, "turn_ms": [], "tool_calls": [], "turns": []}
+        data = agent_main.CallData(call_id=call_id, model_id=args.model, state=state, sandbox=sandbox, executor=executor, sink=None)
+        data.fire = lambda event, payload=None: out["agent_events"].append((event, payload or {}))
+
+        async def on_loop(action: str, repeated: str) -> None:
+            out["agent_events"].append(("loop_guard", {"action": action, "repeated": repeated[:200], "repeats": data.guard.repeats}))
+            if action == "handoff":
+                await executor.execute("request_handoff", {"reason": "out_of_scope", "summary": f"agent repeated itself: {repeated[:120]}"})
+
+        session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, parallel_tool_calls=False, **llm_kwargs), userdata=data)
+        agent = agent_main.R3Agent(instructions=agent_main.SYSTEM_PROMPT, tools=agent_main.TOOLS, on_first_audible=lambda p: None, guard=data.guard, on_loop=on_loop)
+    else:
+        session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, parallel_tool_calls=False, **llm_kwargs), userdata=Data(executor))
+        agent = Agent(instructions=SYSTEM_PROMPT, tools=build_livekit_tools(lambda ctx: ctx.userdata.executor))
+    await session.start(agent)
     try:
         for user in turns:
             if not quiet:
@@ -117,6 +133,7 @@ async def main() -> int:
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--temperature", type=float, default=None, help="omit to use the server default (0.2 locally); the hosted endpoint rejects it")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--real-agent", action="store_true", help="use the production agent wiring (R3Agent: loop guard, filler hook, CallData) and report its events")
     args = ap.parse_args()
 
     eps = [await episode(args, i, args.quiet) for i in range(args.repeats)]
@@ -127,6 +144,14 @@ async def main() -> int:
           f"failed lookups total: {sum(e['verification_failures'] for e in eps)}   leaks: {sum(e['leaks'] for e in eps)}   "
           f"unsupported claims: {sum(e['unsupported_claims'] for e in eps)}")
     print(f"turn latency (text, incl. tools): p50={statistics.median(all_ms):.0f} ms  max={max(all_ms)} ms")
+    if args.real_agent:
+        from collections import Counter
+        c = Counter(ev for e in eps for ev, _ in e["agent_events"])
+        print(f"agent events: filler_start={c.get('filler_start', 0)}  loop_guard={c.get('loop_guard', 0)}  " + " ".join(f"{k}={v}" for k, v in c.items() if k not in ("filler_start", "loop_guard")))
+        for e in eps:
+            for ev, payload in e["agent_events"]:
+                if ev == "loop_guard":
+                    print(f"  loop_guard: {payload}")
     ok = sum(e["leaks"] for e in eps) == 0 and any(e["verified"] for e in eps)
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1

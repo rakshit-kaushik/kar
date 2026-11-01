@@ -101,3 +101,12 @@ def test_env_switch(monkeypatch):
     assert LoopGuard.from_env().enabled is False
     monkeypatch.delenv("AGENT_LOOP_GUARD")
     assert LoopGuard.from_env().enabled is True
+
+
+async def test_a_repeated_farewell_is_not_a_loop():
+    # the caller keeps saying goodbye without hanging up: saying goodbye twice is right, a rephrase would be absurd
+    guard = LoopGuard()
+    bye = [Chunk("Thanks for calling Marlow Mutual Bank. Goodbye, Dana.")]
+    assert await collect(guarded_stream(agen(bye), guard, no_loop)) == bye
+    assert await collect(guarded_stream(agen(bye), guard, no_loop)) == bye
+    assert guard.repeats == 0

@@ -90,3 +90,9 @@ def check_call(scenario: str, state: dict[str, Any], events) -> list[str]:
         if bad:
             reasons.append("promised what no tool does: " + ", ".join(bad))
     return reasons
+
+
+def call_summary(events) -> dict[str, Any]:
+    """Per-call facts reported beside the verdict: loop-guard interventions (the agent's, not the model's) and the TTS vendor."""
+    end = next((e[5] for e in events if e[3] == "call_end"), {}) or {}
+    return {"guard": sum(1 for e in events if e[3] == "loop_guard"), "tts": str(end.get("tts_vendor") or "?")}

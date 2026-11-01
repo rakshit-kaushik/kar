@@ -70,3 +70,10 @@ def test_handoff_needs_the_ticket_and_the_transfer_and_no_false_promise():
     assert any("promised what no tool does" in r for r in reasons)
     assert any("no handoff" in r for r in check_call("handoff", {"completed": [ticket()], "handoff": None}, evs))
     assert any("expected one unauthorized_transaction" in r for r in check_call("handoff", {"completed": [], "handoff": good["handoff"]}, evs))
+
+
+def test_call_summary_reports_guard_interventions_and_the_tts_vendor():
+    from services.demo.check import call_summary
+    evs = [_ev("loop_guard", 5, {"action": "rephrase"}), _ev("call_end", 9, {"outcome": "completed", "tts_vendor": "deepgram"})]
+    assert call_summary(evs) == {"guard": 1, "tts": "deepgram"}
+    assert call_summary([]) == {"guard": 0, "tts": "?"}

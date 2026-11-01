@@ -100,12 +100,15 @@ def latency_table(con) -> str:
         return "_no simulated-call batches yet_"
     cols = [("g1.eos_to_first_audio_heard", "eos→audio heard"), ("g1.eos_to_tts_audible", "eos→TTS audible"), ("g1.transport", "transport"),
             ("g1.turn_taking_overhead", "turn-taking"), ("g1.llm_ttft_local", "LLM TTFT (local)"), ("g1.tts_ttfb", "TTS TTFB"), ("g1.prompt_tokens", "prompt tok")]
-    header = ["batch", "calls (n turns)"] + [f"{c} p50/p95" for _, c in cols]
+    header = ["batch", "calls (n turns)"] + [f"{c} p50/p95" for _, c in cols] + ["claims / guard (calls)"]
     rows = []
     for run_id, m in sorted(runs.items()):
         n = m.get("g1.eos_to_first_audio_heard.n") or m.get("g1.llm_ttft_local.n")
-        rows.append([run_id, fmt(n)] + [f"{fmt(m.get(k + '.p50'))} / {fmt(m.get(k + '.p95'))}" for k, _ in cols])
-    return md_table(header, rows) + "\n\n_Milliseconds (prompt tok = tokens). Caller-clock numbers include the Mac's network path; see RUNBOOK (hotspot)._"
+        flags = f"{fmt(m.get('g1.unsupported_claim_calls'))} / {fmt(m.get('g1.loop_guard_calls'))} of {fmt(m.get('g1.calls'))}"
+        rows.append([run_id, fmt(n)] + [f"{fmt(m.get(k + '.p50'))} / {fmt(m.get(k + '.p95'))}" for k, _ in cols] + [flags])
+    return md_table(header, rows) + ("\n\n_Milliseconds (prompt tok = tokens). Caller-clock numbers include the Mac's network path; see RUNBOOK (hotspot). "
+            "claims = calls with a spoken success claim and no matching tool result; guard = calls where the agent's loop guard replaced a repeated line "
+            "(an application intervention, identical for every model, never the model's own recovery)._")
 
 
 def load_table(con) -> str:
@@ -138,16 +141,30 @@ def cost_tables(con, rates: dict, eval_ids: list[str]) -> str:
 
 
 def rehearsal_table(con) -> str:
-    """Pass counts per demo scenario from scripts/demo_check.py's ledger rows (rehearsal.<scenario>.pass / .runs)."""
+    """Per demo scenario from scripts/demo_check.py's ledger rows: passed/runs, calls where the loop guard intervened, TTS vendor."""
     names = ("ordinary", "correction", "timeout", "interruption", "handoff")
+    runs: dict[str, dict[str, tuple[float, str]]] = {}
+    for run_id, item, qty, note in con.execute("select run_id, item, qty, note from cost_ledger where run_id like 'rehearsal-%' and item like 'rehearsal.%' order by id").fetchall():
+        runs.setdefault(run_id, {})[item] = (float(qty), note or "")
     rows = []
-    for run_id, m in sorted(ledger_metrics(con, "rehearsal-%").items()):
-        items = {k: v for k, v in m.items() if k.startswith("rehearsal.")}
-        if not items:
-            continue
-        cells = [f"{int(items[f'rehearsal.{s}.pass'])}/{int(items[f'rehearsal.{s}.runs'])}" if items.get(f"rehearsal.{s}.runs") else "-" for s in names]
-        rows.append([run_id] + cells)
-    return md_table(["rehearsal run (model, stamp)"] + list(names), rows) if rows else "_no rehearsal yet_"
+    for run_id, items in sorted(runs.items()):
+        cells, vendors = [], set()
+        for s in names:
+            n = items.get(f"rehearsal.{s}.runs")
+            if not n:
+                cells.append("-")
+                continue
+            p = items.get(f"rehearsal.{s}.pass", (0, ""))[0]
+            g = items.get(f"rehearsal.{s}.guarded", (0, ""))[0]
+            cells.append(f"{int(p)}/{int(n[0])}" + (f" (guard {int(g)})" if g else ""))
+            m = re.search(r"tts=([^;]+)", n[1])
+            if m:
+                vendors.add(m.group(1))
+        rows.append([run_id] + cells + ["/".join(sorted(vendors)) or "?"])
+    note = ("\n\n_pass = expected final state reached with no success claim before its tool result, no ids spoken, no structural text; "
+            "(guard n) = calls in which the agent's loop guard replaced a repeated line, an application intervention counted apart from the model. "
+            "Recordings per call under $R3_ARTIFACTS/runs/<rehearsal run>/audio; the simulated caller's recordings are labelled recorded, never live._")
+    return (md_table(["rehearsal run (model, stamp)"] + list(names) + ["TTS"], rows) + note) if rows else "_no rehearsal yet_"
 
 
 def routing_table(con) -> str:

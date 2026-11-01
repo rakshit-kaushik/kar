@@ -50,3 +50,10 @@ def test_filler_timing_splits_filler_audio_from_the_reply():
     assert g1_report.filler_timing(evs, 0) == (1150, 1900)
     assert g1_report.filler_timing([_ev("c", "tts_first_audible", 700, {})], 0) == (None, None)  # no filler: nothing to split
     assert g1_report.filler_timing([_ev("c", "filler_start", 900, {})], 0) == (None, None)  # filler never became audible
+
+
+def test_loop_guard_interventions_counts_the_agent_events():
+    evs = [_ev("c", "loop_guard", 1, {"action": "rephrase", "repeats": 1}), _ev("c", "transcript", 2, {"role": "assistant", "text": "x"}),
+           _ev("c", "loop_guard", 3, {"action": "handoff", "repeats": 2})]
+    assert g1_report.loop_guard_interventions(evs) == 2
+    assert g1_report.loop_guard_interventions([]) == 0
