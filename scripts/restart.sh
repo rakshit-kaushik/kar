@@ -38,14 +38,14 @@ lsof -ti:8001 | xargs kill 2>/dev/null || true; sleep 1
 nohup uv run python -m services.proxy.main > "$LOG/proxy.log" 2>&1 &
 wait_for http://127.0.0.1:8001/health 60 "proxy"
 
-echo "[4/5] prewarm"
-if [ "$NO_SERVER" = 0 ]; then
+echo "[4/5] prewarm (always: a changed prompt or tool set means a cold system cache, and the first cold request exceeds the proxy's fallback timeout)"
+if curl -s -m 3 http://127.0.0.1:8000/v1/models >/dev/null; then
   # straight at the server: the first request after start takes ~19 s (engine warmup) and would otherwise trip the proxy's hosted fallback
   uv run python scripts/smoke_tools.py --base-url http://127.0.0.1:8000/v1 >/dev/null 2>&1 || true
   echo "  server warm, prefix cached"
   uv run python scripts/smoke_tools.py --base-url http://127.0.0.1:8001/v1 >/dev/null 2>&1 && echo "  proxy ok (tool call parsed through proxy, served locally)" || { echo "  proxy check FAILED"; exit 1; }
 else
-  echo "  skipped"
+  echo "  skipped (server not up)"
 fi
 
 if [ "$NO_AGENT" = 0 ]; then
