@@ -64,3 +64,12 @@ def test_write_routing_dataset_splits_by_label_and_writes_a_manifest(tmp_path):
     train = read_jsonl(tmp_path / "routing" / "train.jsonl")
     assert len(train) == 48 and all(len(ex["messages"]) == 3 for ex in train)
     assert set(m["sha256"]) == {"train.jsonl", "valid.jsonl"}
+
+
+def test_format_tickets_can_keep_one_split_only():
+    from train.routing_format import filter_split
+
+    tickets = [dict(t, split="train") for t in TICKETS[:6]] + [dict(t, split="test") for t in TICKETS[6:12]]
+    kept = filter_split(tickets, "train")
+    assert [t["ticket_id"] for t in kept] == [t["ticket_id"] for t in TICKETS[:6]]
+    assert filter_split(tickets, None) == tickets

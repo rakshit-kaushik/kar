@@ -71,6 +71,14 @@ def format_tickets(tickets: list[dict]) -> tuple[list[dict], list[dict]]:
     return examples, dropped
 
 
+def filter_split(tickets: list[dict], split: str | None) -> list[dict]:
+    """Keep tickets whose `split` field equals `split` (E's tickets.jsonl marks the 100 hand-check
+    test tickets as "test"; those never enter the training data)."""
+    if split is None:
+        return tickets
+    return [t for t in tickets if t.get("split") == split]
+
+
 def _split(examples: list[dict], valid_fraction: float, seed: int) -> tuple[list[dict], list[dict]]:
     rng = random.Random(seed)
     by_label: dict[str, list[dict]] = {}
@@ -115,6 +123,7 @@ def write_routing_dataset(tickets: list[dict], out_dir: str | Path, valid_fracti
         "sha256": {name: _sha256(out / name) for name in files.values()},
         "counts": {"train": len(train), "valid": len(valid)},
         "dropped": len(dropped),
+        "source_tickets": len(tickets),
         "dropped_reasons": dict(Counter(d["reason"] for d in dropped)),
         "labels": LABELS,
         "label_counts": {"train": dict(Counter(ex["meta"]["label"] for ex in train)),
@@ -147,6 +156,7 @@ def main(argv=None) -> int:
     ap.add_argument("--out", required=True, type=Path)
     ap.add_argument("--valid-fraction", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--split", default=None, help='keep only tickets with this `split` value (e.g. "train")')
     a = ap.parse_args(argv)
     if a.from_db:
         import os
@@ -155,6 +165,7 @@ def main(argv=None) -> int:
         tickets = read_tickets_db(os.environ["DATABASE_URL"])
     else:
         tickets = read_tickets_jsonl(a.tickets)
+    tickets = filter_split(tickets, a.split)
     path = write_routing_dataset(tickets, a.out, a.valid_fraction, a.seed)
     m = json.loads(path.read_text())
     print(f"wrote {m['counts']} examples, dropped {m['dropped']} {m['dropped_reasons']}; manifest {path}")
