@@ -34,7 +34,7 @@ from services.tools.sandbox import Sandbox
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 SEED = json.loads((ROOT / "eval/sandbox/seed.json").read_text())
-SYSTEM_PROMPT = (ROOT / "services/agent/system_prompt.md").read_text().replace("{today}", SEED["clock_spoken"])
+SYSTEM_PROMPT = (ROOT / "schemas/system_prompt.md").read_text().replace("{today}", SEED["clock_spoken"])
 STRUCTURAL = ("<tool_call>", "</tool_call>", "<think>", "</think>", '{"name"', "<|im_", "[Calling tool", "[calling tool")
 SUCCESS_CLAIM = re.compile(r"\b(verified|verification (is )?(successful|complete)|booked|is blocked|has been (booked|blocked|cancelled|canceled|moved))\b", re.IGNORECASE)
 
@@ -59,7 +59,8 @@ async def episode(args, idx: int, quiet: bool) -> dict:
     executor = ToolExecutor(sandbox, state)
     api_key = os.environ.get("HOSTED_LLM_API_KEY", "local") if "anthropic" in args.base_url else "local"
     client = AsyncOpenAI(base_url=args.base_url, api_key=api_key, default_headers={"X-R3-Call-Id": f"dry-run-{idx}"}, timeout=httpx.Timeout(60.0, connect=5.0))
-    session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, temperature=args.temperature, parallel_tool_calls=False), userdata=Data(executor))
+    llm_kwargs = {"temperature": args.temperature} if args.temperature is not None else {}  # hosted Claude rejects temperature; local default is 0.2
+    session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, parallel_tool_calls=False, **llm_kwargs), userdata=Data(executor))
     await session.start(Agent(instructions=SYSTEM_PROMPT, tools=build_livekit_tools(lambda ctx: ctx.userdata.executor)))
 
     out = {"verified": False, "booked": False, "leaks": 0, "unsupported_claims": 0, "turn_ms": [], "tool_calls": []}
@@ -103,7 +104,7 @@ async def main() -> int:
     ap.add_argument("--base-url", default=os.environ.get("LLM_BASE_URL"))
     ap.add_argument("--model", default=os.environ.get("LLM_MODEL"))
     ap.add_argument("--repeats", type=int, default=1)
-    ap.add_argument("--temperature", type=float, default=0.2)
+    ap.add_argument("--temperature", type=float, default=None, help="omit to use the server default (0.2 locally); the hosted endpoint rejects it")
     ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 

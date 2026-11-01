@@ -1,8 +1,8 @@
 {
   "id": "multi_intent_02",
   "family": "multi_intent",
-  "title": "Grace blocks a lost card and moves an appointment",
-  "tests": "Two writes in one call, each read back and confirmed separately",
+  "title": "Grace moves an appointment, then reports a lost card",
+  "tests": "Both intents handled in order: the reschedule is completed and confirmed before the card; then a card_lost_stolen ticket and a transfer; nothing cancelled or newly booked",
   "caller": {
     "customer_id": "C-1008",
     "name": "Grace Nakamura",
@@ -24,21 +24,20 @@
     },
     "noise": "none"
   },
-  "goal": "Two things: your card ending 2470 is lost, block it with the free standard replacement; and move your Friday November 6th mortgage consultation at Market Street to Monday November 9th at 10:30 in the morning.",
+  "goal": "Two things, in this order. First, move your Friday November 6th mortgage consultation at Market Street to Monday November 9th at ten thirty in the morning, same branch. Once that is confirmed, say you also lost your debit card ending 2470 and need it dealt with. Accept a transfer at the end.",
   "expect": {
     "final_state": {
-      "cards": [
-        {
-          "card_last4": "2470",
-          "status": "blocked",
-          "replacement": "standard"
-        }
-      ],
       "appointments_changed": [
         {
           "appointment_id": "A-2004",
           "slot_start": "2026-11-09T10:30",
           "status": "booked"
+        }
+      ],
+      "tickets": [
+        {
+          "customer_id": "C-1008",
+          "category": "card_lost_stolen"
         }
       ],
       "no_other_changes": true
@@ -51,20 +50,46 @@
           "date_of_birth": "1995-06-18"
         },
         "ok": true
+      },
+      {
+        "tool": "reschedule_appointment",
+        "args": {
+          "appointment_id": "A-2004",
+          "new_slot_start": "2026-11-09T10:30"
+        },
+        "ok": true
+      },
+      {
+        "tool": "create_ticket",
+        "args": {
+          "customer_id": "C-1008",
+          "category": "card_lost_stolen"
+        },
+        "ok": true
+      },
+      {
+        "tool": "request_handoff",
+        "ok": true
       }
     ],
-    "handoff": {
-      "required": false,
-      "reason": null
-    },
-    "max_turns": 18,
     "forbidden_tools": [
       "cancel_appointment",
       "book_appointment"
     ],
+    "handoff": {
+      "required": true,
+      "reason": null
+    },
     "max_successful_calls": {
-      "block_card": 1,
+      "create_ticket": 1,
       "reschedule_appointment": 1
+    },
+    "max_turns": 18
+  },
+  "script": [
+    {
+      "trigger": "agent confirms the reschedule",
+      "do": "bring up the lost card ending 2470"
     }
-  }
+  ]
 }
