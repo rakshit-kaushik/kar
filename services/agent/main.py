@@ -59,7 +59,7 @@ class CallData:
     started: float = field(default_factory=time.time)
 
 
-server = AgentServer()
+server = AgentServer(num_idle_processes=1)  # a warm job process: the agent joins ~1 s sooner
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -177,8 +177,24 @@ async def entrypoint(ctx: JobContext) -> None:
         outcome = "handoff" if state.handoff else ("completed" if state.completed else "abandoned")
         await emit("call_end", {"outcome": outcome, "turns": data.turn_idx, "structural_leaks": data.structural_leaks, "duration_s": round(time.time() - data.started, 1)})
         await db_exec("update sessions set ended_at = now(), outcome = %s, state = %s where call_id = %s", (outcome, Jsonb(state.to_dict()), call_id))
+        # the room dies with the call: a rejoin under the same name must get a fresh room and a fresh agent, never a leftover one
+        try:
+            await ctx.delete_room()
+        except Exception as e:
+            log.info("delete_room: %r", e)
 
     ctx.add_shutdown_callback(on_shutdown)
+
+    @session.on("close")
+    def _session_closed(ev) -> None:
+        fire("session_closed", {"reason": str(getattr(ev, "reason", "")), "error": repr(getattr(ev, "error", None))})
+        ctx.shutdown(reason=f"session closed: {getattr(ev, 'reason', '')}")
+
+    @ctx.room.on("participant_disconnected")
+    def _caller_left(p) -> None:
+        if getattr(p, "kind", None) != 4:  # 4 = agent; anything else is the caller
+            fire("caller_left", {"identity": p.identity})
+            ctx.shutdown(reason="caller left")
 
     await session.start(agent=Agent(instructions=SYSTEM_PROMPT, tools=TOOLS), room=ctx.room)
     await ctx.connect()

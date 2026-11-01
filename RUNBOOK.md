@@ -29,6 +29,9 @@ The agent, the dry run, the bench and the smoke test all load `schemas/system_pr
 - `uv run python scripts/bench_base.py` → single-stream MLX throughput; `scripts/smoke_tools.py [--turn2]` → streamed tool-call check.
 
 ## GPU schedule (hours from T+0) — the schedule is law
+Without a human arbitrating, `scripts/gpu_lock.sh` is the schedule: `acquire <owner> <minutes> [purpose]` before a training run, benchmark or load test; `release <owner>` after; `status` to look. Live calls on the served model need no lock. Say so in a cross-session message when you take or return it.
+
+Call checks: `uv run python scripts/probe_dispatch.py` joins a room and confirms the agent is dispatched and greets (run after every agent restart and before handing out links). The agent now ends its job and deletes the room when the caller leaves, so a rejoin never meets a leftover agent.
 | Window | Owner | Everyone else points at |
 | --- | --- | --- |
 | T+1–4 | S skeleton | local |
