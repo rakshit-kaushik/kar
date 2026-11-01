@@ -25,7 +25,7 @@ token = (
     .with_identity("caller")
     .with_name("Caller")
     .with_grants(api.VideoGrants(room_join=True, room=room, can_publish=True, can_subscribe=True))
-    .with_ttl(dt.timedelta(hours=2))
+    .with_ttl(dt.timedelta(hours=12))
     .to_jwt()
 )
 url = os.environ["LIVEKIT_URL"]
