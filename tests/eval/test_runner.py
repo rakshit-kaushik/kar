@@ -213,7 +213,25 @@ def test_cli_subcommands_and_api_key_resolution(monkeypatch):
         ]
     )
     assert a.command == "run" and a.repeats == 3 and a.parallel == 4 and a.no_db is False
-    assert a.caller_temperature == 0.3 and a.prompt is None
+    assert a.caller_temperature == 0.3 and a.prompt is None and a.retries == 3 and a.backoff == 1.0
+    b = p.parse_args(
+        [
+            "run",
+            "--base-url",
+            "u",
+            "--model",
+            "m",
+            "--scenarios",
+            "d",
+            "--out",
+            "o",
+            "--retries",
+            "6",
+            "--backoff",
+            "5",
+        ]
+    )
+    assert (b.retries, b.backoff) == (6, 5.0)
     v = p.parse_args(["validate", "eval/scenarios/test"])
     assert v.command == "validate" and v.directory == "eval/scenarios/test"
     monkeypatch.setenv("HOSTED_LLM_BASE_URL", "https://api.anthropic.com/v1")

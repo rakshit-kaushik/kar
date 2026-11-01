@@ -451,6 +451,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--temperature", type=float, default=None, help="agent temperature; only sent when given"
     )
     r.add_argument("--caller-temperature", type=float, default=0.3)
+    r.add_argument("--retries", type=int, default=3, help="transport retries per model request")
+    r.add_argument("--backoff", type=float, default=1.0, help="seconds; doubles per retry")
     r.add_argument("--caller-base-url", default=None, help="default: HOSTED_LLM_BASE_URL")
     r.add_argument("--caller-model", default=None, help="default: HOSTED_LLM_MODEL")
     r.add_argument(
@@ -516,7 +518,13 @@ def _cmd_run(a: argparse.Namespace) -> int:
     caller_client = make_client(caller_url, resolve_api_key(None, caller_url))
 
     def agent_factory() -> OpenAIAgent:
-        return OpenAIAgent(client=agent_client, model=a.model, temperature=a.temperature)
+        return OpenAIAgent(
+            client=agent_client,
+            model=a.model,
+            temperature=a.temperature,
+            retries=a.retries,
+            backoff_s=a.backoff,
+        )
 
     def caller_factory(sc: Scenario, seed: int) -> LLMCaller:
         return LLMCaller(
