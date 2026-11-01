@@ -311,6 +311,65 @@ def precision_gate(fused: dict, adapter: dict, tolerance_points: float = 1.0, sc
             "tolerance_points": tolerance_points, "pass": delta >= -tolerance_points}
 
 
+def _load(p: Path) -> dict | None:
+    try:
+        return json.loads(Path(p).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _episode_key(r: dict) -> str | None:
+    """`<scenario>-s<seed>`: the unit E's compare pairs on (episode ids are `<scenario>-s<seed>-<hash>`)."""
+    eid = r.get("episode_id")
+    if eid:
+        m = re.match(r"^(.*-s\d+)-[0-9a-f]+$", eid)
+        return m.group(1) if m else eid
+    if r.get("scenario_id") is not None and r.get("repeat_seed") is not None:
+        return f"{r['scenario_id']}-s{r['repeat_seed']}"
+    return None
+
+
+def paired_gate(fused_rows: list[dict], adapter_rows: list[dict], exclude_prefixes: list[str] | tuple[str, ...] = (),
+                tolerance_points: float = 1.0) -> dict:
+    """The precision gate paired on scenario x seed episodes both runs scored (the same exclusions applied to
+    both): all-pass and final_state counted over the intersection, so a 3-seed fused run and a 1-seed adapter
+    run are compared on the same episodes. The 07:40 unpaired comparison (81 fused episodes vs 27 adapter
+    episodes) read +9.9 points for the fused artifact; paired on the same 19 episodes E found 11 vs 12."""
+    def per_episode(rows: list[dict]) -> dict[str, dict]:
+        out: dict[str, dict] = {}
+        for r in rows:
+            if r.get("advisory"):
+                continue
+            k = _episode_key(r)
+            if not k or any(k.startswith(x) for x in exclude_prefixes):
+                continue
+            e = out.setdefault(k, {"all_pass": True, "final_state": None, "claim": False})
+            e["all_pass"] = e["all_pass"] and bool(r.get("pass"))
+            if r.get("scorer") == TASK_COMPLETION:
+                e["final_state"] = bool(r.get("pass")) if e["final_state"] is None else (e["final_state"] and bool(r.get("pass")))
+            if r.get("scorer") == SUCCESS_CLAIM and not r.get("pass"):
+                e["claim"] = True
+        return out
+
+    f, a = per_episode(fused_rows), per_episode(adapter_rows)
+    keys = sorted(set(f) & set(a))
+    n = len(keys)
+    fa = sum(1 for k in keys if f[k]["all_pass"]); aa = sum(1 for k in keys if a[k]["all_pass"])
+    ff = sum(1 for k in keys if f[k]["final_state"]); af = sum(1 for k in keys if a[k]["final_state"])
+    fc = sum(1 for k in keys if f[k]["claim"]); ac = sum(1 for k in keys if a[k]["claim"])
+    delta_points = round(_rate(ff, n) - _rate(af, n), 2)
+    return {"paired": True, "scorer": TASK_COMPLETION, "episodes_paired": n,
+            "fused": {"all_pass": fa, "final_state": ff, "unsupported_success_claims": fc},
+            "adapter": {"all_pass": aa, "final_state": af, "unsupported_success_claims": ac},
+            "fused_pass_rate": _rate(ff, n), "adapter_pass_rate": _rate(af, n), "delta_points": delta_points,
+            "delta_episodes": ff - af, "tolerance_points": tolerance_points,
+            "rule": "within tolerance_points on final_state, or within one episode (the sample-size floor)",
+            "pass": delta_points >= -tolerance_points or (ff - af) >= -1,
+            "disagreements": {"fused_only": [k for k in keys if f[k]["all_pass"] and not a[k]["all_pass"]],
+                              "adapter_only": [k for k in keys if a[k]["all_pass"] and not f[k]["all_pass"]]},
+            "excluded_prefixes": len(exclude_prefixes)}
+
+
 def evaluate_model_dir(model_dir: str | Path, model_name: str, run_id: str, scenarios: str | Path, out_dir: str | Path,
                        base_url: str | None = None, adapter: str | Path | None = None, base: str | Path | None = None,
                        port: int = 8010, database_url: str | None = "env", timeout: float = 600.0,
@@ -488,6 +547,28 @@ def main(argv=None) -> int:
         sub.add_argument("--model-name", default=None)
         sub.add_argument("--run-id", default=None)
         sub.add_argument("--exclude-from", type=Path, default=None, help="E's compare-excl-caller-faults.md")
+    if argv and argv[0] == "--paired-gate":
+        sub = argparse.ArgumentParser(description="precision gate paired on scenario x seed: --paired-gate <fused eval dir> <adapter eval dir>")
+        sub.add_argument("--paired-gate", nargs=2, type=Path, required=True, metavar=("FUSED_DIR", "ADAPTER_DIR"))
+        sub.add_argument("--exclude-from", type=Path, default=None, help="E's compare-excl-caller-faults.md")
+        sub.add_argument("--out", type=Path, default=None, help="default: <fused dir>/precision_gate.json")
+        g = sub.parse_args(argv)
+        fused_dir, adapter_dir = g.paired_gate
+        rows_f = collect_results("", "", fused_dir, database_url=None)
+        rows_a = collect_results("", "", adapter_dir, database_url=None)
+        prefixes = excluded_episode_prefixes(g.exclude_from) if g.exclude_from else []
+        res = paired_gate(rows_f, rows_a, prefixes)
+        unpaired_f, unpaired_a = _load(fused_dir / "family_table.json"), _load(adapter_dir / "family_table.json")
+        if unpaired_f and unpaired_a:
+            res["unpaired"] = precision_gate(unpaired_f, unpaired_a)
+        res["fused_dir"], res["adapter_dir"], res["exclude_file"] = str(fused_dir), str(adapter_dir), str(g.exclude_from) if g.exclude_from else None
+        out = g.out or (fused_dir / "precision_gate.json")
+        out.write_text(json.dumps(res, indent=2) + "\n")
+        print(f"paired precision gate on {res['episodes_paired']} episodes: fused all-pass {res['fused']['all_pass']} / final_state {res['fused']['final_state']} "
+              f"vs adapter {res['adapter']['all_pass']} / {res['adapter']['final_state']}; claims {res['fused']['unsupported_success_claims']} vs "
+              f"{res['adapter']['unsupported_success_claims']}; delta {res['delta_points']:+.2f} points ({res['delta_episodes']:+d} episodes): "
+              f"{'PASS' if res['pass'] else 'FAIL'} -> {out}")
+        return 0
         a = sub.parse_args(argv)
         t = table_from_scores(a.from_scores, a.model_name, a.run_id, exclude_file=a.exclude_from)
         print(format_family_table(t))

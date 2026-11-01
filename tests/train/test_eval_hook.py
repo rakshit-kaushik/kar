@@ -349,3 +349,36 @@ def test_collect_results_prefers_the_scores_file_so_repeats_stay_separate_episod
     assert len(got) == 6 and got[0]["episode_id"] == "ordinary_01-s0-x"
     sel = family_table(got)["selection"]
     assert sel["episodes"] == 3 and sel["all_pass"] == 66.67 and family_table(got)["selection"]["grouping"] == "episode"
+
+
+def test_paired_gate_compares_only_episodes_both_runs_scored_with_the_same_exclusions(tmp_path):
+    from train.eval_hook import main, paired_gate
+
+    def rows(run, seeds, fs, claims=()):
+        out = []
+        for i, sc in enumerate(("ordinary_01", "ordinary_02", "correction_01")):
+            for seed in seeds:
+                ok = fs(sc, seed)
+                for scorer in ("final_state", "tool_calls", "no_success_claim_before_result"):
+                    p = ok if scorer != "no_success_claim_before_result" else (sc, seed) not in claims
+                    out.append({"run_id": run, "model_id": run, "scenario_id": sc, "episode_id": f"{sc}-s{seed}-abc123", "repeat_seed": seed,
+                                "family": sc.split("_")[0], "scorer": scorer, "pass": p, "advisory": False, "detail": {}})
+        return out
+
+    fused = rows("f", (0, 1, 2), lambda sc, seed: not (sc == "ordinary_02" and seed == 0))      # 3 seeds; ordinary_02-s0 fails
+    adapter = rows("a", (0,), lambda sc, seed: sc != "correction_01", claims=(("ordinary_01", 0),))  # 1 seed; correction_01-s0 fails, one claim
+    g = paired_gate(fused, adapter)
+    assert g["episodes_paired"] == 3 and g["fused"]["final_state"] == 2 and g["adapter"]["final_state"] == 2 and g["pass"] is True
+    assert g["adapter"]["unsupported_success_claims"] == 1 and g["fused"]["unsupported_success_claims"] == 0
+    # ordinary_01-s0 fails the adapter on its claim, correction_01-s0 on final_state; ordinary_02-s0 fails the fused run
+    assert g["disagreements"] == {"fused_only": ["correction_01-s0", "ordinary_01-s0"], "adapter_only": ["ordinary_02-s0"]}
+    g2 = paired_gate(fused, adapter, exclude_prefixes=["ordinary_02-s0"])
+    assert g2["episodes_paired"] == 2 and g2["fused"]["final_state"] == 2
+    # CLI writes precision_gate.json next to the fused scores
+    fd, ad = tmp_path / "fused", tmp_path / "adapter"
+    fd.mkdir(); ad.mkdir()
+    (fd / "scores.jsonl").write_text("\n".join(json.dumps(r) for r in fused) + "\n")
+    (ad / "scores.jsonl").write_text("\n".join(json.dumps(r) for r in adapter) + "\n")
+    assert main(["--paired-gate", str(fd), str(ad)]) == 0
+    res = json.loads((fd / "precision_gate.json").read_text())
+    assert res["paired"] and res["episodes_paired"] == 3 and res["pass"] is True
