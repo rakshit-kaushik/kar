@@ -169,12 +169,35 @@ def create_app(
     fallback_model: str | None = None,
     first_token_timeout: float = 2.0,
     admission_limit: int = 0,
+    upstream_model: str | None = None,
+    discover_upstream_model: bool = True,
 ) -> Starlette:
     """admission_limit: concurrent local generations the engine serves within budget (load test); a streamed turn
     arriving above it is routed to the hosted model when that is available, instead of queueing. 0 disables."""
     turn_counters: dict[str, int] = collections.defaultdict(int)
     breaker = HostedBreaker()
     inflight = {"local": 0}
+    upstream_name_cache: dict[str, str | None] = {"name": upstream_model}
+
+    async def upstream_name(requested: str) -> str:
+        """The model name the local server answers to. vllm-mlx returns 404 for any other name (Nov 1 07:24: a restart under a
+        stale served name broke every live turn), so local requests carry the single id from the server's /v1/models while
+        every label and event keeps the caller's model id. LOCAL_LLM_UPSTREAM_NAME (upstream_model) overrides discovery."""
+        if upstream_name_cache["name"]:
+            return upstream_name_cache["name"]
+        if not discover_upstream_model:
+            return requested
+        try:
+            r = await upstream_client.get("/v1/models", timeout=5)
+            ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
+        except Exception:
+            ids = []
+        if len(ids) != 1:
+            return requested
+        upstream_name_cache["name"] = ids[0]
+        if ids[0] != requested:
+            logging.getLogger("r3.proxy").warning("local server serves %r; requests for %r go out under that name, labels keep %r", ids[0], requested, requested)
+        return ids[0]
 
     async def emit(call_id: str, turn_idx: int, model_id: str, event: str, payload: dict | None = None) -> None:
         ev = {"call_id": call_id, "turn_idx": turn_idx, "model_id": model_id, "event": event, "ts_ms": now_ms(), "payload": payload or {}}
@@ -195,7 +218,7 @@ def create_app(
 
         if not body.get("stream"):
             try:
-                r = await upstream_client.post("/v1/chat/completions", json=body)
+                r = await upstream_client.post("/v1/chat/completions", json={**body, "model": await upstream_name(model_id)})
             except httpx.HTTPError as e:
                 await emit(call_id, turn_idx, model_id, "llm_error", {"error": repr(e)})
                 return JSONResponse({"error": {"message": f"upstream unavailable: {e}", "type": "upstream_error"}}, status_code=502)
@@ -210,7 +233,7 @@ def create_app(
         started: set[str] = set()
 
         async def attempt(client: httpx.AsyncClient, mid: str, source: str) -> _Stream:
-            sent = {**body, "model": mid} if source == "local" else {k: v for k, v in body.items() if k not in HOSTED_DROP} | {"model": mid}
+            sent = {**body, "model": await upstream_name(mid)} if source == "local" else {k: v for k, v in body.items() if k not in HOSTED_DROP} | {"model": mid}
             return await open_stream(client, sent, mid, None)
 
         def start(source: str) -> None:
@@ -313,6 +336,7 @@ def create_app(
             up = f"down: {type(e).__name__}"
         return JSONResponse({
             "status": "ok", "upstream": up, "upstream_base_url": str(upstream_client.base_url),
+            "upstream_model": upstream_name_cache["name"],
             "fallback": {"model": fallback_model, "first_token_timeout_s": first_token_timeout, "available": breaker.available(), "unavailable_reason": breaker.reason} if fallback_client is not None else None,
         })
 

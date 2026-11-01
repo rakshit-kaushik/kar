@@ -54,8 +54,11 @@ class TurnFilter:
 
 
 class LoopGuard:
-    def __init__(self, enabled: bool = True, rephrase: str = REPHRASE, handoff_line: str = HANDOFF_LINE) -> None:
+    def __init__(self, enabled: bool = True, rephrase: str = REPHRASE, handoff_line: str = HANDOFF_LINE, handoff_after: int = 3) -> None:
         self.enabled = enabled
+        # consecutive exact repeats before the guard hands off; repeats below it are rephrased. 3, not 2: a caller utterance split
+        # by turn detection ("five five five zero one four" / "two two one nine", Nov 1 07:12) makes one re-ask legitimate
+        self.handoff_after = max(1, handoff_after)
         self.rephrase = rephrase
         self.handoff_line = handoff_line
         self.prev: str | None = None  # normalized previous model reply (what the model generated, even when swallowed)
@@ -63,7 +66,7 @@ class LoopGuard:
 
     @classmethod
     def from_env(cls) -> "LoopGuard":
-        return cls(enabled=os.environ.get("AGENT_LOOP_GUARD", "1") != "0")
+        return cls(enabled=os.environ.get("AGENT_LOOP_GUARD", "1") != "0", handoff_after=int(os.environ.get("AGENT_LOOP_GUARD_HANDOFF_AFTER", "3")))
 
 
 def _text_of(chunk: Any) -> str | None:
@@ -102,7 +105,7 @@ async def guarded_stream(source: AsyncIterable[Any], guard: LoopGuard, on_loop: 
             yield c
         return
     guard.repeats += 1
-    kind = "rephrase" if guard.repeats == 1 else "handoff"
+    kind = "rephrase" if guard.repeats < guard.handoff_after else "handoff"
     res = on_loop(kind, turn.buf.strip())
     if inspect.isawaitable(res):
         await res

@@ -76,8 +76,10 @@ async def test_guarded_stream_swallows_an_exact_repeat_rephrases_then_hands_off(
     assert await collect(guarded_stream(agen(line), guard, on_loop)) == line  # first time: spoken as is
     assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE]  # repeat: replaced
     assert calls == [("rephrase", PREV)] and guard.repeats == 1
-    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [HANDOFF_LINE]  # still stuck: hand off
-    assert calls[-1] == ("handoff", PREV) and guard.repeats == 2
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE]  # second repeat: rephrase again (a split caller
+    assert calls[-1] == ("rephrase", PREV) and guard.repeats == 2                    # utterance makes one legitimate re-ask, Nov 1 07:12)
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [HANDOFF_LINE]  # third: hand off
+    assert calls[-1] == ("handoff", PREV) and guard.repeats == 3
     fresh = [Chunk("Tuesday at nine thirty, Market Street. Shall I book it?")]
     assert await collect(guarded_stream(agen(fresh), guard, on_loop)) == fresh and guard.repeats == 0  # a new line resets
 
@@ -110,3 +112,16 @@ async def test_a_repeated_farewell_is_not_a_loop():
     assert await collect(guarded_stream(agen(bye), guard, no_loop)) == bye
     assert await collect(guarded_stream(agen(bye), guard, no_loop)) == bye
     assert guard.repeats == 0
+
+
+async def test_handoff_threshold_comes_from_the_environment(monkeypatch):
+    monkeypatch.setenv("AGENT_LOOP_GUARD_HANDOFF_AFTER", "2")
+    guard, calls = LoopGuard.from_env(), []
+
+    async def on_loop(action, repeated):
+        calls.append(action)
+
+    line = [Chunk("Which day would you like?")]
+    await collect(guarded_stream(agen(line), guard, on_loop))
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE]
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [HANDOFF_LINE] and calls == ["rephrase", "handoff"]

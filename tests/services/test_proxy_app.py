@@ -343,3 +343,15 @@ async def test_local_keeps_running_after_the_timeout_and_wins_against_a_slower_h
     assert "fallback" in kinds and events[-1]["event"] == "llm_done" and events[-1]["model_id"] == "r3-voice-base"
     ft = [e for e in events if e["event"] == "llm_first_token"]
     assert ft and ft[0]["payload"]["source"] == "local"
+
+
+async def test_local_requests_carry_the_name_the_server_advertises_while_labels_keep_the_callers(harness):
+    """Nov 1 07:24: a restart left the server advertising r3-voice-base while .env named the candidate; vllm-mlx answers 404 to any
+    other name, so every live turn failed. The proxy sends the single id from the server's /v1/models and labels with the caller's."""
+    client, received, events = harness
+    r = await client.post("/v1/chat/completions", json={**BODY, "model": "r3-voice-206506525c"}, headers={"X-R3-Call-Id": "call-9"})
+    assert r.status_code == 200
+    assert received[0]["model"] == "r3-voice-base"
+    assert events and {e["model_id"] for e in events} == {"r3-voice-206506525c"}
+    h = await client.get("/health")
+    assert h.json()["upstream_model"] == "r3-voice-base"

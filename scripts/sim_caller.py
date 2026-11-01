@@ -42,6 +42,8 @@ SR, FRAME_MS = 48000, 10
 SAMPLES = SR * FRAME_MS // 1000
 CACHE = pathlib.Path(os.environ.get("R3_ARTIFACTS", "~/r3-artifacts")).expanduser() / "sim_audio"
 CALLER_VOICE = os.environ.get("SIM_CALLER_VOICE", "47c38ca4-5f35-497b-b1a3-415245fb35e1")  # Cartesia "Daniel"; the agent is Skylar
+DEEPGRAM_CALLER_VOICE = os.environ.get("SIM_DEEPGRAM_VOICE", "aura-2-orion-en")  # the fallback caller voice; the agent speaks aura-2-thalia-en
+_tts_fallback_announced = False
 AGENT_STATE_ATTR = "lk.agent.state"
 SEED = json.loads((ROOT / "eval/sandbox/seed.json").read_text())
 
@@ -67,18 +69,56 @@ def now_ms() -> int:
 
 
 # ---- caller audio -------------------------------------------------------------------------------------------
-def tts_cached(text: str, voice: str = CALLER_VOICE) -> np.ndarray:
-    """Cartesia -> raw pcm_s16le 48 kHz mono, cached by voice + text hash."""
+def _post(url: str, **kw):  # one seam for tests
+    return httpx.post(url, **kw)
+
+
+def _synth_cartesia(text: str, voice: str) -> bytes:
+    h = {"X-API-Key": os.environ["CARTESIA_API_KEY"], "Cartesia-Version": os.environ.get("CARTESIA_VERSION", "2026-08-14")}
+    body = {"model_id": os.environ.get("CARTESIA_MODEL", "sonic-3"), "transcript": text, "voice": {"mode": "id", "id": voice},
+            "output_format": {"container": "raw", "encoding": "pcm_s16le", "sample_rate": SR}, "language": "en"}
+    r = _post("https://api.cartesia.ai/tts/bytes", headers=h, json=body, timeout=60)
+    r.raise_for_status()
+    return r.content
+
+
+def _synth_deepgram(text: str, voice: str) -> bytes:
+    """Deepgram Aura: raw linear16 at SR (the agent uses the same vendor since Cartesia ran out of credits, Nov 1 04:24)."""
+    r = _post("https://api.deepgram.com/v1/speak", params={"model": voice, "encoding": "linear16", "sample_rate": SR, "container": "none"},
+              headers={"Authorization": f"Token {os.environ['DEEPGRAM_API_KEY']}", "Content-Type": "application/json"}, json={"text": text}, timeout=60)
+    r.raise_for_status()
+    return r.content
+
+
+def _cache_file(voice: str, text: str) -> pathlib.Path:
     d = CACHE / voice
     d.mkdir(parents=True, exist_ok=True)
-    f = d / (hashlib.sha1(text.encode()).hexdigest()[:16] + ".pcm")
+    return d / (hashlib.sha1(text.encode()).hexdigest()[:16] + ".pcm")
+
+
+def tts_cached(text: str, voice: str = CALLER_VOICE) -> np.ndarray:
+    """Caller audio as raw pcm_s16le 48 kHz mono, cached by voice + text hash. SIM_TTS=cartesia|deepgram|auto (default auto:
+    Cartesia first so cached lines keep their voice; on a Cartesia error Deepgram speaks the line, cached under its own voice)."""
+    global _tts_fallback_announced
+    vendor = os.environ.get("SIM_TTS", "auto")
+    f = _cache_file(DEEPGRAM_CALLER_VOICE if vendor == "deepgram" else voice, text)
+    if vendor == "auto" and not f.exists() and _cache_file(DEEPGRAM_CALLER_VOICE, text).exists():
+        f = _cache_file(DEEPGRAM_CALLER_VOICE, text)  # already spoken through the fallback: no second Cartesia attempt
     if not f.exists():
-        h = {"X-API-Key": os.environ["CARTESIA_API_KEY"], "Cartesia-Version": os.environ.get("CARTESIA_VERSION", "2026-08-14")}
-        body = {"model_id": os.environ.get("CARTESIA_MODEL", "sonic-3"), "transcript": text, "voice": {"mode": "id", "id": voice},
-                "output_format": {"container": "raw", "encoding": "pcm_s16le", "sample_rate": SR}, "language": "en"}
-        r = httpx.post("https://api.cartesia.ai/tts/bytes", headers=h, json=body, timeout=60)
-        r.raise_for_status()
-        f.write_bytes(r.content)
+        if vendor == "deepgram":
+            f.write_bytes(_synth_deepgram(text, DEEPGRAM_CALLER_VOICE))
+        else:
+            try:
+                f.write_bytes(_synth_cartesia(text, voice))
+            except httpx.HTTPError as e:
+                if vendor != "auto" or not os.environ.get("DEEPGRAM_API_KEY"):
+                    raise
+                if not _tts_fallback_announced:
+                    print(f"sim caller TTS: Cartesia failed ({e}); speaking new lines through Deepgram {DEEPGRAM_CALLER_VOICE}", flush=True)
+                    _tts_fallback_announced = True
+                f = _cache_file(DEEPGRAM_CALLER_VOICE, text)
+                if not f.exists():
+                    f.write_bytes(_synth_deepgram(text, DEEPGRAM_CALLER_VOICE))
     pcm = np.frombuffer(f.read_bytes(), dtype=np.int16)
     # trim the trailing TTS silence so "speech end" means the last audible sample, then keep 120 ms of tail
     thr = 200
@@ -437,7 +477,8 @@ async def main() -> int:
     args = ap.parse_args()
 
     if args.prepare:
-        for line in DANA_FIXED:
+        lines = json.loads(pathlib.Path(args.lines_file).read_text()) if args.lines_file else DANA_FIXED
+        for line in lines:
             pcm = tts_cached(line)
             print(f"  cached {len(pcm) / SR:5.2f}s  {line}")
         return 0
