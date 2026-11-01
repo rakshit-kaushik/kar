@@ -79,12 +79,16 @@ async def episode(args, idx: int, quiet: bool, turns: list[str] | None = None, c
 
         async def on_claim(text: str) -> None:
             reason = agent_main.handoff_reason(agent_main.state_view(state))
-            out["agent_events"].append(("claim_guard", {"claimed": text[:200], "reason": reason}))
+            out["agent_events"].append(("claim_guard", {"kind": "transfer", "claimed": text[:200], "reason": reason}))
             await executor.execute("request_handoff", {"reason": reason, "summary": f"agent announced a transfer without calling request_handoff: {text[:120]}"})
+
+        async def on_action_claim(kind: str, tool: str, sentence: str) -> None:
+            out["agent_events"].append(("claim_guard", {"kind": kind, "tool": tool, "claimed": sentence[:200], "replaced": True}))
 
         session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, parallel_tool_calls=False, **llm_kwargs), userdata=data)
         agent = agent_main.R3Agent(instructions=agent_main.SYSTEM_PROMPT, tools=agent_main.TOOLS, on_first_audible=lambda p: None, guard=data.guard, on_loop=on_loop,
-                                   claim_guard=data.claim_guard, handoff_done=lambda: bool(state.handoff), on_claim=on_claim)
+                                   claim_guard=data.claim_guard, handoff_done=lambda: bool(state.handoff), on_claim=on_claim,
+                                   completed_tools=lambda: {c.get("tool") for c in state.completed}, on_action_claim=on_action_claim)
     else:
         session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, parallel_tool_calls=False, **llm_kwargs), userdata=Data(executor))
         agent = Agent(instructions=SYSTEM_PROMPT, tools=build_livekit_tools(lambda ctx: ctx.userdata.executor))

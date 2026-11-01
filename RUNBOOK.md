@@ -75,6 +75,28 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Fallback on the fly: `scripts/gpu_flip.sh hosted`.
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
 
+### Nov 1 08:02-08:30: deploy block on run 2, a loop-guard bug, and the claim guard widened
+The deploy block on r3-voice-730f8ba68e (08:02-08:10, ~/r3-artifacts/runs/deploy-r3-voice-730f8ba68e-1101-0802) served the final
+model under its own name, confirmed the trie hit (1 new token prefilled on turn 2) and completed 3 of 3 ordinary bookings, but
+both scenario checks FAILED and the loop guard fired 5 times in 3 ordinary calls and 3 times in each scenario call. Root cause,
+agent side, not the model: LiveKit's preemptive generation runs the LLM node on the interim transcript and again on the final
+one; the loop guard counted the discarded first generation as the previous reply, so every regenerated turn looked like an exact
+repeat ("Sorry, I may have missed that" in place of the model's first question); with the split phone number that reached 3
+repeats and a false loop-guard handoff at the first caller turn of the handoff call. The 07:11 block's false re-asks were the same
+bug, not only the split number. Fix 695d64f: the guard snapshots (prev, repeats) per caller turn, keyed by the user-message count
+in the chat context; a second generation for the same turn compares against the turn's start. The two 08:02 scenario failures
+count as the guard bug in every table (the timeout call never reached check_availability; the handoff call never reached lookup).
+
+The interruption call of the same block had one model-side unsupported success claim: "I booked your mortgage consultation" after
+the caller answered the read-back with "No, that's everything, goodbye", with no book_appointment call. The reviewer approved
+widening the claim guard (08:15) to completed-action claims: a sentence claiming a finished write (booked, moved/rescheduled,
+cancelled, ticket opened) with no successful result of the matching tool in the call state is held back whole and replaced by a
+question ("I haven't booked anything yet. Would you like me to go ahead and book it?"); read-backs, questions and future tense pass
+untouched; text is held only to the sentence boundary (Deepgram's TTS buffers to the sentence anyway). Same `claim_guard` event
+and column, with `kind` (transfer | booked | moved | rescheduled | cancelled | ticket). The transcript then carries the question,
+so the claims counter does not count the swallowed claim; the claim_guard column does. Both scenario checks were re-run on the
+fixed build before the rehearsal (results below).
+
 ### Nov 1 07:58: gate-fail fallback ready
 If run 2's fused 8-bit artifact fails the precision gate, `scripts/serve_unfused.sh $R3_ARTIFACTS/models/r3-voice-730f8ba68e`
 (under lock S) replaces the vllm-mlx server with mlx_lm.server 0.32.2 serving the unfused adapter on the trained base

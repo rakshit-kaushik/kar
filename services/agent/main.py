@@ -64,18 +64,20 @@ class R3Agent(Agent):
     """Agent with one measurement hook: the moment the first audible TTS frame leaves the TTS node, so the
     agent-side clock has a 'first audio' timestamp to compare with what the caller hears."""
 
-    def __init__(self, *, on_first_audible, guard: LoopGuard, on_loop, claim_guard: ClaimGuard, handoff_done, on_claim, **kw) -> None:
+    def __init__(self, *, on_first_audible, guard: LoopGuard, on_loop, claim_guard: ClaimGuard, handoff_done, on_claim, completed_tools=None, on_action_claim=None, **kw) -> None:
         super().__init__(**kw)
         self._on_first_audible = on_first_audible
         self._guard, self._on_loop = guard, on_loop
         self._claim_guard, self._handoff_done, self._on_claim = claim_guard, handoff_done, on_claim
+        self._completed_tools, self._on_action_claim = completed_tools, on_action_claim
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         # services/agent/claimguard.py: a transfer announced without request_handoff gets the handoff recorded first;
         # services/agent/loopguard.py: an exact repeat of the previous line is swallowed (rephrase, then handoff); a regeneration
         # for the same caller turn (preemptive generation discarded by the pipeline) is not a repeat
         self._guard.begin_turn(sum(1 for it in chat_ctx.items if getattr(it, "role", None) == "user"))
-        source = claim_guarded_stream(Agent.default.llm_node(self, chat_ctx, tools, model_settings), self._claim_guard, self._handoff_done, self._on_claim)
+        source = claim_guarded_stream(Agent.default.llm_node(self, chat_ctx, tools, model_settings), self._claim_guard, self._handoff_done, self._on_claim,
+                                      completed_tools=self._completed_tools, on_action_claim=self._on_action_claim)
         async for chunk in guarded_stream(source, self._guard, self._on_loop):
             yield chunk
 
@@ -181,8 +183,13 @@ async def entrypoint(ctx: JobContext) -> None:
     async def on_claim(text: str) -> None:
         """The model announced a transfer with no request_handoff in the call: record the handoff first, then let it speak."""
         reason = handoff_reason(state_view(state))
-        await emit("claim_guard", {"claimed": text[:200], "reason": reason})
+        await emit("claim_guard", {"kind": "transfer", "claimed": text[:200], "reason": reason})
         await executor.execute("request_handoff", {"reason": reason, "summary": f"agent announced a transfer without calling request_handoff: {text[:120]}"})
+
+    async def on_action_claim(kind: str, tool: str, sentence: str) -> None:
+        """The model claimed a finished write (booked, moved, cancelled, ticket) with no successful result of that tool in the call:
+        the sentence was held back and the agent asks instead. Counted in the claim_guard column, never as the model's recovery."""
+        await emit("claim_guard", {"kind": kind, "tool": tool, "claimed": sentence[:200], "replaced": True})
 
     await db_exec(
         "insert into sessions(call_id, model_id, started_at, state) values (%s, %s, now(), %s) on conflict (call_id) do nothing",
@@ -284,7 +291,8 @@ async def entrypoint(ctx: JobContext) -> None:
             fire("caller_left", {"identity": p.identity})
             ctx.shutdown(reason="caller left")
 
-    await session.start(agent=R3Agent(instructions=SYSTEM_PROMPT, tools=TOOLS, on_first_audible=lambda p: fire("tts_first_audible", p), guard=data.guard, on_loop=on_loop, claim_guard=data.claim_guard, handoff_done=lambda: bool(state.handoff), on_claim=on_claim), room=ctx.room)
+    await session.start(agent=R3Agent(instructions=SYSTEM_PROMPT, tools=TOOLS, on_first_audible=lambda p: fire("tts_first_audible", p), guard=data.guard, on_loop=on_loop, claim_guard=data.claim_guard, handoff_done=lambda: bool(state.handoff), on_claim=on_claim,
+                                      completed_tools=lambda: {c.get("tool") for c in state.completed}, on_action_claim=on_action_claim), room=ctx.room)
     await ctx.connect()
     await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "loop_guard": data.guard.enabled, "claim_guard": data.claim_guard.enabled, "turn": TURN})
     session.say(GREETING, allow_interruptions=True)
