@@ -288,37 +288,45 @@ def summarize(results: list[Result], *, run_id: str, model_id: str) -> str:
 # ----- Postgres -----------------------------------------------------------------------------
 
 
+def _insert_eval_results(
+    cur, ep: Episode, scores: list[ScorerResult], run_id: str, model_id: str
+) -> int:
+    from psycopg.types.json import Jsonb
+
+    cur.executemany(
+        "insert into eval_results (run_id, model_id, scenario_id, family, scorer, pass, detail)"
+        " values (%s, %s, %s, %s, %s, %s, %s)",
+        [
+            (
+                run_id,
+                model_id,
+                ep.scenario_id,
+                ep.family,
+                s.scorer,
+                s.passed,
+                Jsonb(
+                    {
+                        **s.detail,
+                        "repeat_seed": ep.repeat_seed,
+                        "advisory": s.advisory,
+                        "turn_idx": s.turn_idx,
+                        "episode_id": ep.episode_id,
+                    }
+                ),
+            )
+            for s in scores
+        ],
+    )
+    return len(scores)
+
+
 def write_db(conn, results: list[Result], *, run_id: str, model_id: str) -> dict[str, int]:
     from psycopg.types.json import Jsonb
 
     counts = {"eval_results": 0, "sessions": 0, "cost_ledger": 0}
     with conn.cursor() as cur:
         for ep, scores in results:
-            cur.executemany(
-                "insert into eval_results (run_id, model_id, scenario_id, family, scorer, pass, detail)"
-                " values (%s, %s, %s, %s, %s, %s, %s)",
-                [
-                    (
-                        run_id,
-                        model_id,
-                        ep.scenario_id,
-                        ep.family,
-                        s.scorer,
-                        s.passed,
-                        Jsonb(
-                            {
-                                **s.detail,
-                                "repeat_seed": ep.repeat_seed,
-                                "advisory": s.advisory,
-                                "turn_idx": s.turn_idx,
-                                "episode_id": ep.episode_id,
-                            }
-                        ),
-                    )
-                    for s in scores
-                ],
-            )
-            counts["eval_results"] += len(scores)
+            counts["eval_results"] += _insert_eval_results(cur, ep, scores, run_id, model_id)
             cur.execute(
                 "insert into sessions (call_id, model_id, started_at, ended_at, outcome, state, scenario_id, run_id)"
                 " values (%s, %s, %s, %s, %s, %s, %s, %s) on conflict (call_id) do nothing",
@@ -384,8 +392,10 @@ def validate_dir(directory: str | Path) -> dict[str, list[str]]:
 # ----- rescore -------------------------------------------------------------------------------
 
 
-def rescore_dir(directory: str | Path, scenarios_dir: str | Path | None = None) -> int:
-    """Re-run the scorers over <dir>/episodes/*.json; rewrite scores.jsonl and summary.md. No DB."""
+def rescore_dir(directory: str | Path, scenarios_dir: str | Path | None = None, conn=None) -> int:
+    """Re-run the scorers over <dir>/episodes/*.json; rewrite scores.jsonl and summary.md.
+
+    With `conn`, the run's eval_results rows are replaced (sessions and cost_ledger stay)."""
     from eval.simulator.scenario import parse_scenario
 
     out = Path(directory)
@@ -406,6 +416,11 @@ def rescore_dir(directory: str | Path, scenarios_dir: str | Path | None = None) 
     run_id = results[0][0].run_id if results else out.name
     model_id = results[0][0].model_id if results else "?"
     (out / "summary.md").write_text(summarize(results, run_id=run_id, model_id=model_id))
+    if conn is not None and results:
+        with conn.cursor() as cur:
+            cur.execute("delete from eval_results where run_id = %s", (run_id,))
+            for ep, scores in results:
+                _insert_eval_results(cur, ep, scores, run_id, model_id)
     return len(results)
 
 
@@ -455,6 +470,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="scenario dir to re-read expectations from (default: as saved)",
     )
+    rs.add_argument(
+        "--db", action="store_true", help="replace the run's eval_results rows in Postgres"
+    )
+    rs.add_argument("--database-url", default=None)
     return p
 
 
@@ -550,7 +569,15 @@ def main(argv: list[str] | None = None) -> int:
     if a.command == "validate":
         return _cmd_validate(a)
     if a.command == "rescore":
-        n = rescore_dir(a.directory, a.scenarios)
+        if a.db:
+            import psycopg
+
+            with psycopg.connect(a.database_url or os.environ["DATABASE_URL"]) as conn:
+                n = rescore_dir(a.directory, a.scenarios, conn=conn)
+                conn.commit()
+            print("eval_results rows replaced", file=sys.stderr)
+        else:
+            n = rescore_dir(a.directory, a.scenarios)
         print(f"rescored {n} episodes -> {Path(a.directory) / 'summary.md'}")
         return 0
     return _cmd_run(a)

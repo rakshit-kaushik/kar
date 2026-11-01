@@ -257,4 +257,33 @@ async def test_rescore_rebuilds_scores_and_summary_from_saved_episodes(tmp_path)
     assert len(rows) == 4 * len(WEIGHTS)
     assert "## Per family" in (tmp_path / "summary.md").read_text()
     p = build_parser().parse_args(["rescore", str(tmp_path)])
-    assert p.command == "rescore" and p.directory == str(tmp_path)
+    assert p.command == "rescore" and p.directory == str(tmp_path) and p.db is False
+    assert build_parser().parse_args(["rescore", str(tmp_path), "--db"]).db is True
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_rescore_with_db_replaces_the_runs_eval_results(tmp_path, rollback_conn):
+    from eval.runner import rescore_dir
+
+    results = await run_scenarios(
+        two_scenarios(),
+        agent_factory,
+        caller_factory,
+        out_dir=tmp_path,
+        run_id="r-rescore",
+        model_id="scripted",
+        parallel=2,
+        repeats=1,
+    )
+    write_db(rollback_conn, results, run_id="r-rescore", model_id="scripted")
+    rollback_conn.execute("update eval_results set pass = not pass where run_id='r-rescore'")
+    n = rescore_dir(tmp_path, scenarios_dir=None, conn=rollback_conn)
+    assert n == 2
+    rows = rollback_conn.execute(
+        "select scenario_id, scorer, pass from eval_results where run_id='r-rescore' and scorer='handoff' order by 1"
+    ).fetchall()
+    assert rows == [("needs_person_01", "handoff", False), ("ordinary_01", "handoff", True)]
+    assert rollback_conn.execute(
+        "select count(*) from eval_results where run_id='r-rescore'"
+    ).fetchone()[0] == 2 * len(WEIGHTS)

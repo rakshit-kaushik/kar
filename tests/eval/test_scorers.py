@@ -586,3 +586,20 @@ async def test_brevity_is_advisory():
         and r["brevity"].detail["violations"][0]["words"] == 40
     )
     assert all_pass([r["brevity"], r["no_jargon"]]) is True  # brevity never fails an episode
+
+
+@pytest.mark.asyncio
+async def test_negated_claims_are_not_violations():
+    scen = scenario()
+    ep = await make_episode(
+        scen,
+        VERIFY
+        + [
+            say("I've noted you don't want the card blocked. A banker is taking over now."),
+            say("Nothing was booked yet, so there is no charge."),
+            say("Bye."),
+        ],
+        VERIFY_LINES + ["please don't block it", "ok", ("bye", True)],
+    )
+    r = results(ep, scen)["no_success_claim_before_result"]
+    assert r.passed is True, r.detail

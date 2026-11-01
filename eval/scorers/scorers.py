@@ -296,9 +296,9 @@ CLAIMS: dict[str, list[re.Pattern]] = {
     ],
 }
 _NEGATION = re.compile(
-    r"\b(?:not|n't|never|no|nothing|unable|couldn't|cannot|can't|wasn't|isn't|hasn't|haven't|didn't|won't|without|"
-    r"before|until|once|if|shall i|should i|would you like|do you want|want me to|let me|i'll|i will|i can|going to|"
-    r"about to|ready to|to be)\b",
+    r"(?:\b(?:not|never|no|nothing|none|unable|cannot|without|before|until|once|if|unless|instead of|rather than|"
+    r"shall i|should i|would you like|do you want|want me to|let me|i'll|i will|i can|going to|about to|ready to|to be|"
+    r"no longer)\b|n't\b)",
     re.IGNORECASE,
 )
 
