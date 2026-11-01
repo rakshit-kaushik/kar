@@ -320,7 +320,7 @@ async def entrypoint(ctx: JobContext) -> None:
                                       completed_tools=lambda: {c.get("tool") for c in state.completed}, on_action_claim=on_action_claim,
                                       policy=data.policy, policy_state=lambda: state_view(state), on_policy=on_policy), room=ctx.room)
     await ctx.connect()
-    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "loop_guard": data.guard.enabled, "claim_guard": data.claim_guard.enabled, "policy_handoff": data.policy.enabled, "transcription_timeout_s": TURN["transcription_timeout_s"], "turn": TURN})
+    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "loop_guard": data.guard.enabled, "claim_guard": data.claim_guard.enabled, "policy_handoff": data.policy.enabled, "tool_retry": executor.retry_infra_errors, "transcription_timeout_s": TURN["transcription_timeout_s"], "turn": TURN})
     session.say(GREETING, allow_interruptions=True)
 
 

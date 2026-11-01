@@ -163,6 +163,40 @@ def pass_cost_table(con) -> str:
         "a correct handoff counts). $/completed booking or ticket divides by outcome=completed only, so handoffs are not in that denominator._")
 
 
+WEIGHTS_NOTE = (
+    "Rows are labelled by model id, and a served name is not proof of the weights behind it. From the 08:02 deploy until the "
+    "10:52 redeploy on Nov 1, :8000 served run 1's directory (r3-voice-206506525c) under run 2's name (r3-voice-730f8ba68e): "
+    "restart.sh dropped the deploy's MODEL_DIR override when .env also defined MODEL_DIR. Every live row from that window is run 1's "
+    "and carries `206506525c-mislabelled` in its run id; those rows are real data about the rollback model, never run 2's. Run 1 "
+    "was served correctly from 04:22 to 08:02. The text-eval rows were served by per-checkpoint servers started from explicit "
+    "directories (each eval run's server.log begins with the serve command) and stand as labelled. From 10:52 every deploy and "
+    "rehearsal block records three proof lines, shown below: the listener's model directory, what /v1/models answers, and a "
+    "behavioural fingerprint, one scripted booking turn decoded greedily, in which run 1 re-asks the weekday and run 2 calls "
+    "check_availability for Tuesday."
+)
+
+
+def weights_section(con) -> str:
+    """One row per serving proof (scripts/serving_proof.py writes three ledger rows per check; a new check starts at proof.serving_path)."""
+    checks: list[tuple[str, str, dict]] = []
+    for run_id, model, item, qty, note in con.execute("select run_id, model_id, item, qty, note from cost_ledger where item like 'proof.%%' order by id").fetchall():
+        if item == "proof.serving_path" or not checks or checks[-1][0] != run_id:
+            checks.append((run_id, model, {}))
+        checks[-1][2][item] = (float(qty), note or "")
+    rows = []
+    for run_id, model, d in checks:
+        path_q, path_note = d.get("proof.serving_path", (None, ""))
+        name_q, _ = d.get("proof.v1_models", (None, ""))
+        fp_q, fp_note = d.get("proof.fingerprint_reasks_weekday", (None, ""))
+        m = re.search(r"path=([^;]+)", path_note)
+        served = os.path.basename(m.group(1).rstrip("/")) if m else "?"
+        fp = {1.0: "re-asks the weekday", 0.0: "no re-ask"}.get(fp_q, "request failed")
+        reply = fp_note.split(": ", 1)[1][:70] if ": " in fp_note else ""
+        rows.append([run_id, model, served, "match" if path_q == 1 else "MISMATCH", "match" if name_q == 1 else "MISMATCH", f"{fp}: {reply}"])
+    table = md_table(["block (run id)", "served name", "directory the process serves", "path vs target", "name vs directory", "fingerprint"], rows) if rows else "_no serving proof recorded yet_"
+    return WEIGHTS_NOTE + "\n\n" + table
+
+
 def rehearsal_table(con) -> str:
     """Per demo scenario from scripts/demo_check.py's ledger rows: passed/runs, calls where the loop or claim guard intervened, TTS vendor."""
     names = ("ordinary", "correction", "timeout", "interruption", "handoff", "handoff_person")
@@ -193,6 +227,8 @@ def rehearsal_table(con) -> str:
             "(guard n) = calls in which the agent's loop guard replaced a repeated line; (claim n) = calls in which the agent's claim guard intervened (recorded request_handoff before an announced transfer, or held back an unsupported booked/moved/cancelled/ticket sentence); (retry n) = calls in which the tool executor absorbed a transient fault with one retry on the same idempotency key, the model seeing only the final result; (policy n) = calls in which the application enforced the contract's fraud-ticket handoff rule after the model's reply, never the model's own transfer; (reprompt n) = calls in which the agent asked the caller to repeat speech that produced no transcript "
             "the model announced without the call; both application interventions counted apart from the model. "
             "Rows whose run id ends in -rules ran with the executor retry, the fraud-ticket policy rule and (from the 09:50 row) the no-transcript re-prompt on; earlier rows ran the model with the two guards only. Rows ending in -adaptive used a caller that repeats a fact the agent asks for again (phone, date of birth, day, time, branch) as a person would, instead of the fixed next line; otherwise the same scripts. "
+            "Run ids containing 206506525c-mislabelled ran on run 1's weights served under run 2's name (08:02-10:52 Nov 1) and are run 1's live rows. "
+            "Rows ending in -guards ran the redeployed run 2 with the two guards only (executor retry, policy rule and re-prompt off), the model-alone counterpart of the -rules rows. "
             "Recordings per call under $R3_ARTIFACTS/runs/<rehearsal run>/audio; the simulated caller's recordings are labelled recorded, never live._")
     return (md_table(["rehearsal run (model, stamp)"] + list(names) + ["TTS"], rows) + note) if rows else "_no rehearsal yet_"
 
@@ -218,7 +254,7 @@ def routing_table(con) -> str:
 
 def targets_table(con) -> str:
     base = ledger_metrics(con, "g1-sim-base").get("g1-sim-base", {})
-    reh = ledger_metrics(con, "rehearsal-%-all")  # the final model's rehearsal, all calls combined; the latest batch wins
+    reh = {k: v for k, v in ledger_metrics(con, "rehearsal-%-all").items() if "mislabelled" not in k}  # the final model's rehearsal, all calls combined; the latest batch wins; never a batch served under the wrong name
     reh_id, final = (list(reh.items())[-1] if reh else ("no rehearsal yet", {}))
     load = ledger_metrics(con, "load-text-%")
     adm = next((m.get("load_text.admission_limit") for m in load.values() if "load_text.admission_limit" in m), None)
@@ -244,6 +280,7 @@ def main() -> int:
         eval_ids = args.eval_run or [r[0] for r in con.execute("select distinct run_id from eval_results where run_id like 'baseline-%test%' or run_id like 'candidate-%' or run_id like 'eval-%' or run_id like '%-eval-%' order by 1").fetchall()]
         rates = load_rates(con)
         doc = [f"# R3 write-up tables — {time.strftime('%Y-%m-%d %H:%M')}", "",
+               "## What was measured on which weights", weights_section(con), "",
                "## Task completion (eval runner, 27 hand-written test scenarios × repeats)", eval_table(con, eval_ids), "",
                "## Latency per simulated-call batch", latency_table(con), "",
                "## Load test (HTTP level)", load_table(con), "",
