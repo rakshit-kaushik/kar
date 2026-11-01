@@ -343,3 +343,38 @@ def test_compare_runs_side_by_side(tmp_path):
     assert "no_jargon" in md.split("## Failures by scorer")[1]
     p = build_parser().parse_args(["compare", str(a), str(b)])
     assert p.command == "compare" and p.runs == [str(a), str(b)]
+
+
+@pytest.mark.asyncio
+async def test_run_scenarios_accepts_explicit_seeds(tmp_path):
+    results = await run_scenarios(
+        two_scenarios()[:1],
+        agent_factory,
+        caller_factory,
+        out_dir=tmp_path,
+        run_id="r",
+        model_id="scripted",
+        parallel=2,
+        seeds=[0, 2],
+    )
+    assert sorted(ep.repeat_seed for ep, _ in results) == [0, 2]
+    assert sorted(p.name for p in (tmp_path / "episodes").iterdir()) == [
+        "ordinary_01-s0.json",
+        "ordinary_01-s2.json",
+    ]
+    p = build_parser().parse_args(
+        [
+            "run",
+            "--base-url",
+            "u",
+            "--model",
+            "m",
+            "--scenarios",
+            "d",
+            "--out",
+            "o",
+            "--seeds",
+            "0,2",
+        ]
+    )
+    assert p.seeds == [0, 2] and p.repeats == 1

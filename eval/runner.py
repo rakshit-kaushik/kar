@@ -86,6 +86,7 @@ async def run_scenarios(
     repeats: int = 1,
     prompt_path: str | Path | None = None,
     progress: Callable[[str], None] | None = None,
+    seeds: list[int] | None = None,
 ) -> list[Result]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -121,7 +122,8 @@ async def run_scenarios(
                     + (f"  [{ep.error}]" if ep.error else "")
                 )
 
-    await asyncio.gather(*(one(sc, seed) for sc in scenarios for seed in range(repeats)))
+    seed_list = list(seeds) if seeds is not None else list(range(repeats))
+    await asyncio.gather(*(one(sc, seed) for sc in scenarios for seed in seed_list))
     results.sort(key=lambda r: (r[0].scenario_id, r[0].repeat_seed))
     (out / "summary.md").write_text(summarize(results, run_id=run_id, model_id=model_id))
     return results
@@ -496,6 +498,12 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument(
         "--repeats", type=int, default=1, help="episodes per scenario (caller seeds 0..N-1)"
     )
+    r.add_argument(
+        "--seeds",
+        type=lambda v: [int(x) for x in v.split(",")],
+        default=None,
+        help="explicit caller seeds, e.g. 0,2 (overrides --repeats)",
+    )
     r.add_argument("--run-id", default=None, help="default: <model>-<timestamp>")
     r.add_argument("--parallel", type=int, default=4)
     r.add_argument(
@@ -604,6 +612,7 @@ def _cmd_run(a: argparse.Namespace) -> int:
             parallel=a.parallel,
             repeats=a.repeats,
             prompt_path=a.prompt,
+            seeds=a.seeds,
             progress=lambda line: print(line, file=sys.stderr),
         )
     )
