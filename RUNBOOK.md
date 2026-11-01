@@ -75,6 +75,18 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Fallback on the fly: `scripts/gpu_flip.sh hosted`.
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
 
+### Nov 1 04:22-04:40: candidate deployed, trie verified, Cartesia out of credits
+- r3-voice-206506525c (run 1 on v2) deployed by scripts/deploy_block.sh; probe PASS; previous = Qwen3-4B-8bit (`deploy_model.sh --rollback`).
+- Prefix trie verified in production after the key fix: 2-turn probe at :8000 logged "Prefix trie cache HIT: reusing 1464 tokens,
+  prefilling 45 new" (turn 1, shared prefix from the prewarm) and "reusing 1505 tokens, prefilling 30 new" (turn 2). Turn 1
+  (10 tokens) 242 ms end to end vs 560-1070 ms before; turn 2 (tool call, 1535-token prompt) 573 ms vs ~1000 ms.
+- All 4 simulated calls in the block failed with "no audio frames were pushed" from Cartesia: `curl tts/bytes` returned
+  402 quota_exceeded ("requires approximately 19 credits but you have 2 remaining"). Fix: `AGENT_TTS=deepgram` in .env
+  (Deepgram Aura-2 on the STT key, services/agent/tts.py); agent restarted alone; probe PASS. The user decides whether to
+  top up Cartesia for the demo voice; the cost ledger prices TTS characters by the vendor recorded in call_end.tts_vendor.
+- Clean candidate latency numbers wait for the next GPU-free window (T's eval batch holds the lock to ~07:00); one functional
+  call ran during the batch (ledger run g1-sim-r3-voice-206506525c-contended, latency not comparable).
+
 ### Prefix cache: never hit until Nov 1 02:50 (root cause + fix)
 Evidence: server.log showed `prefix_trie_cache=True` at start, zero "Prefix trie cache HIT" lines in 290 live turns, and
 10-token spoken turns taking 0.46-0.55 s server-side (= full prefill of ~1.5K tokens). Cause: vllm-mlx 0.5.0 keys mlx-lm's
