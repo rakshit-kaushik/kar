@@ -25,3 +25,18 @@ Rules agreed before generation starts (2026-11-01):
   scorer verdicts per episode, STT rule version; splits by scenario family and seed persona.
   Persona and paraphrase banks seed from `$R3_ARTIFACTS/datasets/{taskmaster (TM-1..TM-4), sgd}`;
   utterances used for test paraphrases never seed training personas.
+
+## Pipeline as built (2026-11-01, ~T+7)
+
+    uv run python -m data.gen.run --n 900 --seed 201 --out $R3_ARTIFACTS/datasets/r3-voice-gen-v1 \
+        --mix "ordinary=32,missing_info=8.5,..." --parallel 20          # scenarios/ + run/ + dataset files
+    uv run python -m data.gen.run --n 300 --seed 301 --profile short --no-build --out .../r3-voice-gen-v1-short
+    python -c 'from data.format.build import build_dataset; ...'          # build from several run dirs
+    (in T's worktree) uv run python -m train.loader --data <dataset> --model $R3_ARTIFACTS/models/Qwen3-4B-8bit --n 20
+    uv run python -m data.routing.generate --per-label 84 --out $R3_ARTIFACTS/datasets/tickets-v1
+    uv run python -m data.routing.baseline --tickets .../tickets.jsonl --base-url <url> --model <id> --out <run-dir>
+
+Smoke yield (first 50 episodes, `r3-voice-gen-smoke-1`): 48/50 episodes kept; 207 targets -> 100 kept
+(27 brevity, 80 over 2,048; closing turns 4/48 kept) -> about 2.1 examples per conversation, T's
+loader: all checks passed. The 2,048 window (scaffold 1,471 tokens) is the binding filter, which is
+why v1 adds a short-call batch for closing coverage.
