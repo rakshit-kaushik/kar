@@ -560,6 +560,131 @@ def failures_report(run_dir: str | Path) -> str:
     return "\n".join(out) + "\n"
 
 
+# ----- failure buckets (plan T+16: bad data / missing example type / context truncation / model capability /
+# application logic; "harness" for transport errors) ----------------------------------------------------
+
+BUCKETS = (
+    "bad data",
+    "missing example type",
+    "context truncation",
+    "model capability",
+    "application logic",
+    "harness",
+)
+LOW_TARGETS = 30  # a tool with fewer supervised targets than this in the training set is a data gap
+DATA_SCORERS = {
+    "handoff",
+    "no_jargon",
+    "no_success_claim_before_result",
+    "verified_before_account_facts",
+    "corrections_hold",
+    "must_mention",
+    "forbidden_tools",
+}
+
+
+def bucket_for(score: dict, ep_info: dict, target_counts: dict | None) -> str:
+    """First-pass label for one failing scorer of one episode, from scorer evidence alone."""
+    if ep_info.get("outcome") == "error":
+        return "harness"
+    name, d = score["scorer"], score.get("detail", {}) or {}
+    if ep_info.get("long_context") and name in ("tool_calls", "final_state", "corrections_hold"):
+        return "context truncation"
+    if name in ("valid_tool_calls", "max_turns", "calendar_consistency", "max_successful_calls"):
+        return "model capability"
+    if name == "tool_calls":
+        tool = (d.get("first_missing") or {}).get("tool")
+        if tool and target_counts is not None and target_counts.get(tool, 0) < LOW_TARGETS:
+            return "missing example type"
+        return "model capability"
+    if name == "final_state":
+        return "application logic" if ep_info.get("tool_calls") else "missing example type"
+    if name in DATA_SCORERS:
+        return "missing example type"
+    return "model capability"
+
+
+def target_counts_from_dataset(dataset_dir: str | Path) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for split in ("train", "valid"):
+        f = Path(dataset_dir) / f"{split}.jsonl"
+        if not f.exists():
+            continue
+        for line in f.read_text().splitlines():
+            if not line.strip():
+                continue
+            for tc in json.loads(line)["messages"][-1].get("tool_calls") or []:
+                counts[(tc.get("function") or {}).get("name") or "?"] += 1
+    return dict(counts)
+
+
+def buckets_report(
+    run_dir: str | Path, target_counts: dict | None = None, dataset_dir: str | Path | None = None
+) -> str:
+    if dataset_dir is not None and target_counts is None:
+        target_counts = target_counts_from_dataset(dataset_dir)
+    rows = []
+    counts: Counter[str] = Counter()
+    for p in sorted((Path(run_dir) / "episodes").glob("*.json")):
+        ep = json.loads(p.read_text())
+        scores = ep.get("scores", [])
+        fails = [sc for sc in scores if not sc["passed"] and not sc.get("advisory")]
+        if not fails:
+            continue
+        fail_turn = min(
+            (sc["turn_idx"] for sc in fails if sc.get("turn_idx") is not None), default=None
+        )
+        info = {
+            "outcome": ep["outcome"],
+            "tool_calls": next(
+                (sc["passed"] for sc in scores if sc["scorer"] == "tool_calls"), False
+            ),
+            "long_context": bool(fail_turn and fail_turn >= 8),
+        }
+        labelled = [
+            (sc["scorer"], bucket_for(sc, info, target_counts), sc.get("turn_idx")) for sc in fails
+        ]
+        primary = max(labelled, key=lambda x: WEIGHTS.get(x[0], 0))[1]
+        counts[primary] += 1
+        rows.append((ep["episode_id"], ep["family"], primary, labelled))
+    lines = [
+        f"# Failure buckets — `{Path(run_dir).name}` (first pass by session E from scorer evidence; the human's labels win)",
+        "",
+        f"Failing episodes: {len(rows)}. Target counts per tool from the training set: {target_counts or 'n/a'}",
+        "",
+        "## Bucket counts",
+        "",
+        "| bucket | episodes |",
+        "|---|---|",
+    ]
+    for b in BUCKETS:
+        lines.append(f"| {b} | {counts.get(b, 0)} |")
+    data_fixable = counts.get("missing example type", 0) + counts.get("bad data", 0)
+    model_side = len(rows) - data_fixable - counts.get("harness", 0)
+    verdict = (
+        "run 2 is justified"
+        if data_fixable >= max(3, 0.1 * max(1, len(rows) - counts.get("harness", 0)))
+        else "run 2 is not justified"
+    )
+    lines += [
+        "",
+        (
+            f"**Verdict:** {verdict}: {data_fixable} failing episodes sit in data-fixable buckets, {model_side} in "
+            f"model/application buckets, {counts.get('harness', 0)} were harness errors. The plan's rule: run 2 only if a "
+            "bucket that data can fix is also one the test set punishes (every failing test episode counts)."
+        ),
+        "",
+        "## Per episode",
+        "",
+        "| episode | family | bucket | failing scorers (bucket, turn) |",
+        "|---|---|---|---|",
+    ]
+    for eid, fam, primary, labelled in rows:
+        detail = "; ".join(f"{sc} ({b}, t{t if t is not None else '-'})" for sc, b, t in labelled)
+        lines.append(f"| {eid} | {fam} | {primary} | {detail} |")
+    return "\n".join(lines) + "\n"
+
+
 # ----- CLI -----------------------------------------------------------------------------------
 
 
@@ -627,6 +752,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     f.add_argument("directory")
     f.add_argument("--out", default=None, help="write the markdown here (default: stdout)")
+    b = sub.add_parser(
+        "buckets",
+        help="first-pass failure buckets (data / model / application / harness) for a run directory",
+    )
+    b.add_argument("directory")
+    b.add_argument(
+        "--dataset",
+        default=None,
+        help="training dataset dir; per-tool target counts decide data gaps",
+    )
+    b.add_argument("--out", default=None)
     return p
 
 
@@ -730,6 +866,14 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_validate(a)
     if a.command == "compare":
         print(compare_runs(a.runs))
+        return 0
+    if a.command == "buckets":
+        md = buckets_report(a.directory, dataset_dir=a.dataset)
+        if a.out:
+            Path(a.out).write_text(md)
+            print(f"buckets -> {a.out}")
+        else:
+            print(md)
         return 0
     if a.command == "failures":
         md = failures_report(a.directory)

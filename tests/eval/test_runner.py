@@ -449,3 +449,84 @@ async def test_failures_dump_lists_failing_episodes_with_scorer_turn_and_context
     assert "no failing episodes" in failures_report(good)
     p = build_parser().parse_args(["failures", str(tmp_path)])
     assert p.command == "failures" and p.directory == str(tmp_path)
+
+
+def test_bucket_labels_from_scorer_evidence():
+    from eval.runner import bucket_for
+
+    assert bucket_for({"scorer": "valid_tool_calls", "detail": {}}, {}, None) == "model capability"
+    assert (
+        bucket_for(
+            {
+                "scorer": "tool_calls",
+                "detail": {"first_missing": {"tool": "reschedule_appointment"}},
+            },
+            {},
+            {"reschedule_appointment": 6},
+        )
+        == "missing example type"
+    )
+    assert (
+        bucket_for(
+            {"scorer": "tool_calls", "detail": {"first_missing": {"tool": "lookup_account"}}},
+            {},
+            {"lookup_account": 155},
+        )
+        == "model capability"
+    )
+    assert (
+        bucket_for(
+            {"scorer": "final_state", "detail": {"missing": {"appointments_new": [{}]}}},
+            {"tool_calls": True},
+            None,
+        )
+        == "application logic"
+    )
+    assert (
+        bucket_for(
+            {"scorer": "final_state", "detail": {"missing": {"appointments_new": [{}]}}},
+            {"tool_calls": False},
+            None,
+        )
+        == "missing example type"
+    )
+    assert (
+        bucket_for(
+            {"scorer": "handoff", "detail": {"required": True, "requested": False}}, {}, None
+        )
+        == "missing example type"
+    )
+    assert bucket_for({"scorer": "no_jargon", "detail": {}}, {}, None) == "missing example type"
+    assert bucket_for({"scorer": "max_turns", "detail": {}}, {}, None) == "model capability"
+    assert (
+        bucket_for({"scorer": "calendar_consistency", "detail": {}}, {}, None) == "model capability"
+    )
+    assert bucket_for({"scorer": "anything", "detail": {}}, {"outcome": "error"}, None) == "harness"
+
+
+@pytest.mark.asyncio
+async def test_buckets_report_counts_and_verdict(tmp_path):
+    from eval.runner import buckets_report
+
+    bad_agent = lambda: ScriptedAgent(
+        VERIFY + [say("Done, you're booked for Tuesday at nine thirty."), say("Goodbye.")]
+    )
+    await run_scenarios(
+        two_scenarios(),
+        bad_agent,
+        caller_factory,
+        out_dir=tmp_path,
+        run_id="r",
+        model_id="m",
+        parallel=2,
+        repeats=1,
+    )
+    md = buckets_report(
+        tmp_path,
+        target_counts={"lookup_account": 155, "check_availability": 569, "request_handoff": 194},
+    )
+    assert "## Bucket counts" in md and "missing example type" in md and "model capability" in md
+    assert "## Per episode" in md and "ordinary_01-s0" in md and "needs_person_01-s0" in md
+    assert "Verdict" in md and ("run 2 is justified" in md or "run 2 is not justified" in md)
+    p = build_parser().parse_args(["buckets", str(tmp_path), "--dataset", "/tmp/ds"])
+    assert p.command == "buckets" and p.directory == str(tmp_path) and p.dataset == "/tmp/ds"
