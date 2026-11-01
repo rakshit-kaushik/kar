@@ -1,0 +1,70 @@
+{
+  "id": "multi_intent_02",
+  "family": "multi_intent",
+  "title": "Grace blocks a lost card and moves an appointment",
+  "tests": "Two writes in one call, each read back and confirmed separately",
+  "caller": {
+    "customer_id": "C-1008",
+    "name": "Grace Nakamura",
+    "persona": "Organized; lists both things up front",
+    "knows": {
+      "phone": "5550188801",
+      "phone_spoken": "five five five zero one eight eight eight zero one",
+      "date_of_birth": "1995-06-18",
+      "first_name": "Grace",
+      "cards": [
+        "2470"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2004",
+          "what": "mortgage_consultation at Market Street on 2026-11-06T15:30"
+        }
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Two things: your card ending 2470 is lost, block it with the free standard replacement; and move your Friday November 6th mortgage consultation at Market Street to Monday November 9th at 10:30 in the morning.",
+  "expect": {
+    "final_state": {
+      "cards": [
+        {
+          "card_last4": "2470",
+          "status": "blocked",
+          "replacement": "standard"
+        }
+      ],
+      "appointments_changed": [
+        {
+          "appointment_id": "A-2004",
+          "slot_start": "2026-11-09T10:30",
+          "status": "booked"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550188801",
+          "date_of_birth": "1995-06-18"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 18,
+    "forbidden_tools": [
+      "cancel_appointment",
+      "book_appointment"
+    ],
+    "max_successful_calls": {
+      "block_card": 1,
+      "reschedule_appointment": 1
+    }
+  }
+}

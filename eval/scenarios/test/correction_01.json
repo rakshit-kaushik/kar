@@ -1,0 +1,81 @@
+{
+  "id": "correction_01",
+  "family": "correction",
+  "title": "Helena changes two o'clock to two thirty",
+  "tests": "The corrected time must be the one booked and the one read back",
+  "caller": {
+    "customer_id": "C-1010",
+    "name": "Helena Vogt",
+    "persona": "Decisive, changes her mind once",
+    "knows": {
+      "phone": "5550111123",
+      "phone_spoken": "five five five zero one one one one two three",
+      "date_of_birth": "1968-10-10",
+      "first_name": "Helena",
+      "cards": [
+        "5151"
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Book a notary appointment at Marker Street on Thursday November 5th at 2 in the afternoon. After the agent reads the booking back, say 'actually make it two thirty' and confirm that instead.",
+  "script": [
+    {
+      "trigger": "agent reads back the 2:00 booking and asks to confirm",
+      "do": "say 'actually make it two thirty', then confirm the corrected read-back"
+    }
+  ],
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1010",
+          "branch_id": "marker_st",
+          "service_type": "notary",
+          "slot_start": "2026-11-05T14:30"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550111123",
+          "date_of_birth": "1968-10-10"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "marker_st",
+          "service_type": "notary",
+          "date": "2026-11-05"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1010",
+          "branch_id": "marker_st",
+          "service_type": "notary",
+          "slot_start": "2026-11-05T14:30"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14,
+    "corrections_hold": [
+      {
+        "field": "slot_start",
+        "value": "2026-11-05T14:30"
+      }
+    ]
+  }
+}

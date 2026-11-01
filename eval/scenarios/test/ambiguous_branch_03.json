@@ -1,0 +1,81 @@
+{
+  "id": "ambiguous_branch_03",
+  "family": "ambiguous_branch",
+  "title": "Devon changes from Mill Road to 'the downtown one, Mar-'",
+  "tests": "Mid-sentence switch to an ambiguous name; agent must disambiguate to Market Street",
+  "caller": {
+    "customer_id": "C-1009",
+    "name": "Devon Price",
+    "persona": "Talks fast, self-corrects mid-sentence",
+    "knows": {
+      "phone": "5550144412",
+      "phone_spoken": "five five five zero one four four four one two",
+      "date_of_birth": "1979-02-28",
+      "first_name": "Devon",
+      "cards": [
+        "8823"
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Book a notary appointment Thursday November 5th at 4 in the afternoon. Start by saying Mill Road, then immediately say 'no wait, the downtown one, Mar- Street'. When asked which, say Market Street.",
+  "script": [
+    {
+      "trigger": "agent asks Market or Marker",
+      "do": "say Market Street"
+    }
+  ],
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1009",
+          "branch_id": "market_st",
+          "service_type": "notary",
+          "slot_start": "2026-11-05T16:00"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550144412",
+          "date_of_birth": "1979-02-28"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "market_st",
+          "service_type": "notary",
+          "date": "2026-11-05"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1009",
+          "branch_id": "market_st",
+          "service_type": "notary",
+          "slot_start": "2026-11-05T16:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14,
+    "corrections_hold": [
+      {
+        "field": "branch_id",
+        "value": "market_st"
+      }
+    ]
+  }
+}

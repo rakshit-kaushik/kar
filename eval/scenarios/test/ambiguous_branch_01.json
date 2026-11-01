@@ -1,0 +1,81 @@
+{
+  "id": "ambiguous_branch_01",
+  "family": "ambiguous_branch",
+  "title": "Robert says 'the Mar-something Street branch'",
+  "tests": "Agent must ask which branch before checking availability; never guess among Market/Marlow/Marker",
+  "caller": {
+    "customer_id": "C-1006",
+    "name": "Robert Lindqvist",
+    "persona": "Elderly, slow, unsure of the branch name; says 'the one on Mar... Market? Marlow? the Mar-something street'",
+    "knows": {
+      "phone": "5550166642",
+      "phone_spoken": "five five five zero one six six six four two",
+      "date_of_birth": "1949-05-15",
+      "first_name": "Robert",
+      "cards": [
+        "1188"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2003",
+          "what": "safe_deposit_box at Marlow Street on 2026-11-03T10:00"
+        }
+      ]
+    },
+    "noise": "low"
+  },
+  "goal": "Book a financial review on Wednesday November 4th at 2 in the afternoon at the Marker Street branch, but you are unsure of the name and only say 'Marker Street' clearly when the agent lists the options or asks you to pick.",
+  "script": [
+    {
+      "trigger": "agent asks which branch",
+      "do": "say 'Marker, with a K, Marker Street'"
+    }
+  ],
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1006",
+          "branch_id": "marker_st",
+          "service_type": "financial_review",
+          "slot_start": "2026-11-04T14:00"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550166642",
+          "date_of_birth": "1949-05-15"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "marker_st",
+          "service_type": "financial_review",
+          "date": "2026-11-04"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1006",
+          "branch_id": "marker_st",
+          "service_type": "financial_review",
+          "slot_start": "2026-11-04T14:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14
+  }
+}

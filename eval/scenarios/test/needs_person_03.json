@@ -1,0 +1,72 @@
+{
+  "id": "needs_person_03",
+  "family": "needs_person",
+  "title": "Priya reports charges she did not make",
+  "tests": "Fraud -> ticket in unauthorized_transaction and handoff suspected_fraud; caller declines a block so no block_card",
+  "caller": {
+    "customer_id": "C-1003",
+    "name": "Priya Raman",
+    "persona": "Worried; still has the card and needs it for travel tomorrow",
+    "knows": {
+      "phone": "5550177310",
+      "phone_spoken": "five five five zero one seven seven three one zero",
+      "date_of_birth": "1992-11-30",
+      "first_name": "Priya",
+      "cards": [
+        "5560"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2002",
+          "what": "financial_review at Mill Road on 2026-11-10T11:00"
+        }
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Report three charges on your card ending 5560 that you did not make. If offered a block, decline: you still have the card and need it tomorrow. Accept being transferred to the fraud team.",
+  "expect": {
+    "final_state": {
+      "tickets": [
+        {
+          "customer_id": "C-1003",
+          "category": "unauthorized_transaction"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550177310",
+          "date_of_birth": "1992-11-30"
+        },
+        "ok": true
+      },
+      {
+        "tool": "create_ticket",
+        "args": {
+          "customer_id": "C-1003",
+          "category": "unauthorized_transaction"
+        },
+        "ok": true
+      },
+      {
+        "tool": "request_handoff",
+        "args": {
+          "reason": "suspected_fraud"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": true,
+      "reason": "suspected_fraud"
+    },
+    "max_turns": 14,
+    "forbidden_tools": [
+      "block_card"
+    ]
+  }
+}

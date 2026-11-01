@@ -1,0 +1,66 @@
+{
+  "id": "duplicate_02",
+  "family": "duplicate",
+  "title": "Tomas wants to block a card that is already blocked",
+  "tests": "Conflict on block; agent says it is already blocked and opens a ticket for the express replacement instead of claiming a new block",
+  "caller": {
+    "customer_id": "C-1004",
+    "name": "Tomas Herrera",
+    "persona": "Flustered; wants a replacement fast",
+    "knows": {
+      "phone": "5550133457",
+      "phone_spoken": "five five five zero one three three four five seven",
+      "date_of_birth": "1960-01-22",
+      "first_name": "Tomas",
+      "cards": [
+        "9912"
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Report your card ending 9912 as lost and ask for it to be blocked. When told it is already blocked, ask for an express replacement to be arranged.",
+  "expect": {
+    "final_state": {
+      "tickets": [
+        {
+          "customer_id": "C-1004",
+          "category": "card_lost_stolen"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550133457",
+          "date_of_birth": "1960-01-22"
+        },
+        "ok": true
+      },
+      {
+        "tool": "block_card",
+        "args": {
+          "card_last4": "9912"
+        },
+        "ok": false
+      },
+      {
+        "tool": "create_ticket",
+        "args": {
+          "customer_id": "C-1004",
+          "category": "card_lost_stolen"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14,
+    "max_successful_calls": {
+      "block_card": 0
+    }
+  }
+}

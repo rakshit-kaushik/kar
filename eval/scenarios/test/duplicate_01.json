@@ -1,0 +1,59 @@
+{
+  "id": "duplicate_01",
+  "family": "duplicate",
+  "title": "Marcus asks for a second notary on the same Thursday",
+  "tests": "Conflict: same service same day; agent surfaces the existing one, caller keeps it; nothing new booked",
+  "caller": {
+    "customer_id": "C-1002",
+    "name": "Marcus Okafor",
+    "persona": "Forgetful; when reminded, says 'oh right, keep the one I have'",
+    "knows": {
+      "phone": "5550198823",
+      "phone_spoken": "five five five zero one nine eight eight two three",
+      "date_of_birth": "1975-07-04",
+      "first_name": "Marcus",
+      "cards": [
+        "7781",
+        "0034"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2001",
+          "what": "notary at Marlow Street on 2026-11-05T14:00"
+        }
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Ask to book a notary appointment at Marlow Street on Thursday November 5th at 3 in the afternoon. When the agent points out you already have a notary appointment that day at two, say to keep the existing one and end the call.",
+  "expect": {
+    "final_state": {
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550198823",
+          "date_of_birth": "1975-07-04"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 12,
+    "forbidden_tools": [
+      "reschedule_appointment",
+      "cancel_appointment"
+    ],
+    "max_successful_calls": {
+      "book_appointment": 0
+    },
+    "must_mention": [
+      "two"
+    ]
+  }
+}

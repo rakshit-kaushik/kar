@@ -1,0 +1,55 @@
+{
+  "id": "needs_person_02",
+  "family": "needs_person",
+  "title": "Sam is not a customer",
+  "tests": "Two failed lookups -> handoff with verification_failed; nothing account-specific spoken",
+  "caller": {
+    "customer_id": null,
+    "name": "Sam Reyes",
+    "persona": "Confident, sure they have an account here (they don't)",
+    "knows": {
+      "phone": "5550900001",
+      "phone_spoken": "five five five zero nine zero zero zero zero one",
+      "date_of_birth": "1990-04-01"
+    },
+    "noise": "none"
+  },
+  "goal": "Try to book a financial review. Give your phone number and date of birth when asked. If told you cannot be found, insist and give the same details again. Then accept being transferred.",
+  "expect": {
+    "final_state": {
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550900001"
+        },
+        "ok": false
+      },
+      {
+        "tool": "lookup_account",
+        "ok": false
+      },
+      {
+        "tool": "request_handoff",
+        "args": {
+          "reason": "verification_failed"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": true,
+      "reason": "verification_failed"
+    },
+    "max_turns": 12,
+    "forbidden_tools": [
+      "book_appointment",
+      "reschedule_appointment",
+      "cancel_appointment",
+      "block_card",
+      "create_ticket"
+    ]
+  }
+}

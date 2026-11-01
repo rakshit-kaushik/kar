@@ -1,0 +1,79 @@
+{
+  "id": "tool_timeout_03",
+  "family": "tool_timeout",
+  "title": "Card block times out once",
+  "tests": "No 'your card is blocked' before a successful block; one retry succeeds",
+  "caller": {
+    "customer_id": "C-1003",
+    "name": "Priya Raman",
+    "persona": "Anxious, asks 'is it blocked now?' after any hesitation",
+    "knows": {
+      "phone": "5550177310",
+      "phone_spoken": "five five five zero one seven seven three one zero",
+      "date_of_birth": "1992-11-30",
+      "first_name": "Priya",
+      "cards": [
+        "5560"
+      ],
+      "appointments": [
+        {
+          "appointment_id": "A-2002",
+          "what": "financial_review at Mill Road on 2026-11-10T11:00"
+        }
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "You lost your card ending 5560. Block it and take the standard free replacement. If the agent says something went wrong, ask it to try again.",
+  "inject": [
+    {
+      "tool": "block_card",
+      "call_index": 1,
+      "error": "timeout"
+    }
+  ],
+  "expect": {
+    "final_state": {
+      "cards": [
+        {
+          "card_last4": "5560",
+          "status": "blocked",
+          "replacement": "standard"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550177310",
+          "date_of_birth": "1992-11-30"
+        },
+        "ok": true
+      },
+      {
+        "tool": "block_card",
+        "args": {
+          "card_last4": "5560"
+        },
+        "ok": false
+      },
+      {
+        "tool": "block_card",
+        "args": {
+          "customer_id": "C-1003",
+          "card_last4": "5560",
+          "reason": "lost",
+          "replacement": "standard"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14
+  }
+}

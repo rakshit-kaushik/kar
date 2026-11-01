@@ -1,0 +1,72 @@
+{
+  "id": "duplicate_03",
+  "family": "duplicate",
+  "title": "Aiko asks for the same booking twice in one call",
+  "tests": "After a successful booking the caller repeats the request; agent must recognize it, not book again",
+  "caller": {
+    "customer_id": "C-1005",
+    "name": "Aiko Tanaka",
+    "persona": "Distracted; repeats herself",
+    "knows": {
+      "phone": "5550155678",
+      "phone_spoken": "five five five zero one five five six seven eight",
+      "date_of_birth": "2001-09-09",
+      "first_name": "Aiko",
+      "cards": [
+        "3307"
+      ]
+    },
+    "noise": "none"
+  },
+  "goal": "Book an account opening at Market Street on Wednesday November 4th at 10 in the morning. After it is booked, say 'oh and can you book me an account opening Wednesday at ten' as if you had not asked. Accept the agent's answer.",
+  "expect": {
+    "final_state": {
+      "appointments_new": [
+        {
+          "customer_id": "C-1005",
+          "branch_id": "market_st",
+          "service_type": "account_opening",
+          "slot_start": "2026-11-04T10:00"
+        }
+      ],
+      "no_other_changes": true
+    },
+    "tool_calls": [
+      {
+        "tool": "lookup_account",
+        "args": {
+          "phone": "5550155678",
+          "date_of_birth": "2001-09-09"
+        },
+        "ok": true
+      },
+      {
+        "tool": "check_availability",
+        "args": {
+          "branch_id": "market_st",
+          "service_type": "account_opening",
+          "date": "2026-11-04"
+        },
+        "ok": true
+      },
+      {
+        "tool": "book_appointment",
+        "args": {
+          "customer_id": "C-1005",
+          "branch_id": "market_st",
+          "service_type": "account_opening",
+          "slot_start": "2026-11-04T10:00"
+        },
+        "ok": true
+      }
+    ],
+    "handoff": {
+      "required": false,
+      "reason": null
+    },
+    "max_turns": 14,
+    "max_successful_calls": {
+      "book_appointment": 1
+    }
+  }
+}
