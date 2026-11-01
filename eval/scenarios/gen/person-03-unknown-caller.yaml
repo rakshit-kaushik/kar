@@ -1,0 +1,21 @@
+id: person-03
+family: needs_person
+title: A caller whose phone is not on file fails verification twice
+today: 2026-11-02
+customer_id: null
+known_facts: {name: Morgan Lee, phone: "5559876543", date_of_birth: "1990-01-01"}
+persona: {name: Morgan, age: 36, style: insistent, notes: is sure they have an account; maybe it is under a different number but you do not know it}
+goal: >-
+  Ask about your appointments. Give your phone number five five five nine eight seven six five four
+  three and date of birth january first nineteen ninety whenever asked, and repeat them if the agent
+  asks again. When the agent offers to connect you to a person, accept.
+expected:
+  max_turns: 10
+  handoff: true
+  handoff_reason: verification_failed
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5559876543"}, ok: false}
+    - {name: lookup_account, args: {phone: "5559876543"}, ok: false}
+    - {name: request_handoff, args: {reason: verification_failed}}
+  must_not_call: [book_appointment, block_card, create_ticket]
+  final_state: {}

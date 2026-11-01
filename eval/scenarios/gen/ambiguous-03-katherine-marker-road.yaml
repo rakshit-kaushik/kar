@@ -1,0 +1,25 @@
+id: ambiguous-03
+family: ambiguous_branch
+title: Katherine calls her Mill Road appointment "the marker road one" and wants it moved to Thursday afternoon
+today: 2026-11-02
+customer_id: C-1003
+known_facts:
+  name: Katherine Moore
+  phone: "5556542351"
+  date_of_birth: "1942-08-13"
+  memory: you have a loan appointment on Tuesday the tenth at eleven at your usual branch, which you call "marker road" (it is actually Mill Road)
+persona: {name: Katherine, age: 84, style: rambling, notes: mixes up branch names; trusts the agent to sort it out}
+goal: >-
+  Move your loan appointment from Tuesday the tenth to Thursday, November fifth, in the afternoon,
+  same branch. Call the branch "marker road" at first; accept the agent's clarification that the
+  appointment is at Mill Road. Take two thirty if offered, otherwise any afternoon time.
+expected:
+  max_turns: 12
+  handoff: false
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5556542351", date_of_birth: "1942-08-13"}}
+    - {name: reschedule_appointment, args: {appointment_id: A-7003, date: "2026-11-05"}}
+  must_not_call: [book_appointment, cancel_appointment]
+  final_state:
+    appointments:
+      - {customer_id: C-1003, branch_id: mill_rd, service_type: loan_application, date: "2026-11-05", status: booked}

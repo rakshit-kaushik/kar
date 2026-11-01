@@ -1,0 +1,27 @@
+id: correction-02
+family: correction
+title: Brandon asks for Mill Road, then corrects to Marker Street at the read-back
+today: 2026-11-02
+customer_id: C-1006
+known_facts: {name: Brandon Perez, phone: "5554131647", date_of_birth: "1998-07-13"}
+persona: {name: Brandon, age: 28, style: casual, notes: says "my bad" when correcting}
+goal: >-
+  Book a financial review on Thursday, November fifth at three in the afternoon. First ask for
+  Mill Road. When the agent reads the booking back, say you meant Marker Street, not Mill Road,
+  and confirm three o'clock at Marker Street.
+corrections:
+  - {when: the agent reads back the Mill Road booking, field: branch_id, from: mill_rd, to: marker_st, say: my bad, marker street not mill road}
+fixture:
+  free:
+    - {branch_id: mill_rd, date: 2026-11-05, slots: ["15:00"]}
+    - {branch_id: marker_st, date: 2026-11-05, slots: ["15:00"]}
+expected:
+  max_turns: 12
+  handoff: false
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5554131647", date_of_birth: "1998-07-13"}}
+    - {name: book_appointment, args: {customer_id: C-1006, branch_id: marker_st, service_type: financial_review, slot_start: "2026-11-05T15:00"}}
+  final_state:
+    appointments:
+      - {customer_id: C-1006, branch_id: mill_rd, service_type: loan_application, slot_start: "2026-11-12T15:00", status: booked}
+      - {customer_id: C-1006, branch_id: marker_st, service_type: financial_review, slot_start: "2026-11-05T15:00", status: booked}

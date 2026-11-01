@@ -1,0 +1,24 @@
+id: detour-01
+family: multi_intent_detour
+title: Dana books a mortgage consultation and asks about Saturday hours in the middle
+today: 2026-11-02
+customer_id: C-1042
+known_facts: {name: Dana Whitfield, phone: "5550142219", date_of_birth: "1988-03-12"}
+persona: {name: Dana, age: 38, style: terse}
+goal: >-
+  Book a mortgage consultation at Market Street on Wednesday, November fourth, late morning or
+  midday. Right after you are verified, before saying what you want, ask what the branch hours are
+  on Saturday. After the answer, continue with the booking.
+detours:
+  - {when: right after the agent confirms you are verified, say: actually first, what are your hours on saturday, resolution: then ask for the booking}
+expected:
+  max_turns: 12
+  handoff: false
+  tool_steps:
+    - {name: lookup_account}
+    - {name: check_availability, args: {branch_id: market_st, service_type: mortgage_consultation, date: "2026-11-04"}}
+    - {name: book_appointment, args: {customer_id: C-1042, branch_id: market_st, service_type: mortgage_consultation, date: "2026-11-04"}}
+  must_not_call: [request_handoff]
+  final_state:
+    appointments:
+      - {customer_id: C-1042, branch_id: market_st, service_type: mortgage_consultation, date: "2026-11-04", status: booked}

@@ -1,0 +1,26 @@
+id: duplicate-01
+family: duplicate_request
+title: Danielle asks to book a safe deposit visit on a day she already has one; she keeps the existing one
+today: 2026-11-02
+customer_id: C-1000
+known_facts:
+  name: Danielle Johnson
+  phone: "5554332181"
+  date_of_birth: "1996-11-11"
+  memory: you forgot you already have a safe deposit box appointment at Market Street on Tuesday the tenth at one thirty
+persona: {name: Danielle, age: 29, style: breezy}
+goal: >-
+  Book a safe deposit box appointment at Market Street on Tuesday, November tenth, in the morning.
+  When the agent points out you already have one that day at one thirty, say "oh right, keep the
+  one I have" and finish the call. Do not move or cancel it.
+fixture:
+  free: [{branch_id: market_st, date: 2026-11-10, slots: ["09:00", "09:30"]}]
+expected:
+  max_turns: 10
+  handoff: false
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5554332181", date_of_birth: "1996-11-11"}}
+  must_not_call: [cancel_appointment, reschedule_appointment]
+  final_state:
+    appointments:
+      - {customer_id: C-1000, branch_id: market_st, service_type: safe_deposit_box, slot_start: "2026-11-10T13:30", status: booked}

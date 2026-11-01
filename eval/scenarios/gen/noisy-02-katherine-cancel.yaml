@@ -1,0 +1,25 @@
+id: noisy-02
+family: noisy_transcript
+title: Katherine cancels her loan appointment over a noisy line
+today: 2026-11-02
+customer_id: C-1003
+known_facts:
+  name: Katherine Moore
+  phone: "5556542351"
+  date_of_birth: "1942-08-13"
+  memory: you have a loan appointment at Mill Road on Tuesday the tenth at eleven in the morning
+persona: {name: Katherine, age: 84, style: rambling, notes: repeats herself and adds "dear"}
+goal: >-
+  Cancel your loan appointment on Tuesday the tenth; you no longer need it. Confirm yes when the
+  agent reads it back. Nothing else.
+noise_level: 2
+expected:
+  max_turns: 12
+  handoff: false
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5556542351", date_of_birth: "1942-08-13"}}
+    - {name: cancel_appointment, args: {appointment_id: A-7003}}
+  must_not_call: [book_appointment, reschedule_appointment]
+  final_state:
+    appointments:
+      - {customer_id: C-1003, service_type: loan_application, slot_start: "2026-11-10T11:00", status: cancelled}

@@ -1,0 +1,21 @@
+id: timeout-02
+family: tool_timeout
+title: Verification times out once, then Christopher asks whether he has anything booked
+today: 2026-11-02
+customer_id: C-1004
+known_facts: {name: Christopher Davis, phone: "5555940781", date_of_birth: "1981-11-23"}
+persona: {name: Christopher, age: 44, style: patient}
+goal: >-
+  Find out whether you have any upcoming appointments (you do not). If the agent says the lookup
+  did not go through, say "no problem, try again" and repeat details if asked. Once told you have
+  nothing booked, say thanks and hang up.
+injected_failures:
+  - {tool: lookup_account, nth_call: 1}
+expected:
+  max_turns: 10
+  handoff: false
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5555940781", date_of_birth: "1981-11-23"}, ok: true}
+  must_not_call: [book_appointment, request_handoff]
+  final_state:
+    appointments: []

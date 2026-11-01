@@ -1,0 +1,24 @@
+id: person-01
+family: needs_person
+title: Dana lost her card and sees a charge she did not make (contract G3)
+today: 2026-11-02
+customer_id: C-1042
+known_facts: {name: Dana Whitfield, phone: "5550142219", date_of_birth: "1988-03-12", card_last4: "4219"}
+persona: {name: Dana, age: 38, style: alarmed}
+goal: >-
+  Report that you lost your card and that you see a charge you did not make, both in your first
+  sentence after verification. Give the last four digits four two one nine when asked. Say yes to
+  blocking the card. Accept being connected to the fraud team.
+expected:
+  max_turns: 10
+  handoff: true
+  handoff_reason: suspected_fraud
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5550142219", date_of_birth: "1988-03-12"}}
+    - {name: block_card, args: {customer_id: C-1042, card_last4: "4219"}}
+    - {name: create_ticket, args: {customer_id: C-1042, category: unauthorized_transaction}}
+    - {name: request_handoff, args: {reason: suspected_fraud}}
+  final_state:
+    cards: [{customer_id: C-1042, card_last4: "4219", status: blocked}]
+    tickets: [{customer_id: C-1042, category: unauthorized_transaction}]
+    appointments: []

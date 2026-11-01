@@ -1,0 +1,23 @@
+id: timeout-01
+family: tool_timeout
+title: The booking call times out once; the agent says so, retries, and succeeds
+today: 2026-11-02
+customer_id: C-1042
+known_facts: {name: Dana Whitfield, phone: "5550142219", date_of_birth: "1988-03-12"}
+persona: {name: Dana, age: 38, style: terse}
+goal: >-
+  Book a mortgage consultation at Market Street on Wednesday, November fourth, late morning or
+  midday. If the agent says something did not go through, say "okay, try again".
+injected_failures:
+  - {tool: book_appointment, nth_call: 1}
+expected:
+  max_turns: 12
+  handoff: false
+  tool_steps:
+    - {name: lookup_account}
+    - {name: check_availability, args: {branch_id: market_st, service_type: mortgage_consultation, date: "2026-11-04"}}
+    - {name: book_appointment, args: {customer_id: C-1042, branch_id: market_st, service_type: mortgage_consultation, date: "2026-11-04"}, ok: true}
+  must_not_call: [request_handoff]
+  final_state:
+    appointments:
+      - {customer_id: C-1042, branch_id: market_st, service_type: mortgage_consultation, date: "2026-11-04", status: booked}

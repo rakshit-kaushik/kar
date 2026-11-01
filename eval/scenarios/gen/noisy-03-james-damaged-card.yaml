@@ -1,0 +1,27 @@
+id: noisy-03
+family: noisy_transcript
+title: James replaces a damaged card over a noisy line
+today: 2026-11-02
+customer_id: C-1002
+known_facts:
+  name: James Santos
+  phone: "5558637940"
+  date_of_birth: "1987-03-28"
+  card_last4: "9195"
+persona: {name: James, age: 39, style: mumbling, notes: calling from a windy street}
+goal: >-
+  Your debit card ending nine one nine five is cracked and no longer works at the machine. Ask for
+  it to be blocked and a free standard replacement mailed. Say yes when the agent reads the block
+  back. No strange charges, do not mention any.
+noise_level: 2
+expected:
+  max_turns: 12
+  handoff: false
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5558637940", date_of_birth: "1987-03-28"}}
+    - {name: block_card, args: {customer_id: C-1002, card_last4: "9195", reason: damaged}}
+  must_not_call: [create_ticket, request_handoff]
+  final_state:
+    cards: [{customer_id: C-1002, card_last4: "9195", status: blocked}]
+    appointments:
+      - {customer_id: C-1002, branch_id: marlow_st, service_type: financial_review, slot_start: "2026-11-11T12:00", status: booked}

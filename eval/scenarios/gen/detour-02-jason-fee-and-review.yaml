@@ -1,0 +1,23 @@
+id: detour-02
+family: multi_intent_detour
+title: Jason disputes an overdraft fee and books a financial review in one call
+today: 2026-11-02
+customer_id: C-1010
+known_facts: {name: Jason Porter, phone: "5557242388", date_of_birth: "1947-07-12", branch: Marlow Street}
+persona: {name: Jason, age: 79, style: grumbling, notes: annoyed about a thirty-five dollar overdraft fee charged last week}
+goal: >-
+  Two things. First, complain about a thirty-five dollar overdraft fee from last week that you
+  think is unfair and want reviewed. Second, book a financial review at Marlow Street on Thursday,
+  November fifth, in the afternoon; take the first afternoon time offered.
+expected:
+  max_turns: 14
+  handoff: false
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5557242388", date_of_birth: "1947-07-12"}}
+    - {name: create_ticket, args: {customer_id: C-1010, category: fee_dispute}}
+    - {name: book_appointment, args: {customer_id: C-1010, branch_id: marlow_st, service_type: financial_review, date: "2026-11-05"}}
+  must_not_call: [request_handoff]
+  final_state:
+    tickets: [{customer_id: C-1010, category: fee_dispute}]
+    appointments:
+      - {customer_id: C-1010, branch_id: marlow_st, service_type: financial_review, date: "2026-11-05", status: booked}

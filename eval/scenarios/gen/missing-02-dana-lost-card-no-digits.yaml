@@ -1,0 +1,25 @@
+id: missing-02
+family: missing_information
+title: Dana lost her card but does not say which card or the last four digits
+today: 2026-11-02
+customer_id: C-1042
+known_facts:
+  name: Dana Whitfield
+  phone: "5550142219"
+  date_of_birth: "1988-03-12"
+  card: you have one debit card; you do not remember its last four digits (it ends in four two one nine if the agent reads it to you)
+persona: {name: Dana, age: 38, style: flustered, notes: lost the card at the gym; no strange charges, do not mention any}
+goal: >-
+  Get your lost debit card blocked and a free standard replacement mailed. Open with "i lost my
+  card". If asked for the last four digits say you do not have it with you; agree if the agent
+  names the card ending four two one nine. Say yes when asked to confirm the block.
+expected:
+  max_turns: 10
+  handoff: false
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5550142219", date_of_birth: "1988-03-12"}}
+    - {name: block_card, args: {customer_id: C-1042, card_last4: "4219", reason: lost}}
+  must_not_call: [create_ticket, request_handoff]
+  final_state:
+    cards: [{customer_id: C-1042, card_last4: "4219", status: blocked}]
+    appointments: []

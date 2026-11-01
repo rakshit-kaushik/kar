@@ -1,0 +1,20 @@
+id: person-02
+family: needs_person
+title: Christopher asks for a human twice; the agent offers to help once, then hands off
+today: 2026-11-02
+customer_id: C-1004
+known_facts: {name: Christopher Davis, phone: "5555940781", date_of_birth: "1981-11-23"}
+persona: {name: Christopher, age: 44, style: firm, notes: does not want to explain his issue to an automated line}
+goal: >-
+  Get transferred to a person. Say "i'd like to speak to a person please" as your first request.
+  If the agent offers to help, say "no thank you, a person please". Give your phone number and
+  date of birth if asked, but do not explain what the issue is. Accept the transfer.
+expected:
+  max_turns: 8
+  handoff: true
+  handoff_reason: caller_requested
+  tool_steps:
+    - {name: request_handoff, args: {reason: caller_requested}}
+  must_not_call: [book_appointment, block_card, create_ticket]
+  final_state:
+    appointments: []
