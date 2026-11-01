@@ -2,13 +2,12 @@
   "type": "function",
   "function": {
     "name": "check_availability",
-    "description": "List open 30-minute slots at a branch for a service on one date. Errors: invalid_argument, unavailable, timeout.",
+    "description": "Open 30-minute slots at a branch for a service on a date.",
     "parameters": {
       "type": "object",
       "properties": {
         "branch_id": {
           "type": "string",
-          "description": "One of",
           "enum": [
             "market_st",
             "marlow_st",
@@ -18,7 +17,6 @@
         },
         "service_type": {
           "type": "string",
-          "description": "One of",
           "enum": [
             "account_opening",
             "mortgage_consultation",
@@ -37,8 +35,7 @@
         "branch_id",
         "service_type",
         "date"
-      ],
-      "additionalProperties": false
+      ]
     }
   }
 }

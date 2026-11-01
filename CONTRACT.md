@@ -8,6 +8,7 @@ Status: DRAFT v0.1 for review · Oct 31, 2026 · Every session reads this before
 | --- | --- |
 | Machine | M5 Max, 36 GB unified memory (plan assumed 64; micro-batch stays 1, no spec-decode test until load tests say there is headroom) |
 | Base model | `mlx-community/Qwen3-4B-8bit`, thinking disabled, served via vllm-mlx (oMLX fallback) |
+| System prompt | `schemas/system_prompt.md`, one file loaded byte-for-byte by S, E and T (placeholders `{weekday}`, `{today_long}`, `{today}`, `{now}`); ~375 tokens. Prefix budget: system prompt + the 7 tool schemas + first caller turn ≈ 1,430 tokens of the 2,048 window, leaving ~615 for the rest of the call |
 | Hosted model | Anthropic `claude-sonnet-5-5` through the OpenAI-compatible endpoint; plays the caller, the teacher agent, the fallback, the baseline |
 | Voice | Deepgram STT → model → Cartesia `sonic-3.6` TTS inside LiveKit Agents `AgentSession`; browser only |
 | Ports | model server 8000 · proxy 8001 · UI 3000 · Postgres 5432 · agent (LiveKit worker) no port |
@@ -32,7 +33,7 @@ Status: DRAFT v0.1 for review · Oct 31, 2026 · Every session reads this before
 | reschedule | move an existing appointment | `reschedule_appointment` ok and read back |
 | cancel | cancel an existing appointment | `cancel_appointment` ok and read back |
 | status | say when and where an upcoming appointment is | facts from `lookup_account` spoken |
-| lost or stolen card | block the card, offer a replacement | `block_card` ok and read back |
+| lost or stolen card | open a `card_lost_stolen` ticket and hand off; a banker blocks the card | `create_ticket` ok and `request_handoff` ok |
 | dispute or complaint | open a ticket in the right category | `create_ticket` ok, ticket id read back |
 | speak to a person | hand off | `request_handoff` ok, one closing sentence |
 
@@ -47,11 +48,11 @@ Status: DRAFT v0.1 for review · Oct 31, 2026 · Every session reads this before
 | notary | 30 min | $10 per document |
 | safe_deposit_box | 30 min | $60 per year, small box |
 
-Card replacement: standard mail 5–7 business days, free; express 2 business days, $25. No other prices, rates or fees exist; anything else is "I can't quote that, a banker can".
+No other prices, rates or fees exist; anything else is "I can't quote that, a banker can".
 
-**Exceptions.** unknown account (two failed lookups → handoff); no availability (offer next two days or another branch); ambiguous branch (Market vs Marlow vs Marker → ask, never guess); duplicate booking (same service, same day → tool returns `conflict`, ask whether to keep or move); tool timeout (say so, one retry, then handoff); card already blocked (`conflict` → say it is already blocked, offer replacement status); suspected fraud (any mention of transactions the caller did not make → ticket `unauthorized_transaction` *and* handoff).
+**Exceptions.** unknown account (two failed lookups → handoff); no availability (offer next two days or another branch); ambiguous branch (Market vs Marlow vs Marker → ask, never guess); duplicate booking (same service, same day → tool returns `conflict`, ask whether to keep or move); tool timeout (say so, one retry, then handoff); suspected fraud (any mention of transactions the caller did not make → ticket `unauthorized_transaction` *and* handoff).
 
-**Prohibited.** Stating anything account-specific before `lookup_account` returns `verified: true`. Confirming a booking, block, cancellation or ticket a tool has not returned. Prices, hours or policies outside the catalog. Booking outside hours or in the past. Blocking a card without an explicit yes after read-back. Saying tool names, ids as internal jargon, "system", "function", "JSON".
+**Prohibited.** Stating anything account-specific before `lookup_account` returns `verified: true`. Confirming a booking, cancellation or ticket a tool has not returned. Prices, hours or policies outside the catalog. Booking outside hours or in the past. Saying tool names, ids as internal jargon, "system", "function", "JSON".
 
 **Handoff rules.** Hand off on: suspected fraud; identity verification failed twice; caller asks for a person twice (first ask → offer to help once); any request outside the intents; a tool failing twice. Never hand off when a listed intent is still completable.
 
@@ -59,7 +60,7 @@ Card replacement: standard mail 5–7 business days, free; express 2 business da
 
 1. One question per turn. Never two.
 2. Nothing account-specific is spoken until `lookup_account` has returned `verified: true`.
-3. Before any write (`book`, `reschedule`, `cancel`, `block_card`, `create_ticket`) read back every argument in one sentence and get an explicit yes.
+3. Before any write (`book`, `reschedule`, `cancel`, `create_ticket`) read back every argument in one sentence and get an explicit yes.
 4. Replies are one or two sentences, at most 35 words.
 5. Numbers as spoken: times "two thirty in the afternoon", dates "Tuesday, November fourth", card digits "ending in four two one nine", never "14:30" or "11/04".
 6. On a correction: acknowledge in half a sentence, replace the fact, re-confirm the whole action before writing. A corrected fact wins over an earlier one everywhere.
@@ -111,13 +112,12 @@ Final state: appointment at 14:30 (not 14:00); stale-detail scorer passes.
 C: i lost my card and i see a charge i didn't make
 A: I'm sorry to hear that. Which card is it, the last four digits?
 C: four two one nine
-A: I'll block the card ending in four two one nine right now so nothing else goes through. Go ahead?
+A: I'll open a fraud case for the card ending in four two one nine and get you to our fraud team, who will block it. Go ahead?
 C: yes please
-→ `block_card(customer_id="C-1042", card_last4="4219", reason="lost", idempotency_key=…)` → `{blocked:true}`
 → `create_ticket(customer_id="C-1042", category="unauthorized_transaction", summary="Lost card 4219; caller reports a charge they did not make", idempotency_key=…)` → `{ticket_id:"T-5520"}`
-→ `request_handoff(reason="suspected_fraud", summary="Card 4219 blocked, ticket T-5520 opened, caller reports unauthorized charge")`
-A: The card is blocked and I've opened a fraud case, number five five two zero. I'm connecting you to our fraud team now, please hold.
-Final state: card blocked; ticket category unauthorized_transaction; handoff=true.
+→ `request_handoff(reason="suspected_fraud", summary="Ticket T-5520 opened; lost card 4219 not yet blocked; caller reports unauthorized charge")`
+A: I've opened a fraud case, number five five two zero, and I'm connecting you to our fraud team now to block the card. Please hold.
+Final state: ticket category unauthorized_transaction; handoff=true; no card state changed.
 
 **B1 — unsupported success claim (must fail).**
 C: can you book me for friday at ten
@@ -132,7 +132,7 @@ Scorers: corrected-detail scorer fails; tool-argument scorer fails.
 
 ## 4. Tool schemas
 
-Files in `schemas/tools/*.json` are the source of truth; the simulator, the agent and the eval runner all load the same files. Each is OpenAI function-calling format, kept near 60 tokens of description. Every write takes `idempotency_key` (string, caller-generated UUID); the sandbox returns the original result on a repeated key.
+Files in `schemas/tools/*.json` are the source of truth; the simulator, the agent and the eval runner all load the same files. Each is OpenAI function-calling format, trimmed to names, types, required lists and enums (no `additionalProperties`, no error lists, no boilerplate property text): the Qwen3 template renders the seven files to ≈1,040 tokens, measured with the base tokenizer. Every write takes `idempotency_key` (string, caller-generated UUID); the sandbox returns the original result on a repeated key.
 
 | Tool | Writes | Error codes |
 | --- | --- | --- |
@@ -141,11 +141,10 @@ Files in `schemas/tools/*.json` are the source of truth; the simulator, the agen
 | `book_appointment(customer_id, branch_id, service_type, slot_start, idempotency_key)` | yes | `conflict`, `unavailable`, `invalid_argument`, `timeout` |
 | `reschedule_appointment(appointment_id, new_slot_start, idempotency_key)` | yes | `not_found`, `conflict`, `unavailable`, `timeout` |
 | `cancel_appointment(appointment_id, idempotency_key)` | yes | `not_found`, `timeout` |
-| `block_card(customer_id, card_last4, reason, idempotency_key)` | yes | `not_found`, `conflict`, `timeout` |
 | `create_ticket(customer_id, category, summary, idempotency_key)` | yes | `invalid_argument`, `timeout` |
 | `request_handoff(reason, summary)` | yes | none |
 
-Error shape: `{"error": "<code>", "message": "<short text>"}`. The simulator injects `timeout` on a schedule for the tool-timeout family. `block_card` is the first tool cut if the schema block pushes turn-2 prefill over 150 tokens with the cache on.
+Error shape: `{"error": "<code>", "message": "<short text>"}`. The simulator injects `timeout` on a schedule for the tool-timeout family. `block_card` was cut on 2026-11-01 for the prompt budget; lost or stolen cards go to `create_ticket` + `request_handoff`.
 
 ## 5. Session state (`schemas/state.json`)
 
@@ -172,7 +171,7 @@ Derived latencies: end-of-speech→first-audio = `tts_first_audio − speech_end
 ## 7. Interfaces and storage
 
 - The model is always an OpenAI-compatible chat-completions URL with `tools`; streaming; tool calls arrive as `tool_calls` deltas (the proxy on 8001 guarantees this and strips `<think>`).
-- Simulator, agent and eval runner import tools from `schemas/tools/`, sandbox data from `eval/sandbox/`.
+- Simulator, agent, eval runner and training data all load the system prompt from `schemas/system_prompt.md` and the tools from `schemas/tools/`; sandbox data from `eval/sandbox/`. The serving prompt must be a byte-for-byte prefix of every training example.
 - Postgres tables: `customers`, `appointments`, `cards`, `tickets` (sandbox seed, reset per episode) · `sessions`, `turn_events`, `eval_results` (run_id, model_id, scenario_id, family, scorer, pass, detail), `cost_ledger` (run_id, model_id, item, qty, unit_cost, measured bool).
 - Eval runner CLI: `r3-eval --base-url … --model … --scenarios eval/scenarios/test/ --out runs/<id>/` — scores any URL identically.
 
@@ -216,7 +215,7 @@ Sessions: **S** serving · **E** eval + data · **T** training · **D** cost led
 
 ## 11. Open items for the human
 
-- [ ] Confirm the banking framing and the eight tools (or cut `block_card`)
+- [x] Banking framing confirmed; `block_card` cut 2026-11-01 (prompt budget); seven tools
 - [ ] Confirm catalog prices and hours above
 - [ ] Write the 27 test scenarios at T+5 (three per family in §8)
 - [ ] Confirm routing taxonomy; name any category to drop
