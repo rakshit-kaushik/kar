@@ -15,6 +15,8 @@ Steps (each recorded in $R3_ARTIFACTS/runs/eval-batch-<ts>/batch.json):
 --local-caller (hosted credits out): the base is served on port+2/port+3 as the simulated caller for the
 whole batch and every candidate is scored with `--caller-base-url http://127.0.0.1:<port+3>/v1
 --caller-model r3-voice-base`; run ids end in -localcaller so the rows never mix with hosted-caller rows.
+Every run id carries the batch stamp (<model>-eval-<YYYYMMDD-HHMMSS>[-localcaller]) so a rerun of a model never
+shares a run id, a run dir or Postgres rows with an earlier batch.
 """
 from __future__ import annotations
 
@@ -77,6 +79,8 @@ def main(argv=None) -> int:
     caller_proc = None
     caller_args = ""
     suffix = ""
+    stamp = batch_id.removeprefix("eval-batch-")
+    produced: list[dict] = []  # the tables this batch scored, for the ranking
     if a.local_caller:
         caller_out = out / "caller-serve"
         cmd = [sys.executable, "-m", "train.eval_hook", "--model-dir", str(base), "--model-name", "r3-voice-base", "--port", str(a.port + 2),
@@ -84,6 +88,10 @@ def main(argv=None) -> int:
         record["caller"] = {"command": cmd, "base_url": f"http://127.0.0.1:{a.port + 3}/v1", "started": True, "stopped": False}
         caller_args = f" --caller-base-url http://127.0.0.1:{a.port + 3}/v1 --caller-model r3-voice-base"
         suffix = "-localcaller"
+
+    def run_id_for(model_id: str, kind: str = "eval") -> str:
+        return f"{model_id}-{kind}-{stamp}{suffix}"
+
     lock = None
     if not a.no_lock:
         lock = acquire_gpu(root, LOCK_OWNER, minutes, batch_id, wait_minutes=180)
@@ -119,7 +127,7 @@ def main(argv=None) -> int:
             save()
         for dir_name, repeats, model_id in cands:
             model_dir = artifacts / "models" / dir_name
-            run_id = f"{model_id}-eval{suffix}"
+            run_id = run_id_for(model_id)
             runner_base = (os.environ.get("R3_EVAL_RUNNER") or "/Users/abgup/conductor/workspaces/kar/stockholm/.venv/bin/r3-eval run").split(" --repeats")[0].split(" --caller-base-url")[0]
             os.environ["R3_EVAL_RUNNER_CWD"] = os.environ.get("R3_EVAL_RUNNER_CWD") or "/Users/abgup/conductor/workspaces/kar/stockholm"
             runner_args = f" --repeats {repeats} --retries 6 --backoff 5{caller_args}"
@@ -132,6 +140,7 @@ def main(argv=None) -> int:
                                            out_dir=artifacts / "runs" / run_id / "eval", port=a.port,
                                            database_url=None if a.no_db else "env", timeout=900, through_proxy=True)
                 step.update(selection=table["selection"], overall=table["overall"], runner=table["runner"], rc=table["returncode"])
+                produced.append(table)
                 # mirror the table into the training run's directory when there is one
                 for rj in (artifacts / "runs").glob("*/run.json"):
                     rec = _safe(rj)
@@ -145,7 +154,7 @@ def main(argv=None) -> int:
             save()
         if a.gate:
             model_dir = artifacts / "models" / a.gate
-            run_id = f"{a.gate}-adapter-eval{suffix}"
+            run_id = run_id_for(a.gate, "adapter-eval")
             runner_base = (os.environ.get("R3_EVAL_RUNNER") or "/Users/abgup/conductor/workspaces/kar/stockholm/.venv/bin/r3-eval run").split(" --repeats")[0].split(" --caller-base-url")[0]
             if not os.environ.get("R3_EVAL_FORCE_STUB"):
                 os.environ["R3_EVAL_RUNNER"] = runner_base + f" --repeats 1 --retries 6 --backoff 5{caller_args}"
@@ -155,11 +164,11 @@ def main(argv=None) -> int:
                 adapter_table = evaluate_model_dir(model_dir, model_name=f"{a.gate}-adapter", run_id=run_id, scenarios=a.scenarios,
                                                    out_dir=artifacts / "runs" / run_id / "eval", adapter=model_dir / "adapter", base=base,
                                                    port=a.port, database_url=None if a.no_db else "env", timeout=900, through_proxy=True)
-                fused_table = _safe(artifacts / "runs" / f"{a.gate}-eval{suffix}" / "eval" / "family_table.json")
+                fused_table = _safe(artifacts / "runs" / run_id_for(a.gate) / "eval" / "family_table.json")
                 if fused_table:
                     gate = precision_gate(fused_table, adapter_table)
                     step["gate"] = gate
-                    (artifacts / "runs" / f"{a.gate}-eval{suffix}" / "eval" / "precision_gate.json").write_text(json.dumps(gate, indent=2) + "\n")
+                    (artifacts / "runs" / run_id_for(a.gate) / "eval" / "precision_gate.json").write_text(json.dumps(gate, indent=2) + "\n")
                     print(f"[batch] precision gate {a.gate}: fused {gate['fused_pass_rate']} vs adapter {gate['adapter_pass_rate']} on {gate['scorer']}: "
                           f"{'PASS' if gate['pass'] else 'FAIL'}", flush=True)
                 step["selection"] = adapter_table["selection"]
@@ -185,11 +194,7 @@ def main(argv=None) -> int:
             record["lock"]["released"] = rc == 0
         record["finished_at"] = time.time()
         save()
-    tables = []
-    for rj in (artifacts / "runs").glob("*/eval/family_table.json"):
-        t = _safe(rj)
-        if t and t.get("selection"):
-            tables.append(t)
+    tables = [t for t in produced if t.get("selection")]  # this batch's tables only: an older batch scored with another caller is not comparable
     if a.base_table:
         try:
             tables.append(table_from_scores(Path(a.base_table), model_name="r3-voice-base"))

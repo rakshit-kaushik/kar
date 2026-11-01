@@ -1,5 +1,6 @@
 """The training write-up: every run under $R3_ARTIFACTS/runs (run.json), its eval table when one
-exists (runs/<id>/eval/family_table.json), and the candidate selection by the plan's rule.
+exists (runs/<id>/eval/family_table_excl.json when E's caller-fault exclusion was applied, else family_table.json),
+and the candidate selection by the G4 rule on one basis for every model.
 
     uv run python -m train.report --out $R3_ARTIFACTS/runs/TRAINING-REPORT.md [--table <family_table.json> ...]
 """
@@ -59,16 +60,57 @@ def routing_rows(artifacts: Path, runs: list[dict], ledger_reader=ledger_routing
     return rows
 
 
+def _newest(a: dict | None, b: dict) -> dict:
+    """Of two tables for the same model, the one written last (created_at, else the file's mtime recorded at load)."""
+    if a is None:
+        return b
+    return b if (b.get("created_at") or "", b.get("_mtime") or 0) >= (a.get("created_at") or "", a.get("_mtime") or 0) else a
+
+
+def _load_table(p: Path) -> dict | None:
+    t = _load(p)
+    if t and t.get("selection"):
+        t["_mtime"] = p.stat().st_mtime
+        t["_path"] = str(p)
+    return t
+
+
+def gather_tables(runs_dir: Path, extra_tables: list[Path] | None = None) -> tuple[list[dict], str]:
+    """Every scored candidate under runs/*/eval, one table per model (the newest), all on the same basis:
+    the caller-fault-excluded tables (family_table_excl.json, E's compare --exclude-caller-faults applied) when any
+    exist, else the raw tables. Mixing the two bases would compare different episode sets."""
+    excl: dict[str, dict] = {}
+    raw: dict[str, dict] = {}
+    for d in sorted(runs_dir.glob("*")) if runs_dir.exists() else []:
+        for name, bucket in (("family_table_excl.json", excl), ("family_table.json", raw)):
+            t = _load_table(d / "eval" / name)
+            if t:
+                bucket[t.get("model")] = _newest(bucket.get(t.get("model")), t)
+    for p in extra_tables or []:
+        t = _load_table(Path(p))
+        if t:
+            bucket = excl if t.get("excluded") else raw
+            bucket[t.get("model")] = _newest(bucket.get(t.get("model")), t)
+    if excl:
+        return list(excl.values()), "caller-fault-excluded"
+    return list(raw.values()), "raw"
+
+
 def build_report(artifacts: Path, extra_tables: list[Path] | None = None, tasks: tuple[str, ...] = ("voice", "routing", "rehearse"),
                  ledger_reader=ledger_routing_scores) -> dict:
     runs_dir = Path(artifacts) / "runs"
-    runs, tables = [], []
+    tables, basis = gather_tables(runs_dir, extra_tables)
+    for t in tables:  # tables rebuilt from scores.jsonl carry no model dir; the fused artifact lives under models/<model id>
+        if not t.get("model_dir") and (Path(artifacts) / "models" / str(t.get("model"))).is_dir():
+            t["model_dir"] = str(Path(artifacts) / "models" / str(t.get("model")))
+    by_model = {t.get("model"): t for t in tables}
+    runs = []
     for d in sorted(runs_dir.glob("*")) if runs_dir.exists() else []:
         rec = _load(d / "run.json")
         if not rec or rec.get("task") not in tasks or rec.get("task") == "rehearse":
             continue
         m = rec.get("metrics") or {}
-        table = _load(d / "eval" / "family_table.json")
+        table = by_model.get(rec.get("model_id"))
         runs.append({
             "run_id": rec.get("run_id"), "task": rec.get("task"), "status": rec.get("status"), "model_id": rec.get("model_id"),
             "model_dir": rec.get("model_dir"), "config": rec.get("config_path"), "git": (rec.get("git") or {}).get("short"),
@@ -77,27 +119,24 @@ def build_report(artifacts: Path, extra_tables: list[Path] | None = None, tasks:
             "optimizer_steps": (rec.get("sizing") or {}).get("optimizer_steps"), "cut": (rec.get("sizing") or {}).get("cut"),
             "wall_min": round((m.get("wall_seconds") or 0) / 60, 1), "tokens_per_sec": m.get("total_tokens_per_second"),
             "peak_gb": round(m["peak_memory_gb"], 1) if m.get("peak_memory_gb") is not None else None, "val_loss": [m.get("initial_val_loss"), m.get("final_val_loss")],
-            "eval": table["selection"] if table else None, "error": rec.get("error"),
+            "eval": table["selection"] if table else None, "eval_run_id": table.get("run_id") if table else None, "error": rec.get("error"),
         })
-        if table and table.get("selection"):
-            tables.append(table)
-    for p in extra_tables or []:
-        t = _load(Path(p))
-        if t and t.get("selection"):
-            tables.append(t)
     ranked = select_candidates(tables) if tables else []
+    excluded = next((t.get("excluded") for t in tables if t.get("excluded")), None) if basis == "caller-fault-excluded" else None
     return {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "artifacts": str(artifacts), "runs": runs,
-            "selection": {"selected": ranked[0] if ranked else None, "ranked": ranked},
+            "selection": {"selected": ranked[0] if ranked else None, "ranked": ranked, "basis": basis,
+                          "excluded_prefixes": len((excluded or {}).get("prefixes") or []), "exclude_file": (excluded or {}).get("file"),
+                          "tables": [{"model": t.get("model"), "run_id": t.get("run_id"), "path": t.get("_path")} for t in tables]},
             "routing": routing_rows(artifacts, runs, ledger_reader)}
 
 
 def render_report(rep: dict) -> str:
     out = [f"# R3 training report ({rep['generated_at']})", "", "## Runs", "",
-           "| run | task | status | model | data (n) | iters / opt steps | wall min | tokens/s | peak GB | val loss first -> last | eval: completion / tool calls / unsupported claims |",
+           "| run | task | status | model | data (n) | iters / opt steps | wall min | tokens/s | peak GB | val loss first -> last | eval: all-pass / completion / tool calls / unsupported claims |",
            "|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in rep["runs"]:
         ev = r["eval"]
-        ev_txt = f"{ev['task_completion']} / {ev['tool_calls']} / {ev['unsupported_success_claims']}" if ev else "-"
+        ev_txt = f"{ev.get('all_pass', '-')} / {ev['task_completion']} / {ev['tool_calls']} / {ev['unsupported_success_claims']}" if ev else "-"
         cut = f" (cut from {r['cut']['from']})" if r.get("cut") else ""
         vl = r["val_loss"]
         vl_txt = f"{vl[0]:.2f} -> {vl[1]:.2f}" if vl and vl[0] is not None and vl[1] is not None else "-"
@@ -105,12 +144,18 @@ def render_report(rep: dict) -> str:
         out.append(f"| {r['run_id']} | {r['task']} | {r['status']}{(' (' + r['error'][:60] + ')') if r.get('error') else ''} | {r['model_id']} | "
                    f"{r['manifest_hash']} ({r['n_train']}) | {r['iters']}{cut} / {r['optimizer_steps']} | {r['wall_min']} | {tps} | "
                    f"{r['peak_gb'] if r['peak_gb'] is not None else '-'} | {vl_txt} | {ev_txt} |")
-    out += ["", "## Candidates (test set, scored by r3-eval; zero unsupported success claims first, then task completion, then tool calls)", ""]
-    if rep["selection"]["ranked"]:
-        out += ["| rank | model | task completion | tool calls | unsupported claims | episodes |", "|---|---|---|---|---|---|"]
-        out += [f"| {c['rank']} | {c['model']} | {c['task_completion']} | {c['tool_calls']} | {c['unsupported_success_claims']} | {c['episodes']} |"
-                for c in rep["selection"]["ranked"]]
-        s = rep["selection"]["selected"]
+    sel = rep["selection"]
+    basis = ("caller-fault-excluded episodes (E's compare --exclude-caller-faults; " + f"{sel.get('excluded_prefixes')} scenario x seed episodes dropped)"
+             if sel.get("basis") == "caller-fault-excluded" else "all episodes (no caller-fault exclusion applied)")
+    out += ["", "## Candidates (test set, scored by r3-eval; G4 rule: all-pass rate first, unsupported success claims as the tie-breaker toward zero, "
+            "then task completion, then tool calls; never loss)", "", f"Basis: {basis}. One table per model, the newest.", ""]
+    if sel["ranked"]:
+        out += ["| rank | model | all-pass | unsupported claims | task completion | tool calls | episodes | eval run |", "|---|---|---|---|---|---|---|---|"]
+        rid = {t["model"]: t["run_id"] for t in sel.get("tables", [])}
+        out += [f"| {c['rank']} | {c['model']} | {c.get('all_pass') if c.get('all_pass') is not None else '-'} | {c['unsupported_success_claims']} | "
+                f"{c['task_completion']} | {c['tool_calls']} | {c['episodes']} | {rid.get(c['model']) or '-'} |"
+                for c in sel["ranked"]]
+        s = sel["selected"]
         out += ["", f"**Selected: {s['model']}** ({s['reason']}); model dir `{s.get('model_dir')}`."]
     else:
         out.append("No scored candidates yet.")

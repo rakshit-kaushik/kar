@@ -1,6 +1,7 @@
 """The eval batch's local-caller mode: the base is served on a second side pair as the simulated caller
 and every candidate is scored with the runner pointed at it (fake servers, stub runner)."""
 import json
+import re
 import socket
 import sys
 from pathlib import Path
@@ -35,7 +36,7 @@ def test_local_caller_batch_serves_the_caller_pair_and_scores_candidates_with_it
     batch = json.loads(next((art / "runs").glob("eval-batch-*/batch.json")).read_text())
     assert batch["caller"]["base_url"] == f"http://127.0.0.1:{port + 3}/v1" and batch["caller"]["stopped"] is True
     step = next(s for s in batch["steps"] if s["step"] == "eval")
-    assert step["run_id"] == "fake-cand-eval-localcaller" and step["selection"]["episodes"] == 1
+    assert re.fullmatch(r"fake-cand-eval-\d{8}-\d{6}-localcaller", step["run_id"]) and step["selection"]["episodes"] == 1
     assert "--caller-base-url" in step["runner_args"] and f"127.0.0.1:{port + 3}" in step["runner_args"]
 
 
@@ -65,5 +66,8 @@ def test_gate_step_scores_the_unfused_adapter_on_the_base_and_writes_the_precisi
     batch = json.loads(next((art / "runs").glob("eval-batch-*/batch.json")).read_text())
     gate = next(s for s in batch["steps"] if s["step"] == "gate")
     assert gate["model_id"] == "r3-voice-abc" and gate["adapter"].endswith("r3-voice-abc/adapter") and gate["gate"]["pass"] is True
-    assert (art / "runs" / "r3-voice-abc-adapter-eval" / "eval" / "family_table.json").exists()
-    assert (art / "runs" / "r3-voice-abc-eval" / "eval" / "precision_gate.json").exists()
+    stamp = batch["batch_id"].removeprefix("eval-batch-")
+    assert gate["run_id"] == f"r3-voice-abc-adapter-eval-{stamp}"
+    assert (art / "runs" / f"r3-voice-abc-adapter-eval-{stamp}" / "eval" / "family_table.json").exists()
+    assert (art / "runs" / f"r3-voice-abc-eval-{stamp}" / "eval" / "precision_gate.json").exists()
+    assert [r["model"] for r in batch["ranking"]] == ["r3-voice-abc"]  # only this batch's tables are ranked

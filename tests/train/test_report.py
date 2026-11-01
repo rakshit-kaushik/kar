@@ -65,3 +65,32 @@ def test_report_has_a_routing_row_from_zero_shot_scores_and_the_adapters_ledger_
     assert rows["r3-voice-base"]["macro_f1"] == 0.8348 and rows["claude-sonnet-5-5"]["accuracy"] == 0.99
     md = render_report(rep)
     assert "## Routing" in md and "| r3-routing-abc | adapter | 0.91 |" in md
+
+
+def test_report_ranks_on_the_caller_fault_excluded_tables_when_any_exist_and_keeps_the_newest_per_model(tmp_path):
+    from train.report import gather_tables
+
+    sel = lambda ap, tc, claims: {"task_completion": tc, "tool_calls": 50.0, "unsupported_success_claims": claims, "episodes": 13, "all_pass": ap}
+    # run 1: an old raw table in the training run dir, a newer excluded table in the eval run dir
+    _run(tmp_path, "voice-run1", "voice", "done", "r3-voice-bbb", 900.0, 0.40,
+         {"model": "r3-voice-bbb", "created_at": "2026-11-01T04:53:00+00:00", "selection": sel(None, 66.0, 7)})
+    for rid, model, created, ap, tc, claims in (("r3-voice-bbb-eval-20261101-073000-localcaller", "r3-voice-bbb", "2026-11-01T08:00:00+00:00", 23.6, 85.5, 6),
+                                                  ("r3-voice-bbb-eval-localcaller", "r3-voice-bbb", "2026-11-01T05:11:00+00:00", 30.0, 90.0, 1),
+                                                  ("r3-voice-base-eval-localcaller", "r3-voice-base", "2026-11-01T05:11:00+00:00", 15.4, 84.6, 0)):
+        d = tmp_path / "runs" / rid / "eval"
+        d.mkdir(parents=True)
+        (d / "family_table.json").write_text(json.dumps({"model": model, "run_id": rid, "created_at": created, "selection": sel(None, tc - 20, claims)}))
+        (d / "family_table_excl.json").write_text(json.dumps({"model": model, "run_id": rid, "created_at": created, "selection": sel(ap, tc, claims),
+                                                              "excluded": {"file": "/x/compare-excl-caller-faults.md", "prefixes": ["ordinary_02-s0"] * 26}}))
+    (tmp_path / "models" / "r3-voice-bbb").mkdir(parents=True)
+
+    tables, basis = gather_tables(tmp_path / "runs")
+    assert basis == "caller-fault-excluded" and sorted(t["model"] for t in tables) == ["r3-voice-base", "r3-voice-bbb"]
+    assert {t["model"]: t["run_id"] for t in tables}["r3-voice-bbb"] == "r3-voice-bbb-eval-20261101-073000-localcaller"  # newest, not best
+    rep = build_report(tmp_path)
+    assert rep["selection"]["basis"] == "caller-fault-excluded" and rep["selection"]["excluded_prefixes"] == 26
+    assert [c["model"] for c in rep["selection"]["ranked"]] == ["r3-voice-bbb", "r3-voice-base"]
+    assert rep["selection"]["selected"]["all_pass"] == 23.6 and rep["selection"]["selected"]["model_dir"] == str(tmp_path / "models" / "r3-voice-bbb")
+    assert rep["runs"][0]["eval"]["all_pass"] == 23.6 and rep["runs"][0]["eval_run_id"] == "r3-voice-bbb-eval-20261101-073000-localcaller"
+    md = render_report(rep)
+    assert "caller-fault-excluded" in md and "| 1 | r3-voice-bbb | 23.6 | 6 |" in md
