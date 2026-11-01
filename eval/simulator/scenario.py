@@ -71,12 +71,16 @@ class Fixture(BaseModel):
     customers: list[dict[str, Any]] = []
     cards: list[dict[str, Any]] = []
     appointments: list[dict[str, Any]] = []
+    free: list[dict[str, Any]] = []
     unavailable: list[dict[str, Any]] = []
 
 
 class ToolStep(BaseModel):
     name: str
     args: dict[str, Any] = {}
+    ok: bool | None = (
+        None  # when set, the matching call must have succeeded (True) or failed (False)
+    )
 
     @field_validator("name")
     @classmethod

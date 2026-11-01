@@ -210,7 +210,10 @@ class Sandbox:
                           cards?: ["4219", ...]}]
           cards:        [{customer_id, card_last4, status?: active|blocked, replacement?}]
           appointments: [{customer_id, branch_id, service_type, slot_start, status?}]
-          unavailable:  [{branch_id, date, slots?: ["09:00", ...]}]   # default: whole day
+          free:         [{branch_id, date, slots?: ["14:00", ...]}]   # evict seed bookings (default: whole day)
+          unavailable:  [{branch_id, date, slots?: ["09:00", ...]}]   # fill with bookings (default: whole day)
+        `free` is applied before `unavailable`, so free + unavailable on one day leaves exactly the
+        free slots open.
         """
         for c in fixture.get("customers", []):
             cid = c.get("customer_id") or f"C-{self._next_customer}"
@@ -271,11 +274,19 @@ class Sandbox:
                 self._next_appointment += 1
             self.appointments.append(ap)
             self._fixture_customer_ids.add(a["customer_id"])
+        freed: set[tuple[str, datetime]] = set()
+        for f in fixture.get("free", []):
+            d = date.fromisoformat(f["date"]) if isinstance(f["date"], str) else f["date"]
+            for hhmm in f.get("slots") or S.slots_for(d):
+                self._evict_slot(f["branch_id"], S.slot_dt(d, hhmm))
+                freed.add((f["branch_id"], S.slot_dt(d, hhmm)))
         fillers = [c for c in self.customers if c.filler]
         for u in fixture.get("unavailable", []):
             d = date.fromisoformat(u["date"]) if isinstance(u["date"], str) else u["date"]
             for hhmm in u.get("slots") or S.slots_for(d):
                 dt = S.slot_dt(d, hhmm)
+                if (u["branch_id"], dt) in freed:
+                    continue
                 if self.slot_is_open(u["branch_id"], dt):
                     self.appointments.append(
                         S.Appointment(

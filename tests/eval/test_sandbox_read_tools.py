@@ -193,3 +193,17 @@ def test_reset_restores_seed_and_clears_log(sb):
     assert len(sb.appointments) == n_before  # fixture is part of the episode baseline
     sb2 = Sandbox(seed=42, today=TODAY)
     assert len(sb.appointments) > len(sb2.appointments)
+
+
+def test_fixture_free_opens_named_slots_and_unavailable_fills_the_rest(sb):
+    sb.apply_fixture(
+        {
+            "free": [{"branch_id": "marlow_st", "date": "2026-11-06", "slots": ["14:00", "14:30"]}],
+            "unavailable": [{"branch_id": "marlow_st", "date": "2026-11-06"}],
+        }
+    )
+    r = sb.call(
+        "check_availability",
+        {"branch_id": "marlow_st", "service_type": "notary", "date": "2026-11-06"},
+    )
+    assert r["slots"] == ["14:00", "14:30"]
