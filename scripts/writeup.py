@@ -93,7 +93,7 @@ def ledger_metrics(con, run_like: str) -> dict[str, dict[str, float]]:
 
 def latency_table(con) -> str:
     runs = {}
-    for like in ("g1-%", "g2-%", "load-c%"):
+    for like in ("g1-%", "g2-%", "load-c%", "rehearsal-%-all"):  # rehearsal batches: the combined row only, not the six per-scenario rows
         runs.update(ledger_metrics(con, like))
     runs = {k: v for k, v in runs.items() if any(i.startswith("g1.") for i in v)}
     if not runs:
@@ -196,13 +196,18 @@ def routing_table(con) -> str:
 
 def targets_table(con) -> str:
     base = ledger_metrics(con, "g1-sim-base").get("g1-sim-base", {})
+    reh = ledger_metrics(con, "rehearsal-%-all")  # the final model's rehearsal, all calls combined; the latest batch wins
+    reh_id, final = (list(reh.items())[-1] if reh else ("no rehearsal yet", {}))
     load = ledger_metrics(con, "load-text-%")
     adm = next((m.get("load_text.admission_limit") for m in load.values() if "load_text.admission_limit" in m), None)
     rows = []
     for key, label, target in TARGETS:
-        val = adm if key == "load_text.admission_limit" else base.get(key)
-        rows.append([label, target, fmt(val) if val is not None else "-"])
-    return md_table(["measure", "proposed target", "measured (g1-sim-base, base model)"], rows)
+        if key == "load_text.admission_limit":
+            rows.append([label, target, fmt(adm) if adm is not None else "-", fmt(adm) if adm is not None else "-"])
+            continue
+        b, f = base.get(key), final.get(key)
+        rows.append([label, target, fmt(b) if b is not None else "-", fmt(f) if f is not None else "-"])
+    return md_table(["measure", "proposed target", "measured (g1-sim-base, base model)", f"measured ({reh_id}, final model)"], rows)
 
 
 def main() -> int:
