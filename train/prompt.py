@@ -7,21 +7,41 @@ placeholders the same way. Formats used here (to be confirmed with S and E):
     today_long -> "November 1, 2026"    (%B D, YYYY)
     today      -> "2026-11-01"          (ISO)
     now        -> "10:15"               (%H:%M)
-The file's trailing newline is kept (byte-for-byte).
+The file's trailing newline is kept (byte-for-byte). Placeholders absent from the file are simply not
+filled (a prompt with only {today} works). The path follows the contract (schemas/system_prompt.md),
+then services/agent/system_prompt.md, or $R3_SYSTEM_PROMPT_PATH.
 """
 from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import os
+from pathlib import Path
 
-from train.env import repo_root
+from train.env import load_env, repo_root
 
-SYSTEM_PROMPT_PATH = repo_root() / "schemas" / "system_prompt.md"
 PLACEHOLDERS = ("weekday", "today_long", "today", "now")
+# first existing file wins; $R3_SYSTEM_PROMPT_PATH overrides (the human may move the file to services/agent/)
+CANDIDATE_PATHS = ("schemas/system_prompt.md", "services/agent/system_prompt.md")
+
+
+def system_prompt_path() -> Path:
+    load_env()
+    override = os.environ.get("R3_SYSTEM_PROMPT_PATH")
+    if override:
+        return Path(override).expanduser()
+    for rel in CANDIDATE_PATHS:
+        p = repo_root() / rel
+        if p.exists():
+            return p
+    raise FileNotFoundError(f"no system prompt file at {CANDIDATE_PATHS}; set R3_SYSTEM_PROMPT_PATH")
+
+
+SYSTEM_PROMPT_PATH = repo_root() / CANDIDATE_PATHS[0]  # the contract's location (for messages and manifests)
 
 
 def system_prompt_template() -> str:
-    return SYSTEM_PROMPT_PATH.read_text()
+    return system_prompt_path().read_text()
 
 
 def placeholder_values(now: dt.datetime) -> dict[str, str]:
@@ -44,4 +64,4 @@ def render_system_prompt(now: dt.datetime, template: str | None = None) -> str:
 
 
 def system_prompt_sha256() -> str:
-    return hashlib.sha256(SYSTEM_PROMPT_PATH.read_bytes()).hexdigest()
+    return hashlib.sha256(system_prompt_path().read_bytes()).hexdigest()

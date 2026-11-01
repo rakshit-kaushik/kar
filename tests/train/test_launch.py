@@ -72,3 +72,38 @@ def test_dry_run_writes_the_plan_and_touches_nothing_else(synth_dir, base_4b, tm
     assert run["data"]["manifest_hash"] and run["data"]["stats"]["n"] == 20
     assert run["git"]["hash"] and run["model_id"].startswith("r3-voice-")
     assert not (tmp_path / "art" / "models").exists()
+
+
+def test_stop_server_terminates_whatever_listens_on_the_port(tmp_path):
+    import socket
+    import subprocess
+    import sys
+    import time
+
+    from train.launch import _listening_pids, start_server, stop_server
+
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    proc = subprocess.Popen([sys.executable, "-m", "http.server", str(port), "--bind", "127.0.0.1"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        for _ in range(50):
+            if _listening_pids(port):
+                break
+            time.sleep(0.1)
+        assert proc.pid in _listening_pids(port)
+        stop_server(port, timeout=10)
+        assert _listening_pids(port) == [] and proc.wait(timeout=5) is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_start_server_reports_the_command_exit_code(monkeypatch):
+    from train.launch import start_server
+
+    monkeypatch.setenv("R3_SERVER_START_CMD", "exit 3")
+    assert start_server() == 3
+    monkeypatch.setenv("R3_SERVER_START_CMD", "true")
+    assert start_server() == 0

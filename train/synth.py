@@ -24,9 +24,10 @@ import uuid
 from pathlib import Path
 
 from train.env import repo_root
-from train.prompt import SYSTEM_PROMPT_PATH, placeholder_values, render_system_prompt
+from train.prompt import placeholder_values, render_system_prompt, system_prompt_path
 
 TOOLS_DIR = repo_root() / "schemas" / "tools"
+HAS_BLOCK_CARD = (TOOLS_DIR / "block_card.json").exists()  # the lost-card scenarios follow the live contract
 SYNTH_NOW = dt.datetime(2026, 10, 31, 10, 15)  # Saturday; appointments fall in the following two weeks
 TODAY = SYNTH_NOW.date()
 
@@ -265,36 +266,67 @@ def correction(rng: random.Random):
 
 
 def lost_card_fraud(rng: random.Random):
-    """CONTRACT.md G3: fraud mention -> unauthorized_transaction ticket, then handoff; nobody blocks a card."""
+    """CONTRACT.md G3. With block_card in the contract: block, then ticket + handoff in one two-call turn.
+    Without it (cut 2026-11-01): unauthorized_transaction ticket, then handoff; a banker blocks the card."""
     c = Caller(rng)
     turns = _verified_opening(rng, c)
     turns += [
         user("i lost my card and i see a charge i didn't make"),
         assistant("I'm sorry to hear that. Which card is it, the last four digits?"),
         user(spoken_digits(c.last4)),
-        assistant(f"I'll open a fraud case for the card ending in {spoken_digits(c.last4)} and get you to our fraud team, who will block it. Go ahead?"),
-        user("yes please"),
     ]
     ticket = f"T-{rng.randint(1000, 9999)}"
-    create = tool_calls(rng, ("create_ticket", {
-        "customer_id": c.customer_id, "category": "unauthorized_transaction",
-        "summary": f"Lost card {c.last4}; caller reports a charge they did not make", "idempotency_key": _ikey(rng)}))
-    turns += [create, *tool_results(create, {"ticket_id": ticket})]
-    handoff = tool_calls(rng, ("request_handoff", {
-        "reason": "suspected_fraud", "summary": f"Ticket {ticket} opened; lost card {c.last4} not yet blocked; caller reports unauthorized charge"}))
-    turns += [handoff, *tool_results(handoff, {"ok": True})]
-    turns += [assistant(f"I've opened a fraud case, number {spoken_digits(ticket[2:])}, and I'm connecting you to our fraud team now to block the card. Please hold.")]
-    return "lost_card_fraud", turns, [(_index_of(turns, "I'm sorry"), "clarification"), (turns.index(create), "tool_call"), (len(turns) - 1, "closing")]
+    summary = f"Lost card {c.last4}; caller reports a charge they did not make"
+    if HAS_BLOCK_CARD:
+        turns += [
+            assistant(f"I'll block the card ending in {spoken_digits(c.last4)} right now so nothing else goes through. Go ahead?"),
+            user("yes please"),
+        ]
+        block = tool_calls(rng, ("block_card", {"customer_id": c.customer_id, "card_last4": c.last4, "reason": "lost", "idempotency_key": _ikey(rng)}))
+        turns += [block, *tool_results(block, {"blocked": True})]
+        escalate = tool_calls(
+            rng,
+            ("create_ticket", {"customer_id": c.customer_id, "category": "unauthorized_transaction", "summary": summary, "idempotency_key": _ikey(rng)}),
+            ("request_handoff", {"reason": "suspected_fraud", "summary": f"Card {c.last4} blocked, fraud ticket opened, caller reports unauthorized charge"}),
+        )
+        turns += [escalate, *tool_results(escalate, {"ticket_id": ticket}, {"ok": True})]
+        turns += [assistant(f"The card is blocked and I've opened a fraud case, number {spoken_digits(ticket[2:])}. I'm connecting you to our fraud team now, please hold.")]
+        targets = [(turns.index(block), "tool_call"), (turns.index(escalate), "tool_call"), (len(turns) - 1, "closing")]
+    else:
+        turns += [
+            assistant(f"I'll open a fraud case for the card ending in {spoken_digits(c.last4)} and get you to our fraud team, who will block it. Go ahead?"),
+            user("yes please"),
+        ]
+        create = tool_calls(rng, ("create_ticket", {"customer_id": c.customer_id, "category": "unauthorized_transaction", "summary": summary, "idempotency_key": _ikey(rng)}))
+        turns += [create, *tool_results(create, {"ticket_id": ticket})]
+        handoff = tool_calls(rng, ("request_handoff", {
+            "reason": "suspected_fraud", "summary": f"Ticket {ticket} opened; lost card {c.last4} not yet blocked; caller reports unauthorized charge"}))
+        turns += [handoff, *tool_results(handoff, {"ok": True})]
+        turns += [assistant(f"I've opened a fraud case, number {spoken_digits(ticket[2:])}, and I'm connecting you to our fraud team now to block the card. Please hold.")]
+        targets = [(_index_of(turns, "I'm sorry"), "clarification"), (turns.index(create), "tool_call"), (len(turns) - 1, "closing")]
+    return "lost_card_fraud", turns, targets
 
 
 def lost_card(rng: random.Random):
-    """Lost card without a fraud mention: card_lost_stolen ticket and handoff in one turn (two tool calls)."""
+    """Lost card without a fraud mention. With block_card: read back, block, close. Without it: card_lost_stolen
+    ticket and handoff in one turn (two tool calls); a banker blocks the card."""
     c = Caller(rng)
     turns = _verified_opening(rng, c)
     turns += [
         user("i think i lost my debit card somewhere yesterday"),
         assistant("I'm sorry to hear that. Which card, the last four digits?"),
         user(spoken_digits(c.last4)),
+    ]
+    if HAS_BLOCK_CARD:
+        turns += [
+            assistant(f"I'll block the card ending in {spoken_digits(c.last4)} right now so nothing else goes through. Go ahead?"),
+            user("yes"),
+        ]
+        block = tool_calls(rng, ("block_card", {"customer_id": c.customer_id, "card_last4": c.last4, "reason": "lost", "idempotency_key": _ikey(rng)}))
+        turns += [block, *tool_results(block, {"blocked": True})]
+        turns += [assistant(f"The card ending in {spoken_digits(c.last4)} is blocked. Thanks {c.name}, goodbye.")]
+        return "lost_card", turns, [(_index_of(turns, "I'll block"), "clarification"), (turns.index(block), "tool_call"), (len(turns) - 1, "closing")]
+    turns += [
         assistant(f"I'll open a lost-card case for the card ending in {spoken_digits(c.last4)} and get you to a banker who will block it. Go ahead?"),
         user("yes"),
     ]
@@ -468,7 +500,7 @@ def write_dataset(out_dir: Path, n_train: int = 20, n_valid: int = 4, seed: int 
         "sha256": {name: sha256_file(out_dir / name) for name in files.values()},
         "counts": {"train": len(train), "valid": len(valid)},
         "targets_per_conversation": 3,
-        "system_prompt": {"path": str(SYSTEM_PROMPT_PATH.relative_to(repo_root())), "sha256": sha256_file(SYSTEM_PROMPT_PATH),
+        "system_prompt": {"path": str(system_prompt_path()), "sha256": sha256_file(system_prompt_path()),
                           "placeholders": placeholder_values(SYNTH_NOW)},
         "tools": {p.stem: sha256_file(p) for p in sorted(TOOLS_DIR.glob("*.json"))},
         "note": "synthetic dry-run data from the contract's example dialogues; never train a candidate on it",
