@@ -88,6 +88,9 @@ empty `<think>` block, so turn 2+ prefills 30-150 new tokens instead of 1.5-2.3K
 request pair against :8000 must log "Prefix trie cache HIT (stream_chat): reusing N tokens, prefilling M new" on the
 second request (scripts/deploy_block.sh does this).
 
+- `scripts/deploy_block.sh $R3_ARTIFACTS/models/r3-voice-<hash>`: the ≤15-min hand-back block under lock S: deploy, probe, 2-turn trie probe (expects a "Prefix trie cache HIT" log line), 3 simulated calls + 1 interruption call, g1_report + cost into the ledger, release.
+- `scripts/routing_scheduler.sh` (MODEL_DIR=...): labels unlabeled tickets whenever the GPU lock is free. Not running during the demo: the lock is free while live calls are served, and a second 4B model competes with them. Run the batch job on demand in a free window instead.
+
 ### Hosted fallback is a hedge (Nov 1, 02:20)
 A local turn with no first token after `PROXY_FIRST_TOKEN_TIMEOUT_MS` (3000) no longer gets cancelled: the proxy starts the
 hosted request beside it and serves whichever streams a token first (`fallback` event with `hedged: true`, then

@@ -142,7 +142,9 @@ def routing_table(con) -> str:
             rows.append([f"{title.group(1) if title else '?'} zero-shot ({os.path.basename(os.path.dirname(path))})", m.group(1), m.group(2), m.group(3), m.group(4), "E's runner"])
     for run_id, m in sorted(ledger_metrics(con, "routing-%").items()):
         if "routing.accuracy" in m:
-            rows.append([f"{run_id.replace('routing-', '')} adapter (batch job)", fmt(m["routing.accuracy"], 3), fmt(m["routing.macro_f1"], 3), fmt(m["routing.coverage"], 3), fmt(m["routing.weighted_error"]), "services/routing/batch.py"])
+            source = run_id[len("routing-"):] if run_id.startswith("routing-") else run_id
+            kind = "base zero-shot" if "base" in source else "adapter"
+            rows.append([f"{source} ({kind}, batch job)", fmt(m["routing.accuracy"], 3), fmt(m["routing.macro_f1"], 3), fmt(m["routing.coverage"], 3), fmt(m["routing.weighted_error"]), "services/routing/batch.py"])
     return md_table(["model", "accuracy", "macro F1", "coverage", "weighted error", "source"], rows) if rows else "_no routing results yet_"
 
 
