@@ -322,6 +322,46 @@ def _insert_eval_results(
     return len(scores)
 
 
+def _ledger_rows(results: list[Result], run_id: str, model_id: str) -> list[tuple]:
+    usage = {
+        "agent_prompt_tokens": 0,
+        "agent_completion_tokens": 0,
+        "caller_prompt_tokens": 0,
+        "caller_completion_tokens": 0,
+    }
+    for ep, _ in results:
+        for who in ("agent", "caller"):
+            u = ep.usage.get(who, {}) or {}
+            usage[f"{who}_prompt_tokens"] += int(u.get("prompt_tokens", 0) or 0)
+            usage[f"{who}_completion_tokens"] += int(u.get("completion_tokens", 0) or 0)
+    rows = [
+        (run_id, model_id, "episodes", len(results), "episode", True, "r3-eval run"),
+        (
+            run_id,
+            model_id,
+            "episodes_passed",
+            sum(1 for _, sc in results if all_pass(sc)),
+            "episode",
+            True,
+            "episodes passing every non-advisory scorer",
+        ),
+    ]
+    rows += [
+        (run_id, model_id, item, qty, "token", True, "r3-eval measured usage")
+        for item, qty in usage.items()
+    ]
+    return rows
+
+
+def _insert_ledger(cur, results: list[Result], run_id: str, model_id: str) -> int:
+    rows = _ledger_rows(results, run_id, model_id)
+    cur.executemany(
+        "insert into cost_ledger (run_id, model_id, item, qty, unit, measured, note) values (%s, %s, %s, %s, %s, %s, %s)",
+        rows,
+    )
+    return len(rows)
+
+
 def write_db(conn, results: list[Result], *, run_id: str, model_id: str) -> dict[str, int]:
     from psycopg.types.json import Jsonb
 
@@ -344,38 +384,7 @@ def write_db(conn, results: list[Result], *, run_id: str, model_id: str) -> dict
                 ),
             )
             counts["sessions"] += 1
-        usage = {
-            "agent_prompt_tokens": 0,
-            "agent_completion_tokens": 0,
-            "caller_prompt_tokens": 0,
-            "caller_completion_tokens": 0,
-        }
-        for ep, _ in results:
-            for who in ("agent", "caller"):
-                u = ep.usage.get(who, {}) or {}
-                usage[f"{who}_prompt_tokens"] += int(u.get("prompt_tokens", 0) or 0)
-                usage[f"{who}_completion_tokens"] += int(u.get("completion_tokens", 0) or 0)
-        rows = [
-            (run_id, model_id, "episodes", len(results), "episode", True, "r3-eval run"),
-            (
-                run_id,
-                model_id,
-                "episodes_passed",
-                sum(1 for _, sc in results if all_pass(sc)),
-                "episode",
-                True,
-                "episodes passing every non-advisory scorer",
-            ),
-        ]
-        rows += [
-            (run_id, model_id, item, qty, "token", True, "r3-eval measured usage")
-            for item, qty in usage.items()
-        ]
-        cur.executemany(
-            "insert into cost_ledger (run_id, model_id, item, qty, unit, measured, note) values (%s, %s, %s, %s, %s, %s, %s)",
-            rows,
-        )
-        counts["cost_ledger"] += len(rows)
+        counts["cost_ledger"] += _insert_ledger(cur, results, run_id, model_id)
     return counts
 
 
@@ -408,7 +417,7 @@ def validate_dir(directory: str | Path) -> dict[str, list[str]]:
 def rescore_dir(directory: str | Path, scenarios_dir: str | Path | None = None, conn=None) -> int:
     """Re-run the scorers over <dir>/episodes/*.json; rewrite scores.jsonl and summary.md.
 
-    With `conn`, the run's eval_results rows are replaced (sessions and cost_ledger stay)."""
+    With `conn`, the run's eval_results and cost_ledger rows are replaced from the saved episodes (sessions stay)."""
     from eval.simulator.scenario import parse_scenario
 
     out = Path(directory)
@@ -434,6 +443,8 @@ def rescore_dir(directory: str | Path, scenarios_dir: str | Path | None = None, 
             cur.execute("delete from eval_results where run_id = %s", (run_id,))
             for ep, scores in results:
                 _insert_eval_results(cur, ep, scores, run_id, model_id)
+            cur.execute("delete from cost_ledger where run_id = %s", (run_id,))
+            _insert_ledger(cur, results, run_id, model_id)
     return len(results)
 
 
