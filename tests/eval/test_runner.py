@@ -738,3 +738,16 @@ def test_agent_repeats_mirrors_the_loop_guard_rule():
     # tool-call-only turns (empty content) are not lines
     tool_turns = {"messages": [{"role": "assistant", "content": "", "tool_calls": [{}]}] * 3}
     assert agent_repeats(tool_turns) == {"rephrase": 0, "handoff": 0, "max_streak": 0}
+
+
+def test_agent_repeats_exempts_a_repeated_farewell_like_the_live_guard():
+    from eval.runner import agent_repeats
+
+    msgs = []
+    for line in [
+        "I've booked it for Tuesday. Goodbye.",
+        "I've booked it for Tuesday. Goodbye.",
+        "Goodbye, take care.",
+    ]:
+        msgs += [{"role": "assistant", "content": line}, {"role": "user", "content": "goodbye"}]
+    assert agent_repeats({"messages": msgs}) == {"rephrase": 0, "handoff": 0, "max_streak": 1}

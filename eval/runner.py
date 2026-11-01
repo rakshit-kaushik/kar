@@ -711,6 +711,13 @@ def _normalize_line(text: str) -> str:
     return " ".join(re.sub(r"[^a-z0-9 ]+", " ", text.lower()).split())
 
 
+# The live guard exempts a repeated farewell (a closing line said twice to a caller who keeps saying
+# goodbye); same pattern as services/agent/loopguard, applied to the normalized previous line.
+_GUARD_FAREWELL = re.compile(
+    r"\b(goodbye|good bye|bye|take care|have a (good|great|nice) (day|one|evening|afternoon|morning))\b"
+)
+
+
 def agent_repeats(ep: dict) -> dict:
     """How often S's application-side loop guard would have intervened on this transcript: the
     first consecutive identical assistant line is swallowed and rephrased, the second becomes a
@@ -724,7 +731,7 @@ def agent_repeats(ep: dict) -> dict:
     rephrase = handoff = 0
     best = run = 1 if lines else 0
     for a, b in zip(lines, lines[1:]):
-        run = run + 1 if a == b else 1
+        run = run + 1 if a == b and not _GUARD_FAREWELL.search(a) else 1
         best = max(best, run)
         if run == 2:
             rephrase += 1
@@ -827,7 +834,9 @@ def buckets_report(
         f"times in a row; their max_turns failure is bucketed as harness): {len(stuck_callers)}"
         + ("".join(f"\n- {eid}: {why}" for eid, why in stuck_callers) if stuck_callers else ""),
         "",
-        f"Adapter repetition (S's loop guard would have intervened: first identical line rephrased, second a handoff): "
+        f"Adapter repetition (S's loop guard would have intervened: first identical line rephrased, second a handoff; "
+        f"a repeated farewell is exempt; exact match after normalization, so one-word variants such as "
+        f"'Which day' -> 'Which date' are not counted, same as the live guard): "
         f"{len(repeaters)} failing episodes, {sum(r['rephrase'] for _, r in repeaters)} rephrases, "
         f"{sum(r['handoff'] for _, r in repeaters)} handoffs"
         + (
