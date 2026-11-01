@@ -384,3 +384,31 @@ async def test_run_scenarios_accepts_explicit_seeds(tmp_path):
         ]
     )
     assert p.seeds == [0, 2] and p.repeats == 1
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_rescore_with_db_replaces_the_runs_ledger_rows(tmp_path, rollback_conn):
+    from eval.runner import rescore_dir
+
+    results = await run_scenarios(
+        two_scenarios(),
+        agent_factory,
+        caller_factory,
+        out_dir=tmp_path,
+        run_id="r-ledger",
+        model_id="scripted",
+        parallel=2,
+        repeats=1,
+    )
+    write_db(rollback_conn, results, run_id="r-ledger", model_id="scripted")
+    rollback_conn.execute(
+        "insert into cost_ledger (run_id, model_id, item, qty, unit, measured) values ('r-ledger', 'scripted', 'episodes', 99, 'episode', true)"
+    )
+    rescore_dir(tmp_path, scenarios_dir=None, conn=rollback_conn)
+    ledger = dict(
+        rollback_conn.execute(
+            "select item, qty from cost_ledger where run_id='r-ledger'"
+        ).fetchall()
+    )
+    assert ledger["episodes"] == 2 and ledger["episodes_passed"] == 1 and len(ledger) == 6
