@@ -63,6 +63,18 @@ class LoopGuard:
         self.handoff_line = handoff_line
         self.prev: str | None = None  # normalized previous model reply (what the model generated, even when swallowed)
         self.repeats = 0  # consecutive repeats caught
+        self._turn_key: object = None
+        self._snapshot: tuple[str | None, int] = (None, 0)
+
+    def begin_turn(self, key: object) -> None:
+        """Call before each LLM generation with a key that identifies the caller's turn (the number of user messages in the
+        chat context). A second generation for the same key means the pipeline discarded the first one (preemptive generation on
+        an interim transcript that the final transcript then changed): compare against the state at the turn's start again."""
+        if key == self._turn_key:
+            self.prev, self.repeats = self._snapshot
+        else:
+            self._turn_key = key
+            self._snapshot = (self.prev, self.repeats)
 
     @classmethod
     def from_env(cls) -> "LoopGuard":

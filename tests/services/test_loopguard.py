@@ -125,3 +125,29 @@ async def test_handoff_threshold_comes_from_the_environment(monkeypatch):
     await collect(guarded_stream(agen(line), guard, on_loop))
     assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE]
     assert await collect(guarded_stream(agen(line), guard, on_loop)) == [HANDOFF_LINE] and calls == ["rephrase", "handoff"]
+
+
+async def test_a_regeneration_for_the_same_user_turn_is_not_a_repeat():
+    """Preemptive generation (LiveKit): the LLM node runs on the interim transcript and again on the final one when they differ;
+    the first generation is discarded and never spoken, so it must not count as the previous reply (Nov 1 08:03: every call
+    got "Sorry, I may have missed that" in place of its first question, one escalated to a false handoff)."""
+    guard = LoopGuard()
+    line = [Chunk("Thanks. What's your date of birth?")]
+    guard.begin_turn(1)
+    assert await collect(guarded_stream(agen(line), guard, no_loop)) == line  # preemptive generation on the interim transcript
+    guard.begin_turn(1)
+    assert await collect(guarded_stream(agen(line), guard, no_loop)) == line  # final transcript: same turn, same line, not a repeat
+    assert guard.repeats == 0
+    guard.begin_turn(2)
+    assert await collect(guarded_stream(agen(line), guard, no_loop)) == [REPHRASE]  # a new user turn with the same line is a repeat
+
+
+async def test_a_regeneration_restores_the_repeat_count_of_the_turn_start():
+    guard = LoopGuard()
+    line = [Chunk("Which day would you like?")]
+    guard.begin_turn(1)
+    await collect(guarded_stream(agen(line), guard, no_loop))
+    guard.begin_turn(2)
+    assert await collect(guarded_stream(agen(line), guard, no_loop)) == [REPHRASE] and guard.repeats == 1
+    guard.begin_turn(2)  # regenerated for the same turn: counts from the turn start again, not a second repeat
+    assert await collect(guarded_stream(agen(line), guard, no_loop)) == [REPHRASE] and guard.repeats == 1

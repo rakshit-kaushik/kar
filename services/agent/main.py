@@ -72,7 +72,9 @@ class R3Agent(Agent):
 
     async def llm_node(self, chat_ctx, tools, model_settings):
         # services/agent/claimguard.py: a transfer announced without request_handoff gets the handoff recorded first;
-        # services/agent/loopguard.py: an exact repeat of the previous line is swallowed (rephrase, then handoff)
+        # services/agent/loopguard.py: an exact repeat of the previous line is swallowed (rephrase, then handoff); a regeneration
+        # for the same caller turn (preemptive generation discarded by the pipeline) is not a repeat
+        self._guard.begin_turn(sum(1 for it in chat_ctx.items if getattr(it, "role", None) == "user"))
         source = claim_guarded_stream(Agent.default.llm_node(self, chat_ctx, tools, model_settings), self._claim_guard, self._handoff_done, self._on_claim)
         async for chunk in guarded_stream(source, self._guard, self._on_loop):
             yield chunk
