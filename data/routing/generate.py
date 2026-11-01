@@ -146,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", required=True)
     p.add_argument("--parallel", type=int, default=12)
     p.add_argument("--test-size", type=int, default=100)
+    p.add_argument(
+        "--extend",
+        default=None,
+        help="existing tickets.jsonl: keep it and its test split, append new train tickets",
+    )
     return p
 
 
@@ -162,19 +167,29 @@ def main(argv: list[str] | None = None) -> int:
     model = os.environ["HOSTED_LLM_MODEL"]
     tickets = asyncio.run(generate_tickets(client, model, a.per_label, a.seed, a.parallel))
     n_raw = len(tickets)
-    tickets = split_tickets(assign_ids(dedupe(tickets)), test_size=a.test_size, seed=a.seed)
-    test = [t for t in tickets if t["split"] == "test"]
-    verified = {
-        t["ticket_id"]: t for t in asyncio.run(verify_tickets(client, model, test, a.parallel))
-    }
-    tickets = [verified.get(t["ticket_id"], t) for t in tickets]
-    for t in tickets:
-        t["source"] = "synthetic-hosted-v1"
+    if a.extend:
+        from data.routing.tickets import extend_tickets
+
+        existing = [
+            json.loads(line) for line in Path(a.extend).read_text().splitlines() if line.strip()
+        ]
+        tickets = extend_tickets(existing, dedupe(tickets))
+        test = [x for x in tickets if x["split"] == "test"]
+        verified = {x["ticket_id"]: x for x in test}  # verified when the base set was built
+    else:
+        tickets = split_tickets(assign_ids(dedupe(tickets)), test_size=a.test_size, seed=a.seed)
+        test = [x for x in tickets if x["split"] == "test"]
+        verified = {
+            x["ticket_id"]: x for x in asyncio.run(verify_tickets(client, model, test, a.parallel))
+        }
+        tickets = [verified.get(x["ticket_id"], x) for x in tickets]
+    for x in tickets:
+        x.setdefault("source", "synthetic-hosted-v1")
     with (out / "tickets.jsonl").open("w") as fh:
         for t in tickets:
             fh.write(json.dumps(t, ensure_ascii=False) + "\n")
     per_label = {lab: sum(1 for t in tickets if t["label"] == lab) for lab in LABELS}
-    agree = sum(1 for t in test if verified[t["ticket_id"]]["verify_agrees"])
+    agree = sum(1 for x in test if verified[x["ticket_id"]].get("verify_agrees"))
     manifest = {
         "name": out.name,
         "files": {"tickets": "tickets.jsonl"},

@@ -25,7 +25,9 @@ from data.routing.score import parse_label, score_predictions
 ROOT = Path(__file__).resolve().parents[2]
 
 
-async def classify(client: AsyncOpenAI, model: str, texts: list[str], parallel: int) -> list[str]:
+async def classify(
+    client: AsyncOpenAI, model: str, texts: list[str], parallel: int, max_tokens: int = 64
+) -> list[str]:
     sem = asyncio.Semaphore(parallel)
 
     async def one(text: str) -> str:
@@ -34,7 +36,7 @@ async def classify(client: AsyncOpenAI, model: str, texts: list[str], parallel: 
                 try:
                     r = await client.chat.completions.create(
                         model=model,
-                        max_tokens=8,
+                        max_tokens=max_tokens,
                         messages=[
                             {"role": "system", "content": ROUTING_SYSTEM_PROMPT},
                             {"role": "user", "content": text},
@@ -62,6 +64,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", required=True)
     p.add_argument("--split", default="test")
     p.add_argument("--parallel", type=int, default=8)
+    p.add_argument(
+        "--max-tokens",
+        type=int,
+        default=64,
+        help="8 is the 4B batch-job budget; hosted models spend tokens before the label",
+    )
     return p
 
 
@@ -78,7 +86,9 @@ def main(argv: list[str] | None = None) -> int:
         else "none"
     )
     client = AsyncOpenAI(base_url=a.base_url, api_key=key, max_retries=0)
-    raws = asyncio.run(classify(client, a.model, [t["text"] for t in tickets], a.parallel))
+    raws = asyncio.run(
+        classify(client, a.model, [t["text"] for t in tickets], a.parallel, a.max_tokens)
+    )
     preds = [parse_label(r) for r in raws]
     gold = [t["label"] for t in tickets]
     s = score_predictions(gold, preds)
