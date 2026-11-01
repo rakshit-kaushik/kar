@@ -85,9 +85,11 @@ def mlx_generator(model_dir: str, batch_size: int = 16) -> Callable[[list[list[d
         out: list[str] = []
         for i in range(0, len(batch_msgs), batch_size):
             chunk = batch_msgs[i:i + batch_size]
-            prompts = [tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=True, enable_thinking=False) for m in chunk]
-            prompts = [p if isinstance(p, list) else tokenizer.encode(p) for p in prompts]
-            resp = batch_generate(model, tokenizer, prompts, max_tokens=MAX_NEW_TOKENS, verbose=False)
+            # transformers 5 returns a BatchEncoding for tokenize=True, so render the text and encode it; the Qwen3 template
+            # with enable_thinking=False ends the prompt with an empty <think></think> block, exactly as the adapter was trained
+            texts = [tokenizer.apply_chat_template(m, add_generation_prompt=True, tokenize=False, enable_thinking=False) for m in chunk]
+            prompts = [tokenizer.encode(s, add_special_tokens=False) for s in texts]
+            resp = batch_generate(model, tokenizer, prompts, max_tokens=MAX_NEW_TOKENS, verbose=False)  # greedy by default
             out.extend(resp.texts)
         return out
 
