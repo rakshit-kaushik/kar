@@ -78,7 +78,9 @@ def eval_table(con, run_ids: list[str]) -> str:
         out.append([f"{run_id} ({model_of[run_id]}; {caller})"] + cells + [f"**{tot_ok}/{tot_n}** ({100 * tot_ok / tot_n:.0f}%)" if tot_n else "-"])
     return md_table(header, out) + ("\n\n_Cells: episodes passing every non-advisory scorer / episodes. Source: eval_results (E's runner). "
             "Runs marked 'caller: local base model' were scored with Qwen3-4B playing the caller while the hosted account was out of credits; "
-            "a 4B caller derails scenarios, so compare those rows only with each other, never with the hosted-caller rows._")
+            "that caller mis-states its own DOB or phone in about 20% of episodes, so the comparable numbers for those runs are E's "
+            "`r3-eval compare --exclude-caller-faults` (same scenario x seed dropped from every run; Nov 1: run 1 21%, base 8%, hosted 100%), "
+            "never a raw row against a hosted-caller row._")
 
 
 def ledger_metrics(con, run_like: str) -> dict[str, dict[str, float]]:

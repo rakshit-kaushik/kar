@@ -12,7 +12,7 @@ ID="$(curl -s -m 5 http://127.0.0.1:8000/v1/models | uv run python -c "import sy
 RUN="measure-$ID-$(date +%m%d-%H%M)"; OUT="$ART/runs/$RUN"; mkdir -p "$OUT"; LOG="$OUT/block.log"; BATCH="$(date +%H%M)"
 step() { echo; echo "=== $(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
 run() { "$@" 2>&1 | tee -a "$LOG"; }
-scripts/gpu_lock.sh wait S 12 "$RUN" | tee -a "$LOG"
+scripts/gpu_lock.sh wait S 15 "$RUN" | tee -a "$LOG"
 trap 'scripts/gpu_lock.sh release S | tee -a "$LOG"' EXIT
 step "serving $ID; TTS=${AGENT_TTS:-cartesia}; probe"
 run uv run python scripts/probe_dispatch.py --timeout 40
