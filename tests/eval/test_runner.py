@@ -986,7 +986,7 @@ def test_buckets_report_counts_one_strike_handoffs_as_a_data_gap(tmp_path):
         ["five five five zero one nine eight eight two three", "nineteen sixty"],
         [({"phone": "5550198823", "date_of_birth": "1960-01-01"}, False)],
     )
-    ep["tool_log"][0]["idx"] = 0
+    ep["tool_log"][0].update(idx=0, error="not_verified")
     ep["tool_log"].append(
         {"idx": 1, "tool": "request_handoff", "args": {"reason": "verification_failed"}, "ok": True}
     )
