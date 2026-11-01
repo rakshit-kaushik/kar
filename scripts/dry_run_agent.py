@@ -1,9 +1,11 @@
 #!/usr/bin/env python
 """Headless dry run of the agent loop (no audio): LiveKit AgentSession with only the LLM and the
-contract tools, driven by text turns through the real proxy. Prints tool calls and replies, flags
-structural leaks, exits 1 if the lookup never happened or anything structural reached the reply.
+contract tools, driven by text turns through the real proxy. Repeats the ordinary booking flow N
+times and reports: verified lookups, completed bookings, structural leaks, unsupported success
+claims, per-turn latency. PASS = plumbing works (no leaks, at least one verified lookup); the rates
+are information about the model, not a gate.
 
-Usage: uv run python scripts/dry_run_agent.py [--base-url URL] [--model ID]
+Usage: uv run python scripts/dry_run_agent.py [--repeats 3] [--base-url URL] [--model ID] [--quiet]
 """
 from __future__ import annotations
 
@@ -12,6 +14,8 @@ import asyncio
 import json
 import os
 import pathlib
+import re
+import statistics
 import sys
 import time
 
@@ -32,6 +36,7 @@ load_dotenv(ROOT / ".env")
 SEED = json.loads((ROOT / "eval/sandbox/seed.json").read_text())
 SYSTEM_PROMPT = (ROOT / "services/agent/system_prompt.md").read_text().replace("{today}", SEED["clock_spoken"])
 STRUCTURAL = ("<tool_call>", "</tool_call>", "<think>", "</think>", '{"name"', "<|im_", "[Calling tool", "[calling tool")
+SUCCESS_CLAIM = re.compile(r"\b(verified|verification (is )?(successful|complete)|booked|is blocked|has been (booked|blocked|cancelled|canceled|moved))\b", re.IGNORECASE)
 
 TURNS = [
     "hi i need to book an appointment",
@@ -48,48 +53,69 @@ class Data:
         self.executor = executor
 
 
+async def episode(args, idx: int, quiet: bool) -> dict:
+    state = CallState(call_id=f"dry-run-{idx}", model_id=args.model)
+    sandbox = Sandbox(SEED)
+    executor = ToolExecutor(sandbox, state)
+    api_key = os.environ.get("HOSTED_LLM_API_KEY", "local") if "anthropic" in args.base_url else "local"
+    client = AsyncOpenAI(base_url=args.base_url, api_key=api_key, default_headers={"X-R3-Call-Id": f"dry-run-{idx}"}, timeout=httpx.Timeout(60.0, connect=5.0))
+    session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, temperature=args.temperature, parallel_tool_calls=False), userdata=Data(executor))
+    await session.start(Agent(instructions=SYSTEM_PROMPT, tools=build_livekit_tools(lambda ctx: ctx.userdata.executor)))
+
+    out = {"verified": False, "booked": False, "leaks": 0, "unsupported_claims": 0, "turn_ms": [], "tool_calls": []}
+    try:
+        for user in TURNS:
+            if not quiet:
+                print(f"\nUSER: {user}")
+            t0 = time.perf_counter()
+            result = await session.run(user_input=user)
+            dt_ms = int((time.perf_counter() - t0) * 1000)
+            out["turn_ms"].append(dt_ms)
+            for ev in result.events:
+                item = ev.item
+                if isinstance(item, FunctionCall):
+                    out["tool_calls"].append(item.name)
+                    if not quiet:
+                        print(f"  -> {item.name}({item.arguments})")
+                elif isinstance(item, FunctionCallOutput):
+                    if not quiet:
+                        print(f"  <- {item.output[:140]}")
+                elif isinstance(item, ChatMessage) and item.role == "assistant":
+                    text = item.text_content or ""
+                    leak = any(t in text for t in STRUCTURAL)
+                    out["leaks"] += leak
+                    claim = bool(SUCCESS_CLAIM.search(text))
+                    unsupported = claim and not (state.verified["customer_id"] or state.completed)
+                    out["unsupported_claims"] += unsupported
+                    if not quiet:
+                        flags = (" LEAK" if leak else "") + (" UNSUPPORTED-CLAIM" if unsupported else "")
+                        print(f"AGENT ({dt_ms} ms{flags}): {text}")
+    finally:
+        await session.aclose()
+    out["verified"] = state.verified["customer_id"] is not None
+    out["booked"] = bool(sandbox.diff()["appointments_new"])
+    out["verification_failures"] = state.verification_failures
+    return out
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-url", default=os.environ.get("LLM_BASE_URL"))
     ap.add_argument("--model", default=os.environ.get("LLM_MODEL"))
+    ap.add_argument("--repeats", type=int, default=1)
+    ap.add_argument("--temperature", type=float, default=0.2)
+    ap.add_argument("--quiet", action="store_true")
     args = ap.parse_args()
 
-    state = CallState(call_id="dry-run", model_id=args.model)
-    sandbox = Sandbox(SEED)
-    executor = ToolExecutor(sandbox, state)
-    api_key = os.environ.get("HOSTED_LLM_API_KEY", "local") if "anthropic" in args.base_url else "local"
-    client = AsyncOpenAI(base_url=args.base_url, api_key=api_key, default_headers={"X-R3-Call-Id": "dry-run"}, timeout=httpx.Timeout(60.0, connect=5.0))
-    session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, temperature=0.2, parallel_tool_calls=False), userdata=Data(executor))
-    await session.start(Agent(instructions=SYSTEM_PROMPT, tools=build_livekit_tools(lambda ctx: ctx.userdata.executor)))
-
-    leaks, tool_calls, ok = 0, [], True
-    try:
-        for user in TURNS:
-            print(f"\nUSER: {user}")
-            t0 = time.perf_counter()
-            result = await session.run(user_input=user)
-            dt_ms = int((time.perf_counter() - t0) * 1000)
-            for ev in result.events:
-                item = ev.item
-                if isinstance(item, FunctionCall):
-                    tool_calls.append(item.name)
-                    print(f"  -> {item.name}({item.arguments})")
-                elif isinstance(item, FunctionCallOutput):
-                    print(f"  <- {item.output[:140]}")
-                elif isinstance(item, ChatMessage) and item.role == "assistant":
-                    text = item.text_content or ""
-                    leak = any(t in text for t in STRUCTURAL)
-                    leaks += leak
-                    print(f"AGENT ({dt_ms} ms{' LEAK' if leak else ''}): {text}")
-    finally:
-        await session.aclose()
-
-    print("\nstate:", json.dumps({"stage": state.stage, "verified": state.verified["customer_id"], "completed": [c["tool"] for c in state.completed]}))
-    print("sandbox diff:", json.dumps(sandbox.diff()))
-    if "lookup_account" not in tool_calls:
-        print("FAIL: lookup_account never called"); ok = False
-    if leaks:
-        print(f"FAIL: {leaks} structural leak(s) in replies"); ok = False
+    eps = [await episode(args, i, args.quiet) for i in range(args.repeats)]
+    n = len(eps)
+    all_ms = [m for e in eps for m in e["turn_ms"]]
+    print(f"\n== {args.model} @ {args.base_url}  episodes={n}")
+    print(f"verified lookups: {sum(e['verified'] for e in eps)}/{n}   bookings: {sum(e['booked'] for e in eps)}/{n}   "
+          f"failed lookups total: {sum(e['verification_failures'] for e in eps)}   leaks: {sum(e['leaks'] for e in eps)}   "
+          f"unsupported claims: {sum(e['unsupported_claims'] for e in eps)}")
+    print(f"turn latency (text, incl. tools): p50={statistics.median(all_ms):.0f} ms  max={max(all_ms)} ms")
+    ok = sum(e["leaks"] for e in eps) == 0 and any(e["verified"] for e in eps)
     print("PASS" if ok else "FAIL")
     return 0 if ok else 1
 
