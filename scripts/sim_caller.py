@@ -34,9 +34,9 @@ from dotenv import load_dotenv
 from livekit import api, rtc
 
 from services.common.events import PostgresSink
-from services.sim.timeline import CallerTimeline
 from services.sim.naming import room_name as make_room_name
-from services.sim.recorder import CallRecorder, pct
+from services.sim.recorder import CallRecorder
+from services.sim.timeline import CallerTimeline, pct
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
