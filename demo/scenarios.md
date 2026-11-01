@@ -32,3 +32,11 @@ How to run each scenario:
 Scoring on stage: the eval runner's deterministic scorers (final state, tool names and arguments, no unsupported success claim, turn
 budget, handoff when required and never when not, corrected details retained) plus the three-line human rubric (usefulness of the
 question asked, spoken brevity, naturalness). Each scenario is run five times on the frozen build and recorded (`$R3_ARTIFACTS/runs/demo-*`).
+
+## Flows chosen, and why (Nov 1 07:55, reviewer)
+Run 2 (the likely final model) holds the direct flows and is weak on the indirect ones: in the text eval the handoff after a
+ticket is missed in most seeds when the request is indirect (a lost card already blocked, a lost card revealed slowly, a
+second intent attached to a confirmation) and after a double tool fault, while the direct fraud report (an unrecognized
+charge, ticket, then a suspected-fraud transfer) and the twice-asked "a person, please" hold. So the demo's handoff scenario
+(#5) is the direct fraud report, and the timeout scenario (#3) is a single check_availability fault with recovery, not the
+double fault. These are the flows chosen, labelled here as such; the weak families stay in the write-up's failure table.
