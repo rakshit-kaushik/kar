@@ -1,15 +1,15 @@
 """Twenty-example synthetic voice dataset for dry runs (mlx_lm `messages` + `tools` format).
 
 Not training data. Session E generates the real data at T+5 to T+9; this exists so the loader,
-driver, fuse and eval hooks can be exercised end to end on CPU before the T+7 window. Shapes follow
-CONTRACT.md §1-§3: STT-shaped caller turns, nothing account-specific before `lookup_account`
-returns verified, read-back before every write, tool calls as OpenAI `tool_calls` with JSON-string
-arguments, tool results as `tool` messages, at most three targets per conversation (a tool call,
-a clarification, the closing turn), each example = prefix -> that assistant turn.
-
-Measured on Qwen3-4B-8bit: the eight tool schemas render to ~1,470 tokens and the system prompt
-to ~70, leaving ~500 tokens of dialogue under seq 2048, so these conversations are compressed
-(one read-back per booking, no slot-selection exchange) and two scenarios keep only two targets.
+driver, fuse and eval hooks can be exercised end to end before the T+7 window. Shapes follow
+CONTRACT.md §1-§3 and the contract system prompt (schemas/system_prompt.md, loaded byte-for-byte,
+placeholders filled for a fixed synthetic "today"): the greeting and the phone-number question are
+already spoken, so every conversation starts with the caller's phone turn; STT-shaped caller turns;
+nothing account-specific before `lookup_account` verifies; read-back before every write; tool calls
+as OpenAI `tool_calls` with JSON-string arguments; tool results as `tool` messages; the seven
+contract tools from schemas/tools/; lost or stolen card = `create_ticket` + `request_handoff` (G3);
+at most three targets per conversation (a tool call, a clarification, the closing turn), each example
+= prefix -> that assistant turn.
 
     uv run python -m train.synth --out $R3_ARTIFACTS/datasets/synth20
 """
@@ -24,16 +24,11 @@ import uuid
 from pathlib import Path
 
 from train.env import repo_root
+from train.prompt import SYSTEM_PROMPT_PATH, placeholder_values, render_system_prompt
 
 TOOLS_DIR = repo_root() / "schemas" / "tools"
-TODAY = dt.date(2026, 10, 31)
-
-SYSTEM_PROMPT = (
-    "You are Marlow Mutual Bank's phone line. One or two short sentences, one question per turn. "
-    "Nothing account-specific before lookup_account verifies the caller. Read back and get a yes "
-    "before any write. Say numbers and times in words; never mention tools or JSON. Hand off on "
-    "fraud, two failed verifications, or a second ask for a person."
-)
+SYNTH_NOW = dt.datetime(2026, 10, 31, 10, 15)  # Saturday; appointments fall in the following two weeks
+TODAY = SYNTH_NOW.date()
 
 BRANCHES = {
     "market_st": "Market Street",
@@ -91,8 +86,12 @@ TIMES = {
 
 
 def load_tools() -> list[dict]:
-    """The eight contract tools, sorted by name (schemas/tools/*.json is the source of truth)."""
+    """The seven contract tools, sorted by file name (schemas/tools/*.json is the source of truth)."""
     return [json.loads(p.read_text()) for p in sorted(TOOLS_DIR.glob("*.json"))]
+
+
+def system_prompt() -> str:
+    return render_system_prompt(SYNTH_NOW)
 
 
 def spoken_digits(s: str) -> str:
@@ -153,17 +152,13 @@ def tool_calls(rng: random.Random, *calls: tuple[str, dict], content: str = "") 
 
 def tool_results(call_turn: dict, *payloads: dict) -> list[dict]:
     return [
-        {
-            "role": "tool",
-            "tool_call_id": call["id"],
-            "content": json.dumps(payload, separators=(",", ":")),
-        }
+        {"role": "tool", "tool_call_id": call["id"], "content": json.dumps(payload, separators=(",", ":"))}
         for call, payload in zip(call_turn["tool_calls"], payloads)
     ]
 
 
 class Caller:
-    def __init__(self, rng: random.Random, appointments: list[dict] | None = None, with_cards: bool = False):
+    def __init__(self, rng: random.Random, appointments: list[dict] | None = None):
         self.name = rng.choice(FIRST_NAMES)
         self.phone = "555" + "".join(rng.choice("0123456789") for _ in range(7))
         self.dob, self.dob_spoken = rng.choice(DOBS)
@@ -171,25 +166,23 @@ class Caller:
         self.branch = rng.choice(list(BRANCHES))
         self.last4 = "".join(rng.choice("0123456789") for _ in range(4))
         self.appointments = appointments or []
-        self.with_cards = with_cards
 
     def profile(self) -> dict:
-        out = {
+        return {
             "verified": True,
             "customer_id": self.customer_id,
             "first_name": self.name,
             "branch_id": self.branch,
             "appointments": self.appointments,
+            "cards": [{"card_last4": self.last4, "status": "active"}],
         }
-        if self.with_cards:
-            out["cards"] = [{"card_last4": self.last4, "status": "active"}]
-        return out
 
 
 def _opening(rng: random.Random, c: Caller, lookup_result: dict) -> list[dict]:
+    """The greeting and the phone-number question were already spoken (system prompt), so the
+    conversation starts with the caller's answer."""
     lookup = tool_calls(rng, ("lookup_account", {"phone": c.phone, "date_of_birth": c.dob}))
     return [
-        assistant("Thanks for calling Marlow Mutual. What's the phone number on your account?"),
         user(f"yeah it's {spoken_digits(c.phone)}"),
         assistant("Thanks. And your date of birth?"),
         user(c.dob_spoken),
@@ -199,12 +192,14 @@ def _opening(rng: random.Random, c: Caller, lookup_result: dict) -> list[dict]:
 
 
 def _verified_opening(rng: random.Random, c: Caller) -> list[dict]:
-    return _opening(rng, c, c.profile()) + [
-        assistant(f"Thanks {c.name}, you're verified. How can I help?")
-    ]
+    return _opening(rng, c, c.profile()) + [assistant(f"Thanks {c.name}, you're verified. What can I help with today?")]
 
 
-# Each scenario returns (turns, targets) where targets = [(index into turns, kind)], <= 3 per conversation.
+def _index_of(turns: list[dict], prefix: str) -> int:
+    return next(i for i, t in enumerate(turns) if t["role"] == "assistant" and t.get("content", "").startswith(prefix))
+
+
+# Each scenario returns (name, turns, targets) with targets = [(index into turns, kind)], <= 3 per conversation.
 
 def ordinary_booking(rng: random.Random):
     c = Caller(rng)
@@ -221,21 +216,23 @@ def ordinary_booking(rng: random.Random):
     ]
     avail = tool_calls(rng, ("check_availability", {"branch_id": branch, "service_type": service, "date": day.isoformat()}))
     turns += [avail, *tool_results(avail, {"slots": slots})]
+    spoken_slots = ", ".join(short_time(s) for s in slots[:-1]) + f", or {short_time(slots[-1])} in the morning"
     turns += [
-        assistant(f"{spoken_time(pick).capitalize()} is open. So that's a {SERVICES[service]} at {BRANCHES[branch]} on {spoken_date(day)} at {spoken_time(pick)}. Shall I book it?"),
+        assistant(f"{day.strftime('%A')} I have {spoken_slots}. Which one?"),
+        user(short_time(pick)),
+        assistant(f"So that's a {SERVICES[service]} at {BRANCHES[branch]} on {spoken_date(day)} at {spoken_time(pick)}. Shall I book it?"),
         user("yes"),
     ]
     book = tool_calls(rng, ("book_appointment", {
         "customer_id": c.customer_id, "branch_id": branch, "service_type": service,
         "slot_start": f"{day.isoformat()}T{pick}", "idempotency_key": _ikey(rng)}))
-    appt = f"A-{rng.randint(1000, 9999)}"
-    turns += [book, *tool_results(book, {"appointment_id": appt})]
+    turns += [book, *tool_results(book, {"appointment_id": f"A-{rng.randint(1000, 9999)}"})]
     turns += [
-        assistant(f"Booked. See you {day.strftime('%A')} at {short_time(pick)}, {c.name}. Goodbye."),
+        assistant(f"Booked. You'll see a banker at {BRANCHES[branch]} on {day.strftime('%A')} at {short_time(pick)}. Anything else?"),
+        user("no that's it"),
+        assistant(f"Thanks {c.name}, see you {day.strftime('%A')}. Goodbye."),
     ]
-    targets = [(turns.index(book), "tool_call"), (len(turns) - 1, "closing")]
-    clar = next(i for i, t in enumerate(turns) if t.get("content", "").startswith("Happy to."))
-    return "ordinary", turns, [(clar, "clarification")] + targets
+    return "ordinary", turns, [(_index_of(turns, "Happy to."), "clarification"), (turns.index(book), "tool_call"), (len(turns) - 1, "closing")]
 
 
 def correction(rng: random.Random):
@@ -260,35 +257,57 @@ def correction(rng: random.Random):
         "slot_start": f"{day.isoformat()}T14:30", "idempotency_key": _ikey(rng)}))
     turns += [book, *tool_results(book, {"appointment_id": f"A-{rng.randint(1000, 9999)}"})]
     turns += [
-        assistant(f"Booked for two thirty at Marlow Street. Thanks {c.name}, goodbye."),
+        assistant("Booked for two thirty at Marlow Street. Anything else?"),
+        user("no thanks"),
+        assistant(f"Thanks {c.name}, goodbye."),
     ]
-    clar = next(i for i, t in enumerate(turns) if t.get("content", "").startswith("Just to check"))
-    return "correction", turns, [(clar, "clarification"), (turns.index(book), "tool_call")]
+    return "correction", turns, [(_index_of(turns, "Just to check"), "clarification"), (turns.index(book), "tool_call"), (len(turns) - 1, "closing")]
 
 
 def lost_card_fraud(rng: random.Random):
-    c = Caller(rng, with_cards=True)
+    """CONTRACT.md G3: fraud mention -> unauthorized_transaction ticket, then handoff; nobody blocks a card."""
+    c = Caller(rng)
     turns = _verified_opening(rng, c)
     turns += [
         user("i lost my card and i see a charge i didn't make"),
-        assistant("Which card is it, the last four digits?"),
+        assistant("I'm sorry to hear that. Which card is it, the last four digits?"),
         user(spoken_digits(c.last4)),
-        assistant(f"I'll block the card ending in {spoken_digits(c.last4)} right now. Go ahead?"),
+        assistant(f"I'll open a fraud case for the card ending in {spoken_digits(c.last4)} and get you to our fraud team, who will block it. Go ahead?"),
         user("yes please"),
     ]
-    block = tool_calls(rng, ("block_card", {
-        "customer_id": c.customer_id, "card_last4": c.last4, "reason": "lost", "idempotency_key": _ikey(rng)}))
-    turns += [block, *tool_results(block, {"blocked": True})]
     ticket = f"T-{rng.randint(1000, 9999)}"
-    summary = f"Lost card {c.last4}, unrecognized charge reported"
-    escalate = tool_calls(
+    create = tool_calls(rng, ("create_ticket", {
+        "customer_id": c.customer_id, "category": "unauthorized_transaction",
+        "summary": f"Lost card {c.last4}; caller reports a charge they did not make", "idempotency_key": _ikey(rng)}))
+    turns += [create, *tool_results(create, {"ticket_id": ticket})]
+    handoff = tool_calls(rng, ("request_handoff", {
+        "reason": "suspected_fraud", "summary": f"Ticket {ticket} opened; lost card {c.last4} not yet blocked; caller reports unauthorized charge"}))
+    turns += [handoff, *tool_results(handoff, {"ok": True})]
+    turns += [assistant(f"I've opened a fraud case, number {spoken_digits(ticket[2:])}, and I'm connecting you to our fraud team now to block the card. Please hold.")]
+    return "lost_card_fraud", turns, [(_index_of(turns, "I'm sorry"), "clarification"), (turns.index(create), "tool_call"), (len(turns) - 1, "closing")]
+
+
+def lost_card(rng: random.Random):
+    """Lost card without a fraud mention: card_lost_stolen ticket and handoff in one turn (two tool calls)."""
+    c = Caller(rng)
+    turns = _verified_opening(rng, c)
+    turns += [
+        user("i think i lost my debit card somewhere yesterday"),
+        assistant("I'm sorry to hear that. Which card, the last four digits?"),
+        user(spoken_digits(c.last4)),
+        assistant(f"I'll open a lost-card case for the card ending in {spoken_digits(c.last4)} and get you to a banker who will block it. Go ahead?"),
+        user("yes"),
+    ]
+    ticket = f"T-{rng.randint(1000, 9999)}"
+    both = tool_calls(
         rng,
-        ("create_ticket", {"customer_id": c.customer_id, "category": "unauthorized_transaction", "summary": summary, "idempotency_key": _ikey(rng)}),
-        ("request_handoff", {"reason": "suspected_fraud", "summary": f"Card {c.last4} blocked, fraud ticket opened"}),
+        ("create_ticket", {"customer_id": c.customer_id, "category": "card_lost_stolen",
+                           "summary": f"Lost debit card {c.last4}; needs block and replacement", "idempotency_key": _ikey(rng)}),
+        ("request_handoff", {"reason": "out_of_scope", "summary": f"Lost card {c.last4} ticket opened; card not yet blocked"}),
     )
-    turns += [escalate, *tool_results(escalate, {"ticket_id": ticket}, {"ok": True})]
-    turns += [assistant(f"The card is blocked and I've opened a fraud case, number {spoken_digits(ticket[2:])}. I'm connecting you to our fraud team now, please hold.")]
-    return "lost_card_fraud", turns, [(turns.index(block), "tool_call"), (turns.index(escalate), "tool_call")]
+    turns += [both, *tool_results(both, {"ticket_id": ticket}, {"ok": True})]
+    turns += [assistant(f"I've opened the case, number {spoken_digits(ticket[2:])}, and I'm connecting you to a banker now to block the card. Please hold.")]
+    return "lost_card", turns, [(_index_of(turns, "I'll open a lost-card"), "clarification"), (turns.index(both), "tool_call"), (len(turns) - 1, "closing")]
 
 
 def reschedule(rng: random.Random):
@@ -299,22 +318,25 @@ def reschedule(rng: random.Random):
     turns = _verified_opening(rng, c)
     turns += [
         user(f"i need to move my appointment on {old_day.strftime('%A').lower()}"),
-        assistant(f"That's your notary at Mill Road on {spoken_date(old_day)} at two. What day would you like instead?"),
+        assistant(f"That's your notary appointment at Mill Road on {spoken_date(old_day)} at two in the afternoon. What day would you like instead?"),
         user(f"{new_day.strftime('%A').lower()} morning"),
     ]
     avail = tool_calls(rng, ("check_availability", {"branch_id": "mill_rd", "service_type": "notary", "date": new_day.isoformat()}))
     turns += [avail, *tool_results(avail, {"slots": ["09:00", "10:00"]})]
     turns += [
-        assistant(f"Ten in the morning is open. Moving your notary at Mill Road to {spoken_date(new_day)} at ten. Go ahead?"),
+        assistant(f"{new_day.strftime('%A')} I have nine or ten in the morning. Which one?"),
+        user("ten"),
+        assistant(f"Moving your notary appointment at Mill Road to {spoken_date(new_day)} at ten in the morning. Shall I go ahead?"),
         user("yes"),
     ]
     move = tool_calls(rng, ("reschedule_appointment", {"appointment_id": appt["appointment_id"], "new_slot_start": f"{new_day.isoformat()}T10:00", "idempotency_key": _ikey(rng)}))
     turns += [move, *tool_results(move, {"ok": True, "appointment_id": appt["appointment_id"]})]
     turns += [
-        assistant(f"Done, it's now {new_day.strftime('%A')} at ten. Thanks {c.name}, goodbye."),
+        assistant(f"Done, your appointment is now {new_day.strftime('%A')} at ten. Anything else?"),
+        user("nope"),
+        assistant(f"Thanks {c.name}, goodbye."),
     ]
-    clar = next(i for i, t in enumerate(turns) if t.get("content", "").startswith("That's your notary"))
-    return "reschedule", turns, [(clar, "clarification"), (turns.index(move), "tool_call"), (len(turns) - 1, "closing")]
+    return "reschedule", turns, [(_index_of(turns, "That's your notary"), "clarification"), (turns.index(move), "tool_call"), (len(turns) - 1, "closing")]
 
 
 def cancel(rng: random.Random):
@@ -330,19 +352,18 @@ def cancel(rng: random.Random):
     cxl = tool_calls(rng, ("cancel_appointment", {"appointment_id": appt["appointment_id"], "idempotency_key": _ikey(rng)}))
     turns += [cxl, *tool_results(cxl, {"ok": True})]
     turns += [
-        assistant(f"Cancelled. Thanks {c.name}, goodbye."),
+        assistant("Cancelled. Anything else I can help with?"),
+        user("no that's all"),
+        assistant(f"Thanks {c.name}, goodbye."),
     ]
-    clar = next(i for i, t in enumerate(turns) if t.get("content", "").startswith("That's your"))
-    return "cancel", turns, [(clar, "clarification"), (turns.index(cxl), "tool_call"), (len(turns) - 1, "closing")]
+    return "cancel", turns, [(_index_of(turns, "That's your financial"), "clarification"), (turns.index(cxl), "tool_call"), (len(turns) - 1, "closing")]
 
 
 def unknown_account(rng: random.Random):
     c = Caller(rng)
     not_found = {"error": "not_found", "message": "No account matches"}
     turns = _opening(rng, c, not_found)
-    turns += [
-        assistant("I couldn't find an account with those details. Could you say the phone number once more?"),
-    ]
+    turns += [assistant("I couldn't find an account with those details. Could you say the phone number once more?")]
     phone2 = "555" + "".join(rng.choice("0123456789") for _ in range(7))
     turns += [user(spoken_digits(phone2))]
     again = tool_calls(rng, ("lookup_account", {"phone": phone2, "date_of_birth": c.dob}))
@@ -350,8 +371,7 @@ def unknown_account(rng: random.Random):
     handoff = tool_calls(rng, ("request_handoff", {"reason": "verification_failed", "summary": "Two failed account lookups; nothing verified"}))
     turns += [handoff, *tool_results(handoff, {"ok": True})]
     turns += [assistant("I'm not able to verify the account from here, so I'm connecting you to a banker now. Please hold.")]
-    clar = next(i for i, t in enumerate(turns) if t.get("content", "").startswith("I couldn't find"))
-    return "unknown_account", turns, [(clar, "clarification"), (turns.index(handoff), "tool_call"), (len(turns) - 1, "closing")]
+    return "unknown_account", turns, [(_index_of(turns, "I couldn't find"), "clarification"), (turns.index(handoff), "tool_call"), (len(turns) - 1, "closing")]
 
 
 def no_availability(rng: random.Random):
@@ -359,7 +379,11 @@ def no_availability(rng: random.Random):
     day = _weekday(rng, 3, 8)
     next_day = day + dt.timedelta(days=1 if day.weekday() < 4 else 3)
     turns = _verified_opening(rng, c)
-    turns += [user(f"i'd like to open an account {day.strftime('%A').lower()} at marker street")]
+    turns += [
+        user(f"i'd like to open an account {day.strftime('%A').lower()} at marker street"),
+        assistant("Did you mean Marker Street or Market Street?"),
+        user("marker"),
+    ]
     first = tool_calls(rng, ("check_availability", {"branch_id": "marker_st", "service_type": "account_opening", "date": day.isoformat()}))
     turns += [first, *tool_results(first, {"slots": []})]
     turns += [
@@ -369,22 +393,27 @@ def no_availability(rng: random.Random):
     second = tool_calls(rng, ("check_availability", {"branch_id": "marker_st", "service_type": "account_opening", "date": next_day.isoformat()}))
     turns += [second, *tool_results(second, {"slots": ["09:00", "11:00"]})]
     turns += [
-        assistant(f"An account opening at Marker Street on {spoken_date(next_day)} at eleven in the morning is open. Shall I book it?"),
+        assistant(f"{next_day.strftime('%A')} I have nine or eleven in the morning. Which one?"),
+        user("eleven"),
+        assistant(f"An account opening at Marker Street on {spoken_date(next_day)} at eleven in the morning. Shall I book it?"),
         user("yes"),
     ]
     book = tool_calls(rng, ("book_appointment", {
         "customer_id": c.customer_id, "branch_id": "marker_st", "service_type": "account_opening",
         "slot_start": f"{next_day.isoformat()}T11:00", "idempotency_key": _ikey(rng)}))
     turns += [book, *tool_results(book, {"appointment_id": f"A-{rng.randint(1000, 9999)}"})]
-    turns += [assistant(f"Booked for {next_day.strftime('%A')} at eleven. Thanks {c.name}, goodbye.")]
-    clar = next(i for i, t in enumerate(turns) if t.get("content", "").startswith("Nothing is open"))
-    return "no_availability", turns, [(clar, "clarification"), (turns.index(second), "tool_call")]
+    turns += [
+        assistant(f"Booked for {next_day.strftime('%A')} at eleven. Anything else?"),
+        user("no"),
+        assistant(f"Thanks {c.name}, goodbye."),
+    ]
+    return "no_availability", turns, [(_index_of(turns, "Nothing is open"), "clarification"), (turns.index(second), "tool_call"), (len(turns) - 1, "closing")]
 
 
-SCENARIOS = [ordinary_booking, correction, lost_card_fraud, reschedule, cancel, unknown_account, no_availability]
+SCENARIOS = [ordinary_booking, correction, lost_card_fraud, lost_card, reschedule, cancel, unknown_account, no_availability]
 
 
-def _conversations(rng: random.Random, tools: list[dict], start: int):
+def _conversations(rng: random.Random, tools: list[dict], prompt: str, start: int):
     i = start
     while True:
         scenario, turns, targets = SCENARIOS[i % len(SCENARIOS)](rng)
@@ -393,7 +422,7 @@ def _conversations(rng: random.Random, tools: list[dict], start: int):
         for idx, kind in targets[:3]:
             assert turns[idx]["role"] == "assistant", (scenario, idx)
             examples.append({
-                "messages": [{"role": "system", "content": SYSTEM_PROMPT}] + turns[: idx + 1],
+                "messages": [{"role": "system", "content": prompt}] + turns[: idx + 1],
                 "tools": tools,
                 "meta": {"conversation_id": conv_id, "scenario": scenario, "target_kind": kind, "target_index": idx},
             })
@@ -404,8 +433,7 @@ def _conversations(rng: random.Random, tools: list[dict], start: int):
 def build_examples(n_train: int = 20, n_valid: int = 4, seed: int = 0) -> tuple[list[dict], list[dict]]:
     """Whole conversations go to one split; the counts are trimmed to exactly n_train / n_valid."""
     rng = random.Random(seed)
-    tools = load_tools()
-    gen = _conversations(rng, tools, 0)
+    gen = _conversations(rng, load_tools(), system_prompt(), 0)
     train: list[dict] = []
     while len(train) < n_train:
         train += next(gen)
@@ -430,7 +458,7 @@ def write_dataset(out_dir: Path, n_train: int = 20, n_valid: int = 4, seed: int 
                 f.write(json.dumps(ex, ensure_ascii=False) + "\n")
     manifest = {
         "name": out_dir.name,
-        "version": "0.1",
+        "version": "0.2",
         "created_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "generator": "train/synth.py",
         "seed": seed,
@@ -440,6 +468,9 @@ def write_dataset(out_dir: Path, n_train: int = 20, n_valid: int = 4, seed: int 
         "sha256": {name: sha256_file(out_dir / name) for name in files.values()},
         "counts": {"train": len(train), "valid": len(valid)},
         "targets_per_conversation": 3,
+        "system_prompt": {"path": str(SYSTEM_PROMPT_PATH.relative_to(repo_root())), "sha256": sha256_file(SYSTEM_PROMPT_PATH),
+                          "placeholders": placeholder_values(SYNTH_NOW)},
+        "tools": {p.stem: sha256_file(p) for p in sorted(TOOLS_DIR.glob("*.json"))},
         "note": "synthetic dry-run data from the contract's example dialogues; never train a candidate on it",
     }
     path = out_dir / "manifest.json"

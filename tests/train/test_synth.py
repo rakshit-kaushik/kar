@@ -1,9 +1,10 @@
-"""Exit check for the 20-example synthetic dataset used by every dry run."""
+"""Exit check for the 20-example synthetic dataset used by every dry run (7-tool contract)."""
 import hashlib
 import json
 from pathlib import Path
 
-from train.synth import write_dataset
+from train.prompt import render_system_prompt
+from train.synth import SYNTH_NOW, write_dataset
 
 
 def _read(p: Path):
@@ -19,17 +20,17 @@ def test_writes_20_train_4_valid_and_a_manifest(synth_dir):
     for name, digest in m["sha256"].items():
         assert hashlib.sha256((synth_dir / name).read_bytes()).hexdigest() == digest
     assert m["format"] == "mlx_lm.messages+tools" and m["enable_thinking"] is False
+    assert m["system_prompt"]["path"] == "schemas/system_prompt.md" and len(m["tools"]) == 7
 
 
 def test_examples_are_contract_shaped(synth_dir):
-    names = set()
-    kinds = set()
+    prompt = render_system_prompt(SYNTH_NOW)
+    names, kinds = set(), set()
     for ex in _read(synth_dir / "train.jsonl"):
-        assert [t["function"]["name"] for t in ex["tools"]] == sorted(
-            t["function"]["name"] for t in ex["tools"]
-        )
-        assert len(ex["tools"]) == 8
-        assert ex["messages"][0]["role"] == "system"
+        tool_names = [t["function"]["name"] for t in ex["tools"]]
+        assert tool_names == sorted(tool_names) and len(tool_names) == 7 and "block_card" not in tool_names
+        assert ex["messages"][0] == {"role": "system", "content": prompt}
+        assert ex["messages"][1]["role"] == "user"  # the greeting and phone question were already spoken
         assert ex["messages"][-1]["role"] == "assistant"
         kinds.add(ex["meta"]["target_kind"])
         for msg in ex["messages"]:
@@ -41,17 +42,18 @@ def test_examples_are_contract_shaped(synth_dir):
             if msg["role"] == "tool":
                 assert isinstance(msg["content"], str)
     assert kinds == {"tool_call", "clarification", "closing"}
-    assert {"lookup_account", "check_availability", "book_appointment"} <= names
+    assert {"lookup_account", "check_availability", "book_appointment", "create_ticket", "request_handoff"} <= names
+    assert "block_card" not in names
 
 
-def test_tool_results_precede_targets_and_never_end_a_prefix_with_a_tool_call(synth_dir):
+def test_every_tool_call_in_a_prefix_is_followed_by_its_results(synth_dir):
     for ex in _read(synth_dir / "train.jsonl"):
-        roles = [m["role"] for m in ex["messages"]]
-        assert roles[-1] == "assistant"
-        # a tool call turn in the prefix is always followed by its tool result
-        for i, msg in enumerate(ex["messages"][:-1]):
+        msgs = ex["messages"]
+        for i, msg in enumerate(msgs[:-1]):
             if msg["role"] == "assistant" and msg.get("tool_calls"):
-                assert ex["messages"][i + 1]["role"] == "tool"
+                n = len(msg["tool_calls"])
+                assert [m["role"] for m in msgs[i + 1 : i + 1 + n]] == ["tool"] * n
+                assert [m["tool_call_id"] for m in msgs[i + 1 : i + 1 + n]] == [c["id"] for c in msg["tool_calls"]]
 
 
 def test_generation_is_deterministic(tmp_path):
