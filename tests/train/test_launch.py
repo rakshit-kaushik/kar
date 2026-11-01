@@ -107,3 +107,26 @@ def test_start_server_reports_the_command_exit_code(monkeypatch):
     assert start_server() == 3
     monkeypatch.setenv("R3_SERVER_START_CMD", "true")
     assert start_server() == 0
+
+
+def test_summarize_metrics_corrects_iterations_per_second_on_partial_report_windows(tmp_path):
+    """mlx_lm 0.32.2 reports it/s = steps_per_report / window_time even when the last window
+    (it == iters) is shorter than steps_per_report; the launcher re-derives it from the iteration delta."""
+    import json
+
+    from train.launch import summarize_metrics
+
+    p = tmp_path / "metrics.jsonl"
+    rows = [
+        {"kind": "val", "iteration": 0, "val_loss": 1.0, "val_time": 1.0},
+        {"kind": "train", "iteration": 10, "train_loss": 2.0, "learning_rate": 1e-4, "iterations_per_second": 1.0,
+         "tokens_per_second": 50.0, "trained_tokens": 500, "peak_memory": 10.0},
+        {"kind": "train", "iteration": 14, "train_loss": 1.9, "learning_rate": 1e-4, "iterations_per_second": 2.5,
+         "tokens_per_second": 50.0, "trained_tokens": 700, "peak_memory": 11.0},  # 4 steps reported as 10/time
+        {"kind": "val", "iteration": 13, "val_loss": 0.9, "val_time": 1.0},
+    ]
+    p.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    m = summarize_metrics(p, {"wall_seconds": 20.0, "iters": 14}, batch=1, mean_tokens=1000.0, steps_per_report=10)
+    assert m["iterations_per_second"] == 1.0  # (10 + 4) steps / (10 + 4) seconds
+    assert m["total_tokens_per_second"] == 1000.0
+    assert m["peak_memory_gb"] == 11.0 and m["final_val_loss"] == 0.9

@@ -135,13 +135,25 @@ def reference_tokens_per_sec(artifacts: Path, task: str, reference_run: str | No
     return None, None
 
 
-def summarize_metrics(metrics_path: Path, train_summary: dict, batch: int, mean_tokens: float) -> dict:
+def summarize_metrics(metrics_path: Path, train_summary: dict, batch: int, mean_tokens: float,
+                      steps_per_report: int = 10) -> dict:
     train, val = [], []
     if metrics_path.exists():
         for line in metrics_path.read_text().splitlines():
             if line.strip():
                 rec = json.loads(line)
                 (train if rec["kind"] == "train" else val).append(rec)
+    # mlx_lm 0.32.2 reports it/s as steps_per_report / window_time even for a short final window
+    # (it == iters), so re-derive it from the iteration deltas: total steps / total training time.
+    steps = time_s = 0.0
+    prev = 0
+    for r in train:
+        n = r["iteration"] - prev
+        prev = r["iteration"]
+        if r.get("iterations_per_second"):
+            steps += n
+            time_s += steps_per_report / r["iterations_per_second"]
+    it_per_s = (steps / time_s) if time_s else None
     out = {
         "wall_seconds": train_summary.get("wall_seconds"),
         "iters": train_summary.get("iters"),
@@ -150,7 +162,7 @@ def summarize_metrics(metrics_path: Path, train_summary: dict, batch: int, mean_
         "first_train_loss": train[0]["train_loss"] if train else None,
         "trained_loss_tokens": train[-1]["trained_tokens"] if train else None,
         "loss_tokens_per_second": (sum(r["tokens_per_second"] for r in train) / len(train)) if train else None,
-        "iterations_per_second": (sum(r["iterations_per_second"] for r in train) / len(train)) if train else None,
+        "iterations_per_second": it_per_s,
         "peak_memory_gb": max((r["peak_memory"] for r in train), default=None),
         "val": [{"iteration": r["iteration"], "val_loss": r["val_loss"]} for r in val],
         "initial_val_loss": val[0]["val_loss"] if val else None,
@@ -395,7 +407,8 @@ def main(argv=None) -> int:
             stopped = True
         write_run_json(run_dir, run_record(ctx, "training", started_at=t_start))
         summary = train_step(ctx, opts.device)
-        metrics = summarize_metrics(run_dir / "metrics.jsonl", summary, ctx["sizing"]["batch_size"], ctx["data"]["stats"]["mean_tokens"])
+        metrics = summarize_metrics(run_dir / "metrics.jsonl", summary, ctx["sizing"]["batch_size"], ctx["data"]["stats"]["mean_tokens"],
+                                    steps_per_report=int(ctx["cfg"].get("steps_per_report", 10)))
         write_run_json(run_dir, run_record(ctx, "fusing", started_at=t_start, metrics=metrics))
         fuse_meta = fuse_step(ctx, opts.device)
         status = "done"
