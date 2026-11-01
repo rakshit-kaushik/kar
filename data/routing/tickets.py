@@ -113,3 +113,18 @@ def split_tickets(tickets: list[dict], test_size: int = 100, seed: int = 0) -> l
         rng.shuffle(idx)
         test_idx.update(idx[: quota[lab]])
     return [{**t, "split": "test" if i in test_idx else "train"} for i, t in enumerate(tickets)]
+
+
+def extend_tickets(existing: list[dict], new: list[dict]) -> list[dict]:
+    """Append new tickets as train-only rows with continuing ids; existing rows and the test split stay."""
+    seen = {_key(t["text"]) for t in existing}
+    out = list(existing)
+    next_id = max((int(t["ticket_id"].split("-")[1]) for t in existing), default=0) + 1
+    for t in new:
+        k = _key(t["text"])
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append({**t, "ticket_id": f"R-{next_id:05d}", "split": "train"})
+        next_id += 1
+    return out

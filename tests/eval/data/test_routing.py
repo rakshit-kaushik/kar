@@ -163,3 +163,30 @@ def test_gen_prompt_and_parsers():
 
     b = bp().parse_args(["--tickets", "t.jsonl", "--base-url", "u", "--model", "m", "--out", "o"])
     assert b.split == "test" and b.parallel == 8
+
+
+def test_extend_keeps_the_test_split_and_appends_train_tickets():
+    from data.routing.tickets import extend_tickets
+
+    existing = [
+        {
+            "ticket_id": "R-00001",
+            "text": "lost my card",
+            "label": "card_lost_stolen",
+            "split": "test",
+        },
+        {"ticket_id": "R-00002", "text": "fee is unfair", "label": "fee_dispute", "split": "train"},
+    ]
+    new = [
+        {"text": "Lost my card", "label": "card_lost_stolen"},
+        {"text": "wire never arrived", "label": "transfer_payment"},
+    ]
+    out = extend_tickets(existing, new)
+    assert [t["ticket_id"] for t in out] == ["R-00001", "R-00002", "R-00003"]
+    assert out[2] == {
+        "text": "wire never arrived",
+        "label": "transfer_payment",
+        "ticket_id": "R-00003",
+        "split": "train",
+    }
+    assert [t["split"] for t in out[:2]] == ["test", "train"]  # untouched
