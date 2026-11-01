@@ -396,6 +396,30 @@ def start_server(root: Path = REPO_ROOT) -> int:
     return rc
 
 
+def tail_metrics(metrics_path: Path, seen: int) -> tuple[int, list[dict]]:
+    """New complete records after the first `seen` lines (a line still being written is left for the
+    next poll); prints one line per record."""
+    if not metrics_path.exists():
+        return seen, []
+    text = metrics_path.read_text()
+    lines = text.split("\n")
+    complete = lines[:-1] if not text.endswith("\n") else lines[:-1]  # the last element is "" or a partial line
+    new = []
+    for line in complete[seen:]:
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            break
+        new.append(r)
+        if r["kind"] == "train":
+            print(f"[train] iter {r['iteration']:>6} loss {r['train_loss']:.4f} lr {r['learning_rate']:.2e} "
+                  f"loss-tok/s {r['tokens_per_second']:.0f} it/s {r['iterations_per_second']:.3f} "
+                  f"peak {r['peak_memory']:.1f}GB", flush=True)
+        else:
+            print(f"[train] iter {r['iteration']:>6} val_loss {r['val_loss']:.4f}", flush=True)
+    return seen + len(new), new
+
+
 def train_step(ctx: dict, device: str) -> dict:
     run_dir = ctx["run_dir"]
     metrics_path = run_dir / "metrics.jsonl"
@@ -409,17 +433,7 @@ def train_step(ctx: dict, device: str) -> dict:
         proc = subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT, env=env)
         while True:
             rc = proc.poll()
-            if metrics_path.exists():
-                lines = metrics_path.read_text().splitlines()
-                for line in lines[seen:]:
-                    r = json.loads(line)
-                    if r["kind"] == "train":
-                        print(f"[train] iter {r['iteration']:>6} loss {r['train_loss']:.4f} lr {r['learning_rate']:.2e} "
-                              f"loss-tok/s {r['tokens_per_second']:.0f} it/s {r['iterations_per_second']:.3f} "
-                              f"peak {r['peak_memory']:.1f}GB", flush=True)
-                    else:
-                        print(f"[train] iter {r['iteration']:>6} val_loss {r['val_loss']:.4f}", flush=True)
-                seen = len(lines)
+            seen, _ = tail_metrics(metrics_path, seen)
             if rc is not None:
                 break
             time.sleep(2)

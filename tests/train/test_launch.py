@@ -210,3 +210,17 @@ def test_stop_server_never_kills_ports_under_the_test_guard(tmp_path, monkeypatc
     monkeypatch.delenv("R3_SERVER_STOP_CMD", raising=False)
     with pytest.raises(RuntimeError, match="R3_NEVER_KILL_PORTS"):
         stop_server(port=8000, root=tmp_path)  # no stop script in root -> would fall through to a port kill
+
+
+def test_tail_metrics_skips_a_partially_written_last_line_and_does_not_repeat(tmp_path):
+    from train.launch import tail_metrics
+
+    p = tmp_path / "metrics.jsonl"
+    p.write_text('{"kind": "val", "iteration": 0, "val_loss": 1.0, "val_time": 1.0}\n{"kind": "train", "iteration": 10, "train_lo')
+    seen, printed = tail_metrics(p, 0)
+    assert seen == 1 and [r["iteration"] for r in printed] == [0]
+    p.write_text(p.read_text() + 'ss": 2.0, "learning_rate": 1e-4, "iterations_per_second": 0.5, "tokens_per_second": 50.0, "trained_tokens": 1, "peak_memory": 1.0}\n')
+    seen, printed = tail_metrics(p, seen)
+    assert seen == 2 and [r["iteration"] for r in printed] == [10]
+    seen, printed = tail_metrics(p, seen)
+    assert seen == 2 and printed == []
