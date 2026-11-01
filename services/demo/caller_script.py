@@ -54,3 +54,10 @@ class AnsweringScript:
         line = self.lines[self.i]
         self.i += 1
         return line
+
+
+def role_for(attrs: dict, own_track_sids: set[str]) -> str:
+    """Who a lk.transcription text stream is about. The agent publishes its own speech and the caller's transcription alike,
+    both with lk.transcribed_track_id; a line is the caller's only when that id is one of the caller's own published tracks."""
+    tid = attrs.get("lk.transcribed_track_id")
+    return "caller" if tid and tid in own_track_sids else "agent"

@@ -45,6 +45,8 @@ CALLER_VOICE = os.environ.get("SIM_CALLER_VOICE", "47c38ca4-5f35-497b-b1a3-41524
 DEEPGRAM_CALLER_VOICE = os.environ.get("SIM_DEEPGRAM_VOICE", "aura-2-orion-en")  # the fallback caller voice; the agent speaks aura-2-thalia-en
 _tts_fallback_announced = False
 AGENT_STATE_ATTR = "lk.agent.state"
+from services.demo.caller_script import role_for  # noqa: E402
+
 SEED = json.loads((ROOT / "eval/sandbox/seed.json").read_text())
 
 # Dana (C-1001) books a mortgage consultation; the agent's greeting asks for the phone number first.
@@ -289,6 +291,8 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
             audio_tasks.append(asyncio.create_task(listen()))
 
     # Agents 1.x publishes transcripts as text streams on lk.transcription (legacy transcription_received is gone).
+    own_track_sids: set[str] = set()  # filled once the mic track is published; a transcript of one of these tracks is the caller's
+
     def _on_text(reader, participant_identity: str) -> None:
         async def read() -> None:
             try:
@@ -298,8 +302,7 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
             attrs = reader.info.attributes or {}
             if not text or attrs.get("lk.transcription_final", "true") == "false":
                 return
-            role = "caller" if attrs.get("lk.transcribed_track_id") else "agent"
-            transcript.append((role, text))
+            transcript.append((role_for(attrs, own_track_sids), text))
         asyncio.create_task(read())
 
     room.register_text_stream_handler("lk.transcription", _on_text)
@@ -331,7 +334,8 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
     await room.connect(os.environ["LIVEKIT_URL"], token(room_name), options=rtc.RoomOptions(auto_subscribe=True))
     source = rtc.AudioSource(SR, 1, queue_size_ms=100)
     track = rtc.LocalAudioTrack.create_audio_track("mic", source)
-    await room.local_participant.publish_track(track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
+    pub = await room.local_participant.publish_track(track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
+    own_track_sids.add(pub.sid)
     pump = MicPump(source)
     if rec is not None:
         pump.on_frame = lambda ts, chunk: rec.add("caller", ts, chunk)
