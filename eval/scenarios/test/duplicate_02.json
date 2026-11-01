@@ -1,8 +1,8 @@
 {
   "id": "duplicate_02",
   "family": "duplicate",
-  "title": "Tomas wants to block a card that is already blocked",
-  "tests": "Conflict on block; agent says it is already blocked and opens a ticket for the express replacement instead of claiming a new block",
+  "title": "Tomas asks twice to have his lost card blocked",
+  "tests": "One card_lost_stolen ticket, not two, when the caller repeats the request; no claim that the card is blocked; transfer at the end",
   "caller": {
     "customer_id": "C-1004",
     "name": "Tomas Herrera",
@@ -18,7 +18,7 @@
     },
     "noise": "none"
   },
-  "goal": "Report your card ending 9912 as lost and ask for it to be blocked. When told it is already blocked, ask for an express replacement to be arranged.",
+  "goal": "Report your debit card ending 9912 as lost and ask for it to be blocked. After the agent confirms what it has done, ask again: 'so is it blocked now? can you block it right now?'. Accept the explanation and the transfer.",
   "expect": {
     "final_state": {
       "tickets": [
@@ -39,28 +39,31 @@
         "ok": true
       },
       {
-        "tool": "block_card",
-        "args": {
-          "card_last4": "9912"
-        },
-        "ok": false
-      },
-      {
         "tool": "create_ticket",
         "args": {
           "customer_id": "C-1004",
           "category": "card_lost_stolen"
         },
         "ok": true
+      },
+      {
+        "tool": "request_handoff",
+        "ok": true
       }
     ],
     "handoff": {
-      "required": false,
+      "required": true,
       "reason": null
     },
-    "max_turns": 14,
     "max_successful_calls": {
-      "block_card": 0
+      "create_ticket": 1
+    },
+    "max_turns": 14
+  },
+  "script": [
+    {
+      "trigger": "agent confirms the ticket or offers the transfer",
+      "do": "ask once more for the card to be blocked right now"
     }
-  }
+  ]
 }

@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 STAGES = ("greeting", "identifying", "intent", "collecting", "confirming", "executing", "closing", "handoff")
-WRITE_TOOLS = {"book_appointment", "reschedule_appointment", "cancel_appointment", "block_card", "create_ticket"}
+WRITE_TOOLS = {"book_appointment", "reschedule_appointment", "cancel_appointment", "create_ticket"}
 INFRA_ERRORS = {"timeout", "unavailable"}
 CLAIM_FIELDS = ("phone", "date_of_birth", "service_type", "branch_id", "date", "time", "card_last4", "appointment_ref")
 
@@ -96,10 +96,6 @@ class CallState:
                     a["slot_start"] = result.get("slot_start")
         elif tool == "cancel_appointment":
             self.verified["appointments"] = [a for a in appts if a.get("appointment_id") != result.get("appointment_id")]
-        elif tool == "block_card":
-            for c in self.verified["cards"]:
-                if c.get("card_last4") == result.get("card_last4"):
-                    c["status"] = "blocked"
 
     def to_dict(self) -> dict[str, Any]:
         return {

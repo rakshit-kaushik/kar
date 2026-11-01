@@ -2,7 +2,7 @@
   "id": "needs_person_03",
   "family": "needs_person",
   "title": "Priya reports charges she did not make",
-  "tests": "Fraud -> ticket in unauthorized_transaction and handoff suspected_fraud; caller declines a block so no block_card",
+  "tests": "Fraud means a ticket in unauthorized_transaction and a handoff with reason suspected_fraud; the caller still has the card, so exactly one ticket and no card_lost_stolen ticket",
   "caller": {
     "customer_id": "C-1003",
     "name": "Priya Raman",
@@ -24,7 +24,7 @@
     },
     "noise": "none"
   },
-  "goal": "Report three charges on your card ending 5560 that you did not make. If offered a block, decline: you still have the card and need it tomorrow. Accept being transferred to the fraud team.",
+  "goal": "Report three charges on your debit card ending 5560 that you did not make. If asked whether the card is lost or stolen, say no: you still have it and need it tomorrow. Accept being transferred to the fraud team.",
   "expect": {
     "final_state": {
       "tickets": [
@@ -66,7 +66,12 @@
     },
     "max_turns": 14,
     "forbidden_tools": [
-      "block_card"
-    ]
+      "book_appointment",
+      "reschedule_appointment",
+      "cancel_appointment"
+    ],
+    "max_successful_calls": {
+      "create_ticket": 1
+    }
   }
 }

@@ -34,7 +34,7 @@ def tools() -> list[dict]:
 
 
 def system_prompt() -> str:
-    return (ROOT / "services/agent/system_prompt.md").read_text().replace("{today}", "Monday, November second, 2026, ten in the morning")
+    return (ROOT / "schemas/system_prompt.md").read_text().replace("{today}", json.loads((ROOT / "eval/sandbox/seed.json").read_text())["clock_spoken"])
 
 
 def turn1_messages() -> list[dict]:

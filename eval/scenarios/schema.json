@@ -4,72 +4,325 @@
   "title": "R3 eval scenario",
   "description": "One caller episode against a fresh sandbox (eval/sandbox/seed.json, clock Monday 2026-11-02 10:00). The hosted model plays the caller from `caller` + `goal` + `script`; the sandbox applies `inject`; scorers check `expect`.",
   "type": "object",
-  "required": ["id", "family", "title", "tests", "caller", "goal", "expect"],
+  "required": [
+    "id",
+    "family",
+    "title",
+    "tests",
+    "caller",
+    "goal",
+    "expect"
+  ],
   "additionalProperties": false,
   "properties": {
-    "id": {"type": "string", "pattern": "^[a-z_]+_[0-9]{2}$"},
-    "family": {"enum": ["ordinary", "missing_info", "correction", "ambiguous_branch", "tool_timeout", "duplicate", "multi_intent", "needs_person", "noisy_transcript"]},
-    "title": {"type": "string"},
-    "tests": {"type": "string", "description": "What this scenario is designed to catch, in one sentence"},
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z_]+_[0-9]{2}$"
+    },
+    "family": {
+      "enum": [
+        "ordinary",
+        "missing_info",
+        "correction",
+        "ambiguous_branch",
+        "tool_timeout",
+        "duplicate",
+        "multi_intent",
+        "needs_person",
+        "noisy_transcript"
+      ]
+    },
+    "title": {
+      "type": "string"
+    },
+    "tests": {
+      "type": "string",
+      "description": "What this scenario is designed to catch, in one sentence"
+    },
     "caller": {
       "type": "object",
-      "required": ["customer_id", "name", "persona", "knows", "noise"],
+      "required": [
+        "customer_id",
+        "name",
+        "persona",
+        "knows",
+        "noise"
+      ],
       "additionalProperties": false,
       "properties": {
-        "customer_id": {"type": ["string", "null"], "description": "Seed customer, or null for a non-customer"},
-        "name": {"type": "string"},
-        "persona": {"type": "string", "description": "How the caller talks and behaves"},
-        "knows": {"type": "object", "description": "Facts the caller can supply (phone, date_of_birth, card_last4, appointment refs); spoken forms where relevant"},
-        "withholds": {"type": "array", "items": {"type": "string"}, "description": "Facts the caller gives only when explicitly asked"},
-        "noise": {"enum": ["none", "low", "high"], "description": "STT-shaping level applied to caller turns"},
-        "stt_quirks": {"type": "array", "items": {"type": "string"}, "description": "Specific transcript artifacts the caller model must produce (e.g. 'oh' for zero)"}
+        "customer_id": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Seed customer, or null for a non-customer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "persona": {
+          "type": "string",
+          "description": "How the caller talks and behaves"
+        },
+        "knows": {
+          "type": "object",
+          "description": "Facts the caller can supply (phone, date_of_birth, card_last4, appointment refs); spoken forms where relevant"
+        },
+        "withholds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Facts the caller gives only when explicitly asked"
+        },
+        "noise": {
+          "enum": [
+            "none",
+            "low",
+            "high"
+          ],
+          "description": "STT-shaping level applied to caller turns"
+        },
+        "stt_quirks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Specific transcript artifacts the caller model must produce (e.g. 'oh' for zero)"
+        }
       }
     },
-    "goal": {"type": "string", "description": "What the caller wants, in natural language, for the caller model"},
+    "goal": {
+      "type": "string",
+      "description": "What the caller wants, in natural language, for the caller model"
+    },
     "script": {
       "type": "array",
       "description": "Planned corrections, detours and reactions, in order",
       "items": {
-        "type": "object", "required": ["trigger", "do"], "additionalProperties": false,
-        "properties": {"trigger": {"type": "string"}, "do": {"type": "string"}}
+        "type": "object",
+        "required": [
+          "trigger",
+          "do"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "trigger": {
+            "type": "string"
+          },
+          "do": {
+            "type": "string"
+          }
+        }
       }
     },
     "inject": {
       "type": "array",
       "description": "Sandbox fault injection: the n-th call of a tool returns this error",
       "items": {
-        "type": "object", "required": ["tool", "call_index", "error"], "additionalProperties": false,
-        "properties": {"tool": {"type": "string"}, "call_index": {"type": "integer", "minimum": 1}, "error": {"enum": ["timeout", "unavailable", "not_found", "conflict", "invalid_argument", "not_verified"]}}
+        "type": "object",
+        "required": [
+          "tool",
+          "call_index",
+          "error"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "tool": {
+            "type": "string"
+          },
+          "call_index": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "error": {
+            "enum": [
+              "timeout",
+              "unavailable",
+              "not_found",
+              "conflict",
+              "invalid_argument",
+              "not_verified"
+            ]
+          }
+        }
       }
     },
     "expect": {
       "type": "object",
-      "required": ["final_state", "tool_calls", "handoff", "max_turns"],
+      "required": [
+        "final_state",
+        "tool_calls",
+        "handoff",
+        "max_turns"
+      ],
       "additionalProperties": false,
       "properties": {
         "final_state": {
-          "type": "object", "additionalProperties": false,
+          "type": "object",
+          "additionalProperties": false,
           "description": "Rows that must exist after the episode (diff against seed); everything else must be unchanged when no_other_changes is true",
           "properties": {
-            "appointments_new": {"type": "array", "items": {"type": "object", "required": ["customer_id", "branch_id", "service_type", "slot_start"], "properties": {"customer_id": {"type": "string"}, "branch_id": {"type": "string"}, "service_type": {"type": "string"}, "slot_start": {"type": "string"}}}},
-            "appointments_changed": {"type": "array", "items": {"type": "object", "required": ["appointment_id"], "properties": {"appointment_id": {"type": "string"}, "slot_start": {"type": "string"}, "status": {"enum": ["booked", "cancelled"]}}}},
-            "cards": {"type": "array", "items": {"type": "object", "required": ["card_last4", "status"], "properties": {"card_last4": {"type": "string"}, "status": {"enum": ["active", "blocked"]}, "replacement": {"enum": ["none", "standard", "express"]}}}},
-            "tickets": {"type": "array", "items": {"type": "object", "required": ["category"], "properties": {"customer_id": {"type": "string"}, "category": {"type": "string"}}}},
-            "no_other_changes": {"type": "boolean"}
+            "appointments_new": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "customer_id",
+                  "branch_id",
+                  "service_type",
+                  "slot_start"
+                ],
+                "properties": {
+                  "customer_id": {
+                    "type": "string"
+                  },
+                  "branch_id": {
+                    "type": "string"
+                  },
+                  "service_type": {
+                    "type": "string"
+                  },
+                  "slot_start": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "appointments_changed": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "appointment_id"
+                ],
+                "properties": {
+                  "appointment_id": {
+                    "type": "string"
+                  },
+                  "slot_start": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "booked",
+                      "cancelled"
+                    ]
+                  }
+                }
+              }
+            },
+            "tickets": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": [
+                  "category"
+                ],
+                "properties": {
+                  "customer_id": {
+                    "type": "string"
+                  },
+                  "category": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "no_other_changes": {
+              "type": "boolean"
+            }
           }
         },
         "tool_calls": {
           "type": "array",
           "description": "Ordered subsequence that must appear in the tool log (args are a subset match; idempotency_key ignored). ok=false means the call must have returned an error.",
-          "items": {"type": "object", "required": ["tool"], "additionalProperties": false, "properties": {"tool": {"type": "string"}, "args": {"type": "object"}, "ok": {"type": "boolean"}}}
+          "items": {
+            "type": "object",
+            "required": [
+              "tool"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "tool": {
+                "type": "string"
+              },
+              "args": {
+                "type": "object"
+              },
+              "ok": {
+                "type": "boolean"
+              }
+            }
+          }
         },
-        "forbidden_tools": {"type": "array", "items": {"type": "string"}},
-        "max_successful_calls": {"type": "object", "additionalProperties": {"type": "integer"}, "description": "Upper bound on successful calls per tool"},
-        "handoff": {"type": "object", "required": ["required"], "additionalProperties": false, "properties": {"required": {"type": "boolean"}, "reason": {"type": ["string", "null"]}}},
-        "max_turns": {"type": "integer", "minimum": 2, "maximum": 20},
-        "corrections_hold": {"type": "array", "description": "Fields whose final tool-call value must equal the corrected value", "items": {"type": "object", "required": ["field", "value"], "properties": {"field": {"type": "string"}, "value": {"type": "string"}}}},
-        "must_mention": {"type": "array", "items": {"type": "string"}, "description": "Substrings (case-insensitive) that must appear in some assistant turn"},
-        "must_not_mention_before_verified": {"type": "boolean", "default": true}
+        "forbidden_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "max_successful_calls": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer"
+          },
+          "description": "Upper bound on successful calls per tool"
+        },
+        "handoff": {
+          "type": "object",
+          "required": [
+            "required"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "required": {
+              "type": "boolean"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "description": "Required handoff reason (enum of request_handoff.reason). null with required=true accepts any reason."
+            }
+          }
+        },
+        "max_turns": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 20
+        },
+        "corrections_hold": {
+          "type": "array",
+          "description": "Fields whose final tool-call value must equal the corrected value",
+          "items": {
+            "type": "object",
+            "required": [
+              "field",
+              "value"
+            ],
+            "properties": {
+              "field": {
+                "type": "string"
+              },
+              "value": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "must_mention": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Substrings (case-insensitive) that must appear in some assistant turn"
+        },
+        "must_not_mention_before_verified": {
+          "type": "boolean",
+          "default": true
+        }
       }
     }
   }

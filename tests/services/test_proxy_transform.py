@@ -61,12 +61,12 @@ def test_incremental_tool_call_arguments_pass_through_untouched():
 
 def test_two_distinct_tool_calls_both_pass_through():
     _, out = feed_all([
-        chunk({"tool_calls": [tc(0, "call_a", "block_card", '{"card_last4": "4219"}')]}),
+        chunk({"tool_calls": [tc(0, "call_a", "cancel_appointment", '{"appointment_id": "A-2001"}')]}),
         chunk({"tool_calls": [tc(1, "call_b", "create_ticket", '{"category": "unauthorized_transaction"}')]}),
         chunk(finish="tool_calls"),
     ])
     names = [d["tool_calls"][0]["function"]["name"] for d in deltas(out) if d.get("tool_calls")]
-    assert names == ["block_card", "create_ticket"]
+    assert names == ["cancel_appointment", "create_ticket"]
 
 
 def test_think_block_is_stripped_from_content():

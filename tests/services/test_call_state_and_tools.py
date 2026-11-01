@@ -23,9 +23,9 @@ def make():
     return ToolExecutor(sandbox=sb, state=state, event_sink=sink), state, events, sb
 
 
-def test_schemas_load_eight_tools_in_openai_format():
+def test_schemas_load_the_seven_contract_tools_in_openai_format():
     schemas = load_tool_schemas()
-    assert sorted(schemas) == ["block_card", "book_appointment", "cancel_appointment", "check_availability", "create_ticket", "lookup_account", "request_handoff", "reschedule_appointment"]
+    assert sorted(schemas) == ["book_appointment", "cancel_appointment", "check_availability", "create_ticket", "lookup_account", "request_handoff", "reschedule_appointment"]
     assert schemas["lookup_account"]["type"] == "function"
     assert schemas["lookup_account"]["function"]["parameters"]["required"] == ["phone", "date_of_birth"]
 
@@ -102,7 +102,7 @@ def test_build_livekit_tools_wraps_every_schema_as_a_raw_function_tool():
     from services.tools.livekit_tools import build_livekit_tools
 
     tools = build_livekit_tools(lambda ctx: None)
-    assert len(tools) == 8
+    assert len(tools) == 7
     assert all(tool_context.is_raw_function_tool(t) for t in tools)
     names = sorted(tool_context.get_raw_function_info(t).raw_schema["name"] for t in tools)
-    assert names[0] == "block_card" and names[-1] == "reschedule_appointment"
+    assert names[0] == "book_appointment" and names[-1] == "reschedule_appointment"

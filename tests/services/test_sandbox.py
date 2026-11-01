@@ -93,11 +93,11 @@ def test_cancel_sets_status_and_second_cancel_is_not_found(sb):
     assert sb.lookup_account(phone="5550177310", date_of_birth="1992-11-30")["appointments"] == []
 
 
-def test_block_card_blocks_with_replacement_and_conflicts_when_already_blocked(sb):
-    r = sb.block_card(customer_id="C-1005", card_last4="3307", reason="lost", replacement="standard", idempotency_key="b1")
-    assert r == {"card_last4": "3307", "status": "blocked", "replacement": "standard"}
-    assert sb.block_card(customer_id="C-1004", card_last4="9912", reason="lost", idempotency_key="b2")["error"] == "conflict"
-    assert sb.block_card(customer_id="C-1005", card_last4="0000", reason="lost", idempotency_key="b3")["error"] == "not_found"
+def test_block_card_is_no_longer_a_tool(sb):
+    """Cut from the contract on 2026-11-01 (prompt budget): lost or stolen card = create_ticket(card_lost_stolen) + request_handoff."""
+    assert "block_card" not in sb.TOOLS and not hasattr(sb, "block_card")
+    assert sb.call("block_card", json.dumps({"customer_id": "C-1005", "card_last4": "3307", "reason": "lost"}))["error"] == "invalid_argument"
+    assert sb.lookup_account(phone="5550155678", date_of_birth="2001-09-09")["cards"] == [{"card_last4": "3307", "status": "active"}]
 
 
 def test_create_ticket_validates_category(sb):
@@ -128,9 +128,10 @@ def test_call_dispatches_by_name_with_json_args_and_logs(sb):
 
 
 def test_diff_reports_only_changes_from_seed(sb):
-    assert sb.diff() == {"appointments_new": [], "appointments_changed": [], "cards": [], "tickets": []}
+    assert sb.diff() == {"appointments_new": [], "appointments_changed": [], "tickets": []}
     sb.cancel_appointment(appointment_id="A-2002", idempotency_key="d1")
-    sb.block_card(customer_id="C-1005", card_last4="3307", reason="lost", idempotency_key="d2")
+    sb.create_ticket(customer_id="C-1003", category="card_lost_stolen", summary="lost card 5560", idempotency_key="d2")
     d = sb.diff()
     assert d["appointments_changed"] == [{"appointment_id": "A-2002", "status": "cancelled", "slot_start": "2026-11-10T11:00"}]
-    assert d["cards"] == [{"card_last4": "3307", "status": "blocked", "replacement": "none"}]
+    assert d["tickets"] == [{"customer_id": "C-1003", "category": "card_lost_stolen"}]
+    assert "cards" not in d
