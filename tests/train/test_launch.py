@@ -278,3 +278,22 @@ def test_acquire_gpu_trusts_only_a_status_read_that_names_the_owner(tmp_path, mo
         "status) echo \"gpu: held by S for another 9 min (block)\"; exit 1;; release) echo released; exit 0;; esac\n")
     res = acquire_gpu(root, "T", 5, "smoke", wait_minutes=0, poll_seconds=0)
     assert res["acquired"] is False and res["attempts"] == 1
+
+
+def test_served_model_is_read_from_the_process_command_line_not_the_served_name():
+    """Nov 1 08:02: :8000 advertised r3-voice-730f8ba68e while its process had loaded r3-voice-206506525c."""
+    from train.launch import parse_server_command, verify_served
+
+    cmd = ("/x/.venv/bin/python scripts/vllm_mlx_serve.py serve /art/models/r3-voice-206506525c --host 127.0.0.1 --port 8000 "
+           "--served-model-name r3-voice-730f8ba68e --prefix-trie-cache")
+    got = parse_server_command(cmd)
+    assert got == {"model_dir": "/art/models/r3-voice-206506525c", "served_name": "r3-voice-730f8ba68e", "adapter": None}
+    ok, msg = verify_served("/art/models/r3-voice-730f8ba68e", {"pid": 1, "command": cmd, **got})
+    assert ok is False and "requested /art/models/r3-voice-730f8ba68e but the server loaded /art/models/r3-voice-206506525c" in msg
+    ok, _ = verify_served("/art/models/r3-voice-206506525c/", {"pid": 1, "command": cmd, **got})
+    assert ok is True  # same directory, trailing slash
+    ok, _ = verify_served(None, {"pid": 1, "command": cmd, **got})
+    assert ok is True  # nothing requested: report only
+    mlx = parse_server_command("mlx_lm.server --model /art/models/Qwen3-4B-8bit --adapter-path /art/models/r3-voice-x/adapter --port 8000")
+    assert mlx == {"model_dir": "/art/models/Qwen3-4B-8bit", "served_name": None, "adapter": "/art/models/r3-voice-x/adapter"}
+    assert verify_served("/art/models/x", None) == (False, "no model server listening")

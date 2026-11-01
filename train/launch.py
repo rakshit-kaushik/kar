@@ -31,6 +31,7 @@ import datetime as dt
 import json
 import math
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -412,6 +413,37 @@ def stop_server(port: int = SERVER_PORT, timeout: float = 30.0, root: Path = REP
         os.kill(pid, signal.SIGKILL)
 
 
+def parse_server_command(command: str) -> dict:
+    """Model directory and served name from a model server's command line (vllm-mlx `serve <dir> ...
+    --served-model-name <name>` or `mlx_lm.server --model <dir> [--adapter-path <dir>]`)."""
+    m = re.search(r"(?:\bserve|--model)\s+(\S+)", command)
+    n = re.search(r"--served-model-name\s+(\S+)", command)
+    a = re.search(r"--adapter-path\s+(\S+)", command)
+    return {"model_dir": m.group(1) if m else None, "served_name": n.group(1) if n else None, "adapter": a.group(1) if a else None}
+
+
+def served_model(port: int = SERVER_PORT) -> dict | None:
+    """What the model server on `port` actually loaded, read from the listener's command line: the only
+    source of truth. The served name and .env can both lie: on Nov 1 08:02 restart.sh re-sourced .env
+    over the deploy's MODEL_DIR override and served run 1's weights under run 2's name for two hours."""
+    pids = _listening_pids(port)
+    if not pids:
+        return None
+    out = subprocess.run(["ps", "-o", "command=", "-p", str(pids[0])], capture_output=True, text=True).stdout.strip()
+    return {"pid": pids[0], "command": out, **parse_server_command(out)}
+
+
+def verify_served(requested_dir: str | Path | None, served: dict | None) -> tuple[bool, str]:
+    """True when the listener loaded `requested_dir` (or nothing was requested). The message names both."""
+    if served is None:
+        return (requested_dir is None), "no model server listening"
+    msg = f"{served.get('model_dir')} as {served.get('served_name')}" + (f" (adapter {served['adapter']})" if served.get("adapter") else "")
+    if requested_dir is None or not served.get("model_dir"):
+        return True, msg
+    same = Path(served["model_dir"]).expanduser().resolve() == Path(requested_dir).expanduser().resolve()
+    return same, msg if same else f"requested {requested_dir} but the server loaded {msg}"
+
+
 def start_server(root: Path = REPO_ROOT, model_dir: str | None = None) -> int:
     """restart.sh (or $R3_SERVER_START_CMD) with R3_OWNER=T (it refuses while another owner holds the
     lock) and, for a deploy, MODEL_DIR=<versioned model dir> (restart.sh serves it as LOCAL_LLM_MODEL)."""
@@ -421,6 +453,14 @@ def start_server(root: Path = REPO_ROOT, model_dir: str | None = None) -> int:
     rc = subprocess.run(cmd, shell=True, cwd=root, env=env).returncode
     if rc != 0:
         print(f"[server] WARNING: start command exited {rc} (scripts/restart.sh is session S's); start the server by hand", flush=True)
+        return rc
+    if os.environ.get("R3_SERVER_START_CMD"):  # a stand-in command (tests): nothing real to inspect
+        return rc
+    ok, msg = verify_served(model_dir, served_model(SERVER_PORT))
+    print(f"[server] :{SERVER_PORT} serves {msg}", flush=True)
+    if not ok:
+        print(f"[server] ERROR: {msg}; the override was lost on the way through restart.sh. Not the model you asked for.", flush=True)
+        return 3
     return rc
 
 
@@ -512,6 +552,8 @@ def server_cycle(root: Path, opts, ctx: dict, work) -> dict:
                 print(f"[server] WARNING: gpu_flip.sh local failed: {e}", flush=True)
         if state["stopped"]:
             state["restarted"] = start_server(root, model_dir=getattr(opts, "serve_model_dir", None))
+            if not os.environ.get("R3_SERVER_START_CMD"):
+                state["served"] = served_model(SERVER_PORT)  # the directory the live server really loaded, into run.json
             if state["restarted"] == 0:
                 state["probe"] = probe_stack(root)
         if state["lock"] and state["lock"]["acquired"]:
