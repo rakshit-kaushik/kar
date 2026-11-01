@@ -26,7 +26,7 @@ from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProc
 from livekit.agents import EndpointingOptions, PreemptiveGenerationOptions, TurnHandlingOptions
 import numpy as np
 from livekit.agents.metrics import EOUMetrics, LLMMetrics, STTMetrics, TTSMetrics
-from livekit.plugins import cartesia, deepgram, silero
+from livekit.plugins import deepgram, silero
 from livekit.plugins import openai as lk_openai
 from livekit.plugins.turn_detector.english import EnglishModel
 from openai import AsyncOpenAI

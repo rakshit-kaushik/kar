@@ -22,10 +22,8 @@ import json
 import math
 import os
 import pathlib
-import statistics
 import sys
 import time
-import uuid
 from typing import Any
 
 import httpx

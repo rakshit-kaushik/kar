@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import os
 import pathlib
-import re
 
 from services.common.claims import CLAIM_TOOLS, unsupported_claims  # noqa: E402,F401  (shared with services/demo/check.py)
 from collections import defaultdict
