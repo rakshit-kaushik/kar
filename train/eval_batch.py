@@ -12,6 +12,9 @@ Steps (each recorded in $R3_ARTIFACTS/runs/eval-batch-<ts>/batch.json):
      runs/<model id>-eval/eval/family_table.{json,md}
   4. optional: serve the base on :8010/:8011 for --base-minutes (E's reruns; STOP file ends it early)
   5. release the lock; print the candidate ranking (train/select.py) including E's base baseline table
+--local-caller (hosted credits out): the base is served on port+2/port+3 as the simulated caller for the
+whole batch and every candidate is scored with `--caller-base-url http://127.0.0.1:<port+3>/v1
+--caller-model r3-voice-base`; run ids end in -localcaller so the rows never mix with hosted-caller rows.
 """
 from __future__ import annotations
 
@@ -43,6 +46,8 @@ def main(argv=None) -> int:
     ap.add_argument("--lock-minutes", type=int, default=None)
     ap.add_argument("--no-lock", action="store_true")
     ap.add_argument("--base-table", default=None, help="E's base baseline run dir (scores.jsonl) to include in the ranking")
+    ap.add_argument("--local-caller", action="store_true", help="serve the base on port+2/+3 as the simulated caller (credits out)")
+    ap.add_argument("--no-db", action="store_true", help="runner writes no Postgres rows (tests)")
     a = ap.parse_args(argv)
 
     load_env()
@@ -59,6 +64,16 @@ def main(argv=None) -> int:
     def save():
         (out / "batch.json").write_text(json.dumps(record, indent=2, default=str) + "\n")
 
+    caller_proc = None
+    caller_args = ""
+    suffix = ""
+    if a.local_caller:
+        caller_out = out / "caller-serve"
+        cmd = [sys.executable, "-m", "train.eval_hook", "--model-dir", str(base), "--model-name", "r3-voice-base", "--port", str(a.port + 2),
+               "--serve-only", "--minutes", str(minutes + 30), "--out", str(caller_out)]
+        record["caller"] = {"command": cmd, "base_url": f"http://127.0.0.1:{a.port + 3}/v1", "started": True, "stopped": False}
+        caller_args = f" --caller-base-url http://127.0.0.1:{a.port + 3}/v1 --caller-model r3-voice-base"
+        suffix = "-localcaller"
     lock = None
     if not a.no_lock:
         lock = acquire_gpu(root, LOCK_OWNER, minutes, batch_id, wait_minutes=180)
@@ -68,6 +83,20 @@ def main(argv=None) -> int:
         if not lock["acquired"]:
             return 1
     try:
+        if a.local_caller:
+            caller_out.mkdir(parents=True, exist_ok=True)
+            caller_log = (caller_out / "serve.log").open("a")
+            caller_proc = subprocess.Popen(record["caller"]["command"], cwd=REPO_ROOT, stdout=caller_log, stderr=subprocess.STDOUT,
+                                           start_new_session=True)
+            deadline = time.time() + 900
+            while time.time() < deadline and not (caller_out / "serving.json").exists():
+                if caller_proc.poll() is not None:
+                    raise RuntimeError(f"caller stack exited early; see {caller_out / 'serve.log'}")
+                time.sleep(2)
+            if not (caller_out / "serving.json").exists():
+                raise RuntimeError("caller stack not up within 15 min")
+            print(f"[batch] local caller up at {record['caller']['base_url']}", flush=True)
+            save()
         if a.routing_data:
             cmd = [sys.executable, "-m", "train.launch", "--config", "train/configs/routing.yaml", "--data", a.routing_data,
                    "--run-id", "routing-run1", "--services-root", str(root), "--tokens-per-sec", "850", "--window-minutes", "20",
@@ -80,17 +109,18 @@ def main(argv=None) -> int:
             save()
         for model_id, repeats in cands:
             model_dir = artifacts / "models" / model_id
-            run_id = f"{model_id}-eval"
-            os.environ["R3_EVAL_RUNNER"] = os.environ.get("R3_EVAL_RUNNER") or f"/Users/abgup/conductor/workspaces/kar/stockholm/.venv/bin/r3-eval run --repeats {repeats}"
+            run_id = f"{model_id}-eval{suffix}"
+            runner_base = (os.environ.get("R3_EVAL_RUNNER") or "/Users/abgup/conductor/workspaces/kar/stockholm/.venv/bin/r3-eval run").split(" --repeats")[0].split(" --caller-base-url")[0]
             os.environ["R3_EVAL_RUNNER_CWD"] = os.environ.get("R3_EVAL_RUNNER_CWD") or "/Users/abgup/conductor/workspaces/kar/stockholm"
-            # one runner template per candidate: the repeats differ
-            os.environ["R3_EVAL_RUNNER"] = os.environ["R3_EVAL_RUNNER"].split(" --repeats")[0] + f" --repeats {repeats}"
+            runner_args = f" --repeats {repeats}{caller_args}"
+            if not os.environ.get("R3_EVAL_FORCE_STUB"):
+                os.environ["R3_EVAL_RUNNER"] = runner_base + runner_args  # one template per candidate: repeats differ
             t0 = time.time()
-            step = {"step": "eval", "model_id": model_id, "repeats": repeats, "run_id": run_id}
+            step = {"step": "eval", "model_id": model_id, "repeats": repeats, "run_id": run_id, "runner_args": runner_args}
             try:
                 table = evaluate_model_dir(model_dir, model_name=model_id, run_id=run_id, scenarios=a.scenarios,
-                                           out_dir=artifacts / "runs" / run_id / "eval", port=a.port, database_url="env",
-                                           timeout=900, through_proxy=True)
+                                           out_dir=artifacts / "runs" / run_id / "eval", port=a.port,
+                                           database_url=None if a.no_db else "env", timeout=900, through_proxy=True)
                 step.update(selection=table["selection"], overall=table["overall"], runner=table["runner"], rc=table["returncode"])
                 # mirror the table into the training run's directory when there is one
                 for rj in (artifacts / "runs").glob("*/run.json"):
@@ -108,6 +138,13 @@ def main(argv=None) -> int:
             record["steps"].append({"step": "base-serve", "stopped_by": info.get("stopped_by"), "minutes": a.base_minutes})
             save()
     finally:
+        if caller_proc is not None:
+            (out / "caller-serve" / "STOP").touch()
+            try:
+                caller_proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                os.killpg(caller_proc.pid, 15)
+            record["caller"]["stopped"] = True
         if lock and lock.get("acquired"):
             rc, _ = release_gpu(root, LOCK_OWNER)
             record["lock"]["released"] = rc == 0
