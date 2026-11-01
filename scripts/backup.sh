@@ -8,8 +8,13 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; set -a; . ./.env; set +a
 ART="${R3_ARTIFACTS:-$HOME/r3-artifacts}"; STAMP="$(date +%Y%m%d-%H%M)"; DEST="$ART/backups/$STAMP"; mkdir -p "$DEST"
-PG_DUMP="${PG_DUMP:-$(ls /opt/homebrew/opt/postgresql@15/bin/pg_dump /opt/homebrew/bin/pg_dump 2>/dev/null | head -1)}"
-git bundle create "$DEST/kar-all.bundle" --all >/dev/null 2>&1 && git bundle verify "$DEST/kar-all.bundle" >/dev/null 2>&1 && echo "git: $DEST/kar-all.bundle ($(git rev-parse --short main) main)"
+PG_DUMP="${PG_DUMP:-}"
+for c in /opt/homebrew/opt/postgresql@15/bin/pg_dump /opt/homebrew/bin/pg_dump; do [ -z "$PG_DUMP" ] && [ -x "$c" ] && PG_DUMP="$c"; done  # (an `ls a b | head` here failed under set -e -o pipefail when one path was missing)
+if git bundle create "$DEST/kar-all.bundle" --branches 2>"$DEST/git-bundle.err" && git bundle verify "$DEST/kar-all.bundle" >/dev/null 2>>"$DEST/git-bundle.err"; then
+  echo "git: $DEST/kar-all.bundle ($(git rev-parse --short main) main, $(git branch | wc -l | tr -d ' ') branches)"; rm -f "$DEST/git-bundle.err"
+else
+  echo "git bundle FAILED: $(tail -2 "$DEST/git-bundle.err" | tr '\n' ' ')"
+fi
 if [ -n "$PG_DUMP" ]; then "$PG_DUMP" "$DATABASE_URL" | gzip > "$DEST/r3.sql.gz" && echo "postgres: $DEST/r3.sql.gz ($(du -h "$DEST/r3.sql.gz" | cut -f1))"; else echo "postgres: pg_dump not found (set PG_DUMP)"; fi
 cp .env "$DEST/env.snapshot" && chmod 600 "$DEST/env.snapshot" && echo "env: $DEST/env.snapshot"
 [ -d "$ART/deploy" ] && cp -R "$ART/deploy" "$DEST/deploy" && echo "deploy state: $(cat "$ART/deploy/current" 2>/dev/null || echo none)"

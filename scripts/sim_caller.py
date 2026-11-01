@@ -179,9 +179,16 @@ class LLMCaller:
             msgs.append({"role": "assistant" if role == "caller" else "user", "content": text})
         if not transcript:
             msgs.append({"role": "user", "content": "(the line is ringing; the agent will greet you)"})
-        r = await self.client.chat.completions.create(model=self.model, messages=msgs, max_tokens=60, seed=self.seed)
+        # the hosted model's hidden reasoning consumes the token budget (a 60-token budget returned finish_reason=length
+        # and empty content on Nov 1), so the budget is generous and an empty reply is retried once with a larger one
+        line = ""
+        for budget in (400, 1500):
+            r = await self.client.chat.completions.create(model=self.model, messages=msgs, max_tokens=budget, seed=self.seed)
+            line = (r.choices[0].message.content or "").strip().strip('"')
+            if line:
+                break
         self.turns += 1
-        return (r.choices[0].message.content or "").strip().strip('"')
+        return line or None
 
 
 # ---- one call ------------------------------------------------------------------------------------------------
