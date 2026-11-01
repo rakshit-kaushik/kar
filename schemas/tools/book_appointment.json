@@ -35,18 +35,13 @@
         "slot_start": {
           "type": "string",
           "description": "YYYY-MM-DDTHH:MM local"
-        },
-        "idempotency_key": {
-          "type": "string",
-          "description": "Caller-generated UUID; repeat returns the original result"
         }
       },
       "required": [
         "customer_id",
         "branch_id",
         "service_type",
-        "slot_start",
-        "idempotency_key"
+        "slot_start"
       ],
       "additionalProperties": false
     }

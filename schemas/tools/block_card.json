@@ -31,17 +31,12 @@
             "standard",
             "express"
           ]
-        },
-        "idempotency_key": {
-          "type": "string",
-          "description": "Caller-generated UUID; repeat returns the original result"
         }
       },
       "required": [
         "customer_id",
         "card_last4",
-        "reason",
-        "idempotency_key"
+        "reason"
       ],
       "additionalProperties": false
     }

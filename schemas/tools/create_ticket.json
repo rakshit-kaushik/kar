@@ -31,17 +31,12 @@
         "summary": {
           "type": "string",
           "description": "One sentence, no PII beyond last4"
-        },
-        "idempotency_key": {
-          "type": "string",
-          "description": "Caller-generated UUID; repeat returns the original result"
         }
       },
       "required": [
         "customer_id",
         "category",
-        "summary",
-        "idempotency_key"
+        "summary"
       ],
       "additionalProperties": false
     }

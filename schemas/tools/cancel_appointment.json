@@ -9,15 +9,10 @@
         "appointment_id": {
           "type": "string",
           "description": "From lookup_account"
-        },
-        "idempotency_key": {
-          "type": "string",
-          "description": "Caller-generated UUID; repeat returns the original result"
         }
       },
       "required": [
-        "appointment_id",
-        "idempotency_key"
+        "appointment_id"
       ],
       "additionalProperties": false
     }
