@@ -135,3 +135,25 @@ def test_stats_count_what_was_normalized():
     assert t.stats["dropped_duplicate_tool_calls"] == 1
     assert t.stats["stripped_think_chars"] == len("x")
     assert t.stats["tool_calls"] == 1
+
+
+def test_bracketed_tool_preamble_is_stripped_even_when_split_across_chunks():
+    _, out = feed_all([
+        chunk({"content": "[Call"}),
+        chunk({"content": "ing tool: lookup_acc"}),
+        chunk({"content": "ount]"}),
+        chunk({"tool_calls": [tc(0, "a", "lookup_account", ARGS)]}, finish="tool_calls"),
+    ])
+    assert "".join(d.get("content") or "" for d in deltas(out)) == ""
+    assert sum(1 for d in deltas(out) if d.get("tool_calls")) == 1
+
+
+def test_unclosed_tool_preamble_is_dropped_at_finish():
+    t, out = feed_all([chunk({"content": "[Calling tool"}), chunk(finish="stop")])
+    assert "".join(d.get("content") or "" for d in deltas(out)) == ""
+    assert t.stats["stripped_preamble_chars"] == len("[Calling tool")
+
+
+def test_ordinary_brackets_in_speech_pass_through():
+    _, out = feed_all([chunk({"content": "Your card [ending 4219] is active."}), chunk(finish="stop")])
+    assert "".join(d.get("content") or "" for d in deltas(out)) == "Your card [ending 4219] is active."

@@ -13,8 +13,14 @@ import copy
 import json
 import uuid
 
+import re
+
 THINK_OPEN, THINK_CLOSE = "<think>", "</think>"
 TOOL_OPEN, TOOL_CLOSE = "<tool_call>", "</tool_call>"
+# Narrated tool use some models emit before the real call ("[Calling tool: lookup_account]"); the
+# server's parser truncates it and the fragment would otherwise be spoken by TTS.
+PREAMBLE_START = re.compile(r"^\[\s*((calling|invoking|using|running|executing)\s+(the\s+)?(tool|function)|tool[\s_]?call|function[\s_]?call)", re.IGNORECASE)
+BRACKET_HOLD_MAX = 64
 
 
 def _held_suffix(text: str, tags: tuple[str, ...]) -> int:
@@ -37,7 +43,7 @@ class StreamTransformer:
         self._next_index = 0
         self._converted = False
         self._envelope: dict | None = None
-        self.stats = {"tool_calls": 0, "dropped_duplicate_tool_calls": 0, "stripped_think_chars": 0, "converted_raw_tool_calls": 0, "bad_raw_tool_calls": 0}
+        self.stats = {"tool_calls": 0, "dropped_duplicate_tool_calls": 0, "stripped_think_chars": 0, "converted_raw_tool_calls": 0, "bad_raw_tool_calls": 0, "stripped_preamble_chars": 0}
 
     # -- public -------------------------------------------------------------------------------------
     def feed(self, chunk: dict) -> list[dict]:
@@ -80,6 +86,11 @@ class StreamTransformer:
             pieces += self._emit_text(self._buf)
         elif self._mode == "tool":
             pieces += self._convert_raw(self._buf)
+        elif self._mode == "bracket":
+            if PREAMBLE_START.match(self._buf):
+                self.stats["stripped_preamble_chars"] += len(self._buf)
+            else:
+                pieces += self._emit_text(self._buf)
         else:
             self.stats["stripped_think_chars"] += len(self._buf)
         self._buf = ""
@@ -109,18 +120,38 @@ class StreamTransformer:
         pieces: list[dict] = []
         while True:
             if self._mode == "text":
-                p_think, p_tool = self._buf.find(THINK_OPEN), self._buf.find(TOOL_OPEN)
-                hits = [(p, t) for p, t in ((p_think, THINK_OPEN), (p_tool, TOOL_OPEN)) if p >= 0]
+                p_think, p_tool, p_br = self._buf.find(THINK_OPEN), self._buf.find(TOOL_OPEN), self._buf.find("[")
+                hits = [(p, t) for p, t in ((p_think, THINK_OPEN), (p_tool, TOOL_OPEN), (p_br, "[")) if p >= 0]
                 if hits:
                     p, tag = min(hits)
                     pieces += self._emit_text(self._buf[:p])
-                    self._buf = self._buf[p + len(tag):]
-                    self._mode = "think" if tag == THINK_OPEN else "tool"
+                    if tag == "[":
+                        self._buf = self._buf[p:]
+                        self._mode = "bracket"
+                    else:
+                        self._buf = self._buf[p + len(tag):]
+                        self._mode = "think" if tag == THINK_OPEN else "tool"
                     continue
                 k = _held_suffix(self._buf, (THINK_OPEN, TOOL_OPEN))
                 pieces += self._emit_text(self._buf[: len(self._buf) - k])
                 self._buf = self._buf[len(self._buf) - k:] if k else ""
                 return pieces
+            if self._mode == "bracket":
+                p = self._buf.find("]")
+                if p < 0:
+                    if len(self._buf) > BRACKET_HOLD_MAX and not PREAMBLE_START.match(self._buf):
+                        pieces += self._emit_text(self._buf)
+                        self._buf = ""
+                        self._mode = "text"
+                    return pieces
+                segment, self._buf = self._buf[: p + 1], self._buf[p + 1:]
+                self._mode = "text"
+                if PREAMBLE_START.match(segment):
+                    self.stats["stripped_preamble_chars"] += len(segment)
+                    self._lstrip_next = True
+                else:
+                    pieces += self._emit_text(segment)
+                continue
             if self._mode == "think":
                 p = self._buf.find(THINK_CLOSE)
                 if p >= 0:

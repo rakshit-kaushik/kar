@@ -43,7 +43,7 @@ log = logging.getLogger("r3.agent")
 SEED = json.loads((ROOT / "eval/sandbox/seed.json").read_text())
 SYSTEM_PROMPT = (ROOT / "services/agent/system_prompt.md").read_text().replace("{today}", SEED["clock_spoken"])
 GREETING = "Thanks for calling Marlow Mutual Bank. Can I get the phone number on your account?"
-STRUCTURAL = ("<tool_call>", "</tool_call>", "<think>", "</think>", '{"name"', "<|im_")
+STRUCTURAL = ("<tool_call>", "</tool_call>", "<think>", "</think>", '{"name"', "<|im_", "[Calling tool", "[calling tool")
 
 
 @dataclass
