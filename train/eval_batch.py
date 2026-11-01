@@ -121,7 +121,7 @@ def main(argv=None) -> int:
             run_id = f"{model_id}-eval{suffix}"
             runner_base = (os.environ.get("R3_EVAL_RUNNER") or "/Users/abgup/conductor/workspaces/kar/stockholm/.venv/bin/r3-eval run").split(" --repeats")[0].split(" --caller-base-url")[0]
             os.environ["R3_EVAL_RUNNER_CWD"] = os.environ.get("R3_EVAL_RUNNER_CWD") or "/Users/abgup/conductor/workspaces/kar/stockholm"
-            runner_args = f" --repeats {repeats}{caller_args}"
+            runner_args = f" --repeats {repeats} --retries 6 --backoff 5{caller_args}"
             if not os.environ.get("R3_EVAL_FORCE_STUB"):
                 os.environ["R3_EVAL_RUNNER"] = runner_base + runner_args  # one template per candidate: repeats differ
             t0 = time.time()

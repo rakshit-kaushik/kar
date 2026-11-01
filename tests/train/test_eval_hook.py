@@ -265,3 +265,14 @@ def test_table_from_an_existing_runner_output(tmp_path):
     table = table_from_scores(out, model_name="r3-voice-base")
     assert table["model"] == "r3-voice-base" and table["run_id"] == "r" and table["selection"]["task_completion"] == 50.0
     assert (out / "family_table.json").exists() and (out / "family_table.md").exists()
+
+
+def test_side_model_servers_run_with_queueing_admission(monkeypatch):
+    """vllm-mlx 0.5.0's simple engine answers 503 to a second concurrent request unless
+    VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION=wait (S's live server sets it; so must the side ports)."""
+    from train.eval_hook import server_env
+
+    monkeypatch.delenv("VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION", raising=False)
+    assert server_env()["VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION"] == "wait"
+    monkeypatch.setenv("VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION", "reject")
+    assert server_env()["VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION"] == "reject"

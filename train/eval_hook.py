@@ -81,12 +81,21 @@ def wait_for_health(base_url: str, timeout: float = 600.0, interval: float = 2.0
     return False
 
 
+def server_env() -> dict:
+    """Environment for a side model server: vllm-mlx 0.5.0's simple engine must queue concurrent
+    requests (VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION=wait, as in scripts/restart.sh) instead of
+    answering 503, or a runner at parallel 4 loses most episodes."""
+    env = dict(os.environ)
+    env.setdefault("VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION", "wait")
+    return env
+
+
 def start_server(cmd: list[str], log_path: Path) -> subprocess.Popen:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("a")
-    log.write(f"$ {' '.join(cmd)}\n")
+    log.write(f"$ VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION=wait {' '.join(cmd)}\n")
     log.flush()
-    return subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    return subprocess.Popen(cmd, cwd=REPO_ROOT, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, env=server_env())
 
 
 def stop_server(proc: subprocess.Popen, timeout: float = 20.0) -> None:
