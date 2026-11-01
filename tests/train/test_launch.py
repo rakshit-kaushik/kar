@@ -3,6 +3,7 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
 import yaml
 from mlx_lm.lora import yaml_loader
 
@@ -74,13 +75,15 @@ def test_dry_run_writes_the_plan_and_touches_nothing_else(synth_dir, base_4b, tm
     assert not (tmp_path / "art" / "models").exists()
 
 
-def test_stop_server_terminates_whatever_listens_on_the_port(tmp_path):
+def test_stop_server_terminates_whatever_listens_on_the_port(tmp_path, monkeypatch):
     import socket
     import subprocess
     import sys
     import time
 
     from train.launch import _listening_pids, start_server, stop_server
+
+    monkeypatch.delenv("R3_NEVER_KILL_PORTS", raising=False)  # this test owns the fake listener it kills
 
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -141,7 +144,8 @@ def _fake_services_root(tmp_path, monkeypatch):
     (root / "scripts").mkdir(parents=True)
     shutil.copy(REPO / "scripts" / "gpu_lock.sh", root / "scripts" / "gpu_lock.sh")
     (root / "scripts" / "gpu_flip.sh").write_text('#!/bin/bash\necho "$1" >> "$(dirname "$0")/../flips.log"\n')
-    (root / "scripts" / "restart.sh").write_text('#!/bin/bash\necho restart >> "$(dirname "$0")/../events.log"\necho up\n')
+    (root / "scripts" / "restart.sh").write_text('#!/bin/bash\necho "restart owner=${R3_OWNER:-}" >> "$(dirname "$0")/../events.log"\necho up\n')
+    (root / "scripts" / "server_stop.sh").write_text('#!/bin/bash\necho stop >> "$(dirname "$0")/../events.log"\n')
     (root / "scripts" / "probe_dispatch.py").write_text(
         "import pathlib\np = pathlib.Path(__file__).parent.parent / 'probes'\nn = int(p.read_text()) + 1 if p.exists() else 1\n"
         "p.write_text(str(n))\nprint('FAIL' if n < 2 else 'PASS')\n")
@@ -182,7 +186,7 @@ def test_rehearse_cycles_the_server_through_the_services_root_under_the_lock(tmp
                "--config", str(REPO / "train" / "configs" / "smoke.yaml"), "--data", "unused"])
     assert rc == 0
     assert (root / "flips.log").read_text().split() == ["hosted", "local"]
-    assert (root / "events.log").read_text().split() == ["restart"]
+    assert (root / "events.log").read_text().splitlines() == ["stop", "restart owner=T"]  # restart.sh needs R3_OWNER=T while T holds the lock
     run = json.loads((tmp_path / "art" / "runs" / "reh1" / "run.json").read_text())
     assert run["status"] == "rehearsed" and run["lock"]["acquired"] is True and run["lock"]["released"] is True
     assert run["probe"]["ok"] is True and run["probe"]["attempts"] == 2
@@ -195,8 +199,14 @@ def test_stop_server_prefers_the_services_root_stop_script(tmp_path, monkeypatch
     from train.launch import stop_server
 
     root = _fake_services_root(tmp_path, monkeypatch)
-    (root / "scripts" / "server_stop.sh").write_text('#!/bin/bash\necho stop >> "$(dirname "$0")/../events.log"\n')
-    (root / "scripts" / "server_stop.sh").chmod(0o755)
     monkeypatch.delenv("R3_SERVER_STOP_CMD", raising=False)
     stop_server(root=root)
     assert (root / "events.log").read_text().split() == ["stop"]
+
+
+def test_stop_server_never_kills_ports_under_the_test_guard(tmp_path, monkeypatch):
+    from train.launch import stop_server
+
+    monkeypatch.delenv("R3_SERVER_STOP_CMD", raising=False)
+    with pytest.raises(RuntimeError, match="R3_NEVER_KILL_PORTS"):
+        stop_server(port=8000, root=tmp_path)  # no stop script in root -> would fall through to a port kill

@@ -369,6 +369,8 @@ def stop_server(port: int = SERVER_PORT, timeout: float = 30.0, root: Path = REP
         print(f"[server] stop: {custom}", flush=True)
         subprocess.run(custom, shell=True, cwd=root)
         return
+    if os.environ.get("R3_NEVER_KILL_PORTS"):
+        raise RuntimeError("R3_NEVER_KILL_PORTS is set (tests): refusing to kill whatever listens on the port")
     pids = _listening_pids(port)
     if not pids:
         print(f"[server] nothing listening on :{port}", flush=True)
@@ -386,8 +388,9 @@ def stop_server(port: int = SERVER_PORT, timeout: float = 30.0, root: Path = REP
 
 def start_server(root: Path = REPO_ROOT) -> int:
     cmd = os.environ.get("R3_SERVER_START_CMD") or "bash scripts/restart.sh"
-    print(f"[server] start in {root}: {cmd}", flush=True)
-    rc = subprocess.run(cmd, shell=True, cwd=root).returncode
+    print(f"[server] start in {root}: R3_OWNER={LOCK_OWNER} {cmd}", flush=True)
+    # restart.sh refuses while the GPU lock is held by another owner name; T holds it during the cycle
+    rc = subprocess.run(cmd, shell=True, cwd=root, env={**os.environ, "R3_OWNER": LOCK_OWNER}).returncode
     if rc != 0:
         print(f"[server] WARNING: start command exited {rc} (scripts/restart.sh is session S's); start the server by hand", flush=True)
     return rc

@@ -54,3 +54,11 @@ def synth_dir(tmp_path_factory) -> Path:
 def no_db(monkeypatch):
     """Make DATABASE_URL unusable so ledger writes fall back to the JSONL file."""
     monkeypatch.setenv("DATABASE_URL", "")
+
+
+@pytest.fixture(autouse=True, scope="session")
+def never_kill_real_ports():
+    """No test may stop a real server: train.launch.stop_server refuses port kills under this guard
+    (a rehearse test with a fake restart script killed the live :8000 on 2026-11-01 01:37)."""
+    os.environ["R3_NEVER_KILL_PORTS"] = "1"
+    yield
