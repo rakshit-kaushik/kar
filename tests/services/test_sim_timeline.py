@@ -42,3 +42,17 @@ def test_summary_gives_p50_p95_over_turns_and_skips_turns_without_audio():
     assert s["turns"] == 4 and s["turns_with_audio"] == 3
     assert s["eos_to_first_audio_ms"]["p50"] == 800 and s["eos_to_first_audio_ms"]["p95"] == 1160
     assert s["eos_to_first_audio_ms"]["max"] == 1200
+
+
+def test_agent_quiet_requires_listening_state_and_no_recent_audio():
+    """The caller must not talk over the agent: 'listening' alone is not enough, the agent's audio must have stopped."""
+    tl = CallerTimeline()
+    tl.agent_state(0, "speaking")
+    tl.agent_audio(100, rms=900)
+    tl.agent_state(150, "listening")        # state flipped while audio frames are still arriving
+    tl.agent_audio(200, rms=900)
+    assert tl.agent_quiet(now_ms=400, quiet_ms=500) is False   # 200 ms since the last audible frame
+    assert tl.agent_quiet(now_ms=750, quiet_ms=500) is True    # 550 ms of silence after 'listening'
+    tl.caller_speech_end(800)
+    assert tl.agent_quiet(now_ms=2000, quiet_ms=500) is False  # awaiting a reply: not quiet, waiting
+
