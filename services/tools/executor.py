@@ -4,12 +4,13 @@ as JSON the model can speak about — never raised into the LLM loop."""
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import time
 import uuid
 from typing import Any, Awaitable, Callable
 
-from services.agent.state import WRITE_TOOLS, CallState
+from services.agent.state import INFRA_ERRORS, WRITE_TOOLS, CallState
 from services.tools.sandbox import Sandbox, err
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -33,12 +34,16 @@ def _valid_uuid(v: Any) -> bool:
 
 
 class ToolExecutor:
-    def __init__(self, sandbox: Sandbox, state: CallState, event_sink: EventSink | None = None) -> None:
+    def __init__(self, sandbox: Sandbox, state: CallState, event_sink: EventSink | None = None, retry_infra_errors: bool | None = None) -> None:
         self.sandbox = sandbox
         self.state = state
         self._sink = event_sink
         self.schemas = load_tool_schemas()
         self.turn_idx = 0
+        # one retry, same arguments and idempotency key, when a tool answers timeout/unavailable (state.INFRA_ERRORS): a transient
+        # infrastructure error is the client's to absorb, not the caller's to authorize; the model sees only the final result. Both
+        # attempts are tool_end events (attempt 1 and 2) with a tool_retry event between them. AGENT_TOOL_RETRY=0 turns it off.
+        self.retry_infra_errors = (os.environ.get("AGENT_TOOL_RETRY", "1") != "0") if retry_infra_errors is None else retry_infra_errors
 
     async def _emit(self, event: str, payload: dict[str, Any]) -> None:
         if self._sink is None:
@@ -65,14 +70,24 @@ class ToolExecutor:
             args["idempotency_key"] = str(uuid.uuid4())
 
         await self._emit("tool_start", {"name": name})
+        attempt = 1
         if result is None:
             self.state.note_tool_call(name, args)
             result = self.sandbox.call(name, args)
             self.state.apply_tool_result(name, args, result)
+            if self.retry_infra_errors and result.get("error") in INFRA_ERRORS:
+                await self._emit("tool_end", {"name": name, "ok": False, "error": result.get("error"), "ms": int((time.perf_counter() - t0) * 1000), "attempt": 1})
+                await self._emit("tool_retry", {"name": name, "error": result.get("error")})
+                attempt, t0 = 2, time.perf_counter()
+                await self._emit("tool_start", {"name": name, "attempt": 2})
+                result = self.sandbox.call(name, args)
+                self.state.apply_tool_result(name, args, result)
         ok = "error" not in result
         payload: dict[str, Any] = {"name": name, "ok": ok}
         if not ok:
             payload["error"] = result.get("error")
         payload["ms"] = int((time.perf_counter() - t0) * 1000)
+        if attempt == 2:
+            payload["attempt"] = 2
         await self._emit("tool_end", payload)
         return json.dumps(result, separators=(",", ":"))

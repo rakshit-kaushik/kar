@@ -37,7 +37,8 @@ def transfer_claimed(text: str) -> bool:
 def state_view(state: Any) -> dict[str, Any]:
     """What the guard reads: the contract's session state plus the verification-failure count, which the state schema does not
     carry (CallState.to_dict is the schema; lane S does not widen it)."""
-    return {**state.to_dict(), "verification_failures": getattr(state, "verification_failures", 0), "business_errors": getattr(state, "business_errors", 0)}
+    return {**state.to_dict(), "verification_failures": getattr(state, "verification_failures", 0),
+            "tool_failures": getattr(state, "tool_failures", 0), "business_errors": getattr(state, "business_errors", 0)}
 
 
 def handoff_reason(state: dict[str, Any]) -> str:
@@ -47,7 +48,7 @@ def handoff_reason(state: dict[str, Any]) -> str:
             return "suspected_fraud"
     if (state.get("verification_failures") or 0) > 0 and not (state.get("verified") or {}).get("customer_id"):
         return "verification_failed"
-    if (state.get("business_errors") or 0) > 0:  # a write failed earlier in the call (timeout, conflict, unavailable)
+    if (state.get("tool_failures") or 0) > 0:  # an infrastructure failure earlier in the call (timeout, unavailable: state.INFRA_ERRORS)
         return "tool_failure"
     return "out_of_scope"
 
