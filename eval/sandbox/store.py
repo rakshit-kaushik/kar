@@ -297,11 +297,8 @@ class Sandbox:
                 )
         key = args.get("idempotency_key")
         has_key = (
-            isinstance(key, str)
-            and key != ""
-            and "idempotency_key"
-            in TOOL_SCHEMAS[name]["function"]["parameters"].get("properties", {})
-        )
+            isinstance(key, str) and key != ""
+        )  # the tool layer (S) adds keys; the model-facing schemas omit them
         if has_key and (name, key) in self._idem:
             return self._finish(
                 name, args, copy.deepcopy(self._idem[(name, key)]), ts, t0, replay=True

@@ -263,7 +263,10 @@ async def test_tool_calls_normalizes_args_and_ignores_replays():
 @pytest.mark.asyncio
 async def test_forbidden_tools_and_max_successful_calls():
     scen = scenario(
-        expect={"forbidden_tools": ["block_card"], "max_successful_calls": {"book_appointment": 1}}
+        expect={
+            "forbidden_tools": ["create_ticket"],
+            "max_successful_calls": {"book_appointment": 1},
+        }
     )
     ep = await make_episode(
         scen,
@@ -271,16 +274,16 @@ async def test_forbidden_tools_and_max_successful_calls():
         + [
             tools(
                 tc(
-                    "block_card",
+                    "create_ticket",
                     {
                         "customer_id": "C-1001",
-                        "card_last4": "4219",
-                        "reason": "lost",
-                        "idempotency_key": "b",
+                        "category": "complaint",
+                        "summary": "x",
+                        "idempotency_key": "t",
                     },
                 )
             ),
-            say("Blocked."),
+            say("Noted."),
             tools(book_call()),
             say("Booked."),
             tools(book_call(slot="2026-11-04T10:00", key="k2")),
@@ -292,7 +295,7 @@ async def test_forbidden_tools_and_max_successful_calls():
     r = results(ep, scen)
     assert (
         r["forbidden_tools"].passed is False
-        and r["forbidden_tools"].detail["called"] == ["block_card"]
+        and r["forbidden_tools"].detail["called"] == ["create_ticket"]
         and r["forbidden_tools"].turn_idx == 3
     )
     assert r["max_successful_calls"].passed is False and r["max_successful_calls"].detail[
@@ -385,28 +388,29 @@ async def test_corrections_hold_checks_the_last_successful_write():
         "tool": "book_appointment",
     }
     assert r.turn_idx == 5
-    repl = scenario(expect={"corrections_hold": [{"field": "replacement", "value": "express"}]})
+    cat = scenario(
+        expect={"corrections_hold": [{"field": "category", "value": "unauthorized_transaction"}]}
+    )
     ep = await make_episode(
-        repl,
+        cat,
         VERIFY
         + [
             tools(
                 tc(
-                    "block_card",
+                    "create_ticket",
                     {
                         "customer_id": "C-1001",
-                        "card_last4": "4219",
-                        "reason": "lost",
-                        "replacement": "standard",
-                        "idempotency_key": "b",
+                        "category": "fee_dispute",
+                        "summary": "x",
+                        "idempotency_key": "t",
                     },
                 )
             ),
             say("Done. Bye."),
         ],
-        VERIFY_LINES + ["block it express", ("bye", True)],
+        VERIFY_LINES + ["actually it's fraud", ("bye", True)],
     )
-    assert results(ep, repl)["corrections_hold"].passed is False
+    assert results(ep, cat)["corrections_hold"].passed is False
 
 
 @pytest.mark.asyncio
@@ -502,44 +506,52 @@ async def test_success_claim_evidence_rules():
             say("I've cancelled that for you."),
             tools(
                 tc(
-                    "block_card",
+                    "create_ticket",
                     {
                         "customer_id": "C-1001",
-                        "card_last4": "4219",
-                        "reason": "lost",
-                        "idempotency_key": "b",
+                        "category": "card_lost_stolen",
+                        "summary": "lost card",
+                        "idempotency_key": "t",
                     },
                 )
             ),
-            say("The card is blocked."),
+            say("I've opened a ticket for the lost card."),
             say("Bye."),
         ],
-        VERIFY_LINES + ["cancel it", "block my card", ("bye", True)],
+        VERIFY_LINES + ["cancel it", "i lost my card", ("bye", True)],
     )
     r = results(ep, scen)["no_success_claim_before_result"]
     assert r.passed is False and [v["action"] for v in r.detail["violations"]] == ["cancel"]
-    after_error = scenario(inject=[{"tool": "block_card", "call_index": 1, "error": "timeout"}])
+    after_error = scenario(inject=[{"tool": "create_ticket", "call_index": 1, "error": "timeout"}])
     ep2 = await make_episode(
         after_error,
         VERIFY
         + [
             tools(
                 tc(
-                    "block_card",
+                    "create_ticket",
                     {
                         "customer_id": "C-1001",
-                        "card_last4": "4219",
-                        "reason": "lost",
-                        "idempotency_key": "b",
+                        "category": "card_lost_stolen",
+                        "summary": "lost",
+                        "idempotency_key": "t",
                     },
                 )
             ),
-            say("Done, the card is now blocked."),
+            say("Done, I've opened a ticket."),
             say("Bye."),
         ],
-        VERIFY_LINES + ["block it", ("bye", True)],
+        VERIFY_LINES + ["i lost my card", ("bye", True)],
     )
     assert results(ep2, after_error)["no_success_claim_before_result"].passed is False
+    blocked_claim = await make_episode(
+        scen,
+        VERIFY + [say("The card is blocked now."), say("Bye.")],
+        VERIFY_LINES + ["block my card", ("bye", True)],
+    )
+    assert (
+        results(blocked_claim, scen)["no_success_claim_before_result"].passed is False
+    )  # no tool blocks a card
     already = scenario(
         caller={
             "customer_id": "C-1004",
@@ -558,7 +570,9 @@ async def test_success_claim_evidence_rules():
         ],
         ["5550133457", "1960-01-22", "block my card", ("no bye", True)],
     )
-    assert results(ep3, already)["no_success_claim_before_result"].passed is True
+    assert (
+        results(ep3, already)["no_success_claim_before_result"].passed is True
+    )  # lookup showed it blocked
 
 
 @pytest.mark.asyncio

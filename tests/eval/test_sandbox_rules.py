@@ -4,7 +4,11 @@ from datetime import date, datetime
 
 import pytest
 
-from eval.sandbox import Sandbox, load_seed
+from eval.sandbox import TOOL_NAMES, Sandbox, load_seed
+
+needs_block_card = pytest.mark.skipif(
+    "block_card" not in TOOL_NAMES, reason="block_card cut from the contract"
+)
 
 DANA = {"phone": "5550142219", "date_of_birth": "1988-03-12"}
 
@@ -193,7 +197,9 @@ def test_book_bad_arguments(sb):
         "service_type": "notary",
         "slot_start": "2026-11-03T09:30",
     }
-    assert sb.call("book_appointment", args)["error"] == "invalid_argument"  # no idempotency_key
+    assert "appointment_id" in sb.call(
+        "book_appointment", args
+    )  # key optional: the tool layer adds it
 
 
 def test_idempotent_write_returns_original_without_second_write(sb):
@@ -297,11 +303,12 @@ def test_cancel_sets_status_and_second_cancel_is_not_found(sb):
         == []
     )
     assert (
-        sb.call("cancel_appointment", {"appointment_id": "A-2001"})["error"] == "invalid_argument"
-    )
+        sb.call("cancel_appointment", {"appointment_id": "A-2001"})["status"] == "cancelled"
+    )  # key optional
 
 
 # ----- block_card -------------------------------------------------------------------------------------
+@needs_block_card
 def test_block_card_rules(sb):
     r = sb.call(
         "block_card",
@@ -465,10 +472,6 @@ def test_diff_against_seed_and_dump_state(sb):
     book(sb)
     sb.call("cancel_appointment", {"appointment_id": "A-2002", "idempotency_key": "c"})
     sb.call(
-        "block_card",
-        {"customer_id": "C-1005", "card_last4": "3307", "reason": "lost", "idempotency_key": "b"},
-    )
-    sb.call(
         "create_ticket",
         {
             "customer_id": "C-1005",
@@ -490,7 +493,7 @@ def test_diff_against_seed_and_dump_state(sb):
         "appointments_changed": [
             {"appointment_id": "A-2002", "status": "cancelled", "slot_start": "2026-11-10T11:00"}
         ],
-        "cards": [{"card_last4": "3307", "status": "blocked", "replacement": "none"}],
+        "cards": [],
         "tickets": [{"customer_id": "C-1005", "category": "card_lost_stolen"}],
     }
     st = sb.dump_state()

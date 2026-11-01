@@ -1,5 +1,6 @@
 """The proxy on 8001: forwards chat completions to the model server, normalizes the SSE stream,
 emits llm_request / llm_first_token / llm_done turn events keyed by the caller's X-R3-Call-Id."""
+
 import json
 
 import httpx
@@ -19,14 +20,24 @@ def sse(obj):
 
 
 def chunk(delta=None, finish=None, usage=None):
-    c = {"id": "cmpl-1", "object": "chat.completion.chunk", "model": "r3-voice-base", "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish}]}
+    c = {
+        "id": "cmpl-1",
+        "object": "chat.completion.chunk",
+        "model": "r3-voice-base",
+        "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish}],
+    }
     if usage:
         c["usage"] = usage
     return c
 
 
 def tool(id_):
-    return {"index": 0, "id": id_, "type": "function", "function": {"name": "lookup_account", "arguments": ARGS}}
+    return {
+        "index": 0,
+        "id": id_,
+        "type": "function",
+        "function": {"name": "lookup_account", "arguments": ARGS},
+    }
 
 
 def fake_upstream(received: list):
@@ -37,21 +48,33 @@ def fake_upstream(received: list):
         async def gen():
             yield sse(chunk({"role": "assistant"}))
             yield sse(chunk({"tool_calls": [tool("call_a")]}))
-            yield sse(chunk({"tool_calls": [tool("call_b")]}, finish="tool_calls", usage={"prompt_tokens": 2023, "completion_tokens": 46, "total_tokens": 2069}))
+            yield sse(
+                chunk(
+                    {"tool_calls": [tool("call_b")]},
+                    finish="tool_calls",
+                    usage={"prompt_tokens": 2023, "completion_tokens": 46, "total_tokens": 2069},
+                )
+            )
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     async def models(_: Request):
-        return JSONResponse({"object": "list", "data": [{"id": "r3-voice-base", "object": "model"}]})
+        return JSONResponse(
+            {"object": "list", "data": [{"id": "r3-voice-base", "object": "model"}]}
+        )
 
-    return Starlette(routes=[Route("/v1/chat/completions", chat, methods=["POST"]), Route("/v1/models", models)])
+    return Starlette(
+        routes=[Route("/v1/chat/completions", chat, methods=["POST"]), Route("/v1/models", models)]
+    )
 
 
 @pytest.fixture
 def harness():
     received, events = [], []
-    upstream = httpx.AsyncClient(transport=httpx.ASGITransport(app=fake_upstream(received)), base_url="http://upstream")
+    upstream = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=fake_upstream(received)), base_url="http://upstream"
+    )
 
     async def sink(ev):
         events.append(ev)
@@ -70,7 +93,12 @@ def parse_sse(text: str):
     return out
 
 
-BODY = {"model": "r3-voice-base", "messages": [{"role": "user", "content": "hi"}], "tools": [], "stream": True}
+BODY = {
+    "model": "r3-voice-base",
+    "messages": [{"role": "user", "content": "hi"}],
+    "tools": [],
+    "stream": True,
+}
 
 
 async def test_streamed_tool_call_is_deduplicated_end_to_end(harness):
@@ -95,8 +123,14 @@ async def test_turn_events_emitted_with_tokens_and_call_id(harness):
     assert kinds == ["llm_request", "llm_first_token", "llm_done"]
     assert all(e["call_id"] == "call-7" and e["model_id"] == "r3-voice-base" for e in events)
     assert events[0]["payload"]["messages"] == 1
-    assert events[2]["payload"]["prompt_tokens"] == 2023 and events[2]["payload"]["completion_tokens"] == 46
-    assert events[2]["payload"]["tool_calls"] == 1 and events[2]["payload"]["dropped_duplicate_tool_calls"] == 1
+    assert (
+        events[2]["payload"]["prompt_tokens"] == 2023
+        and events[2]["payload"]["completion_tokens"] == 46
+    )
+    assert (
+        events[2]["payload"]["tool_calls"] == 1
+        and events[2]["payload"]["dropped_duplicate_tool_calls"] == 1
+    )
     assert events[0]["ts_ms"] <= events[1]["ts_ms"] <= events[2]["ts_ms"]
 
 

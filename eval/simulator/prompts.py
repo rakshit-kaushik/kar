@@ -1,8 +1,8 @@
 """System prompt for the agent under test, rendered from the sandbox clock.
 
-Source order (first that exists): an explicit path, `services/agent/system_prompt.md` (the file
-the human named in prompts/E.md), `schemas/system_prompt.md` (the prompt-budget branch), then
-`eval/prompts/system_prompt.md` (a byte copy kept here so eval runs in any worktree).
+Source order (first that exists): an explicit path, `schemas/system_prompt.md` (CONTRACT §0: the one
+prompt S, E and T load byte-for-byte), `services/agent/system_prompt.md` (S's earlier live prompt),
+then `eval/prompts/system_prompt.md` (a byte copy so eval runs in any worktree).
 Placeholders filled when present: {today} {weekday} {today_long} {now} {clock}. In a template
 that also uses {today_long}, {today} is the ISO date; otherwise it is seed.json["clock_spoken"].
 """
@@ -15,8 +15,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PROMPT_DIR = ROOT / "eval" / "prompts"
 PROMPT_CANDIDATES = (
-    ROOT / "services" / "agent" / "system_prompt.md",
     ROOT / "schemas" / "system_prompt.md",
+    ROOT / "services" / "agent" / "system_prompt.md",
     PROMPT_DIR / "system_prompt.md",
 )
 

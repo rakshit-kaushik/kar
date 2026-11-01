@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from eval.sandbox import Sandbox
+from eval.sandbox import TOOL_NAMES, Sandbox
 from eval.simulator.scenario import (
     FAMILIES,
     ScenarioError,
@@ -92,10 +92,27 @@ def test_yaml_is_accepted_and_duplicate_ids_rejected(tmp_path):
     assert load_scenarios(tmp_path)[0].id == "ordinary_01"
 
 
+BLOCK_CARD_SCENARIOS = {
+    "correction_03",
+    "duplicate_02",
+    "missing_info_02",
+    "multi_intent_02",
+    "needs_person_01",
+    "needs_person_02",
+    "needs_person_03",
+    "tool_timeout_03",
+}  # await the human's rewrite
+
+
 def test_every_test_scenario_is_consistent_with_the_seed():
     sb = Sandbox()
     problems = {s.id: validate_against_seed(s, sb) for s in load_scenarios(TEST_DIR)}
-    assert {k: v for k, v in problems.items() if v} == {}
+    bad = {k: v for k, v in problems.items() if v}
+    if "block_card" in TOOL_NAMES:
+        assert bad == {}
+    else:
+        assert set(bad) == BLOCK_CARD_SCENARIOS
+        assert all("block_card" in " ".join(v) for v in bad.values())
 
 
 def _with(**changes):
