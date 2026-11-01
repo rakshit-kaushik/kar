@@ -355,7 +355,18 @@ def write_db(conn, results: list[Result], *, run_id: str, model_id: str) -> dict
                 u = ep.usage.get(who, {}) or {}
                 usage[f"{who}_prompt_tokens"] += int(u.get("prompt_tokens", 0) or 0)
                 usage[f"{who}_completion_tokens"] += int(u.get("completion_tokens", 0) or 0)
-        rows = [(run_id, model_id, "episodes", len(results), "episode", True, "r3-eval run")]
+        rows = [
+            (run_id, model_id, "episodes", len(results), "episode", True, "r3-eval run"),
+            (
+                run_id,
+                model_id,
+                "episodes_passed",
+                sum(1 for _, sc in results if all_pass(sc)),
+                "episode",
+                True,
+                "episodes passing every non-advisory scorer",
+            ),
+        ]
         rows += [
             (run_id, model_id, item, qty, "token", True, "r3-eval measured usage")
             for item, qty in usage.items()

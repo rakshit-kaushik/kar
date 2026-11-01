@@ -170,7 +170,13 @@ def test_write_db_inserts_eval_results_sessions_and_ledger(rollback_conn):
         fake_result("b", "needs_person", set(), 1),
     ]
     counts = write_db(rollback_conn, results, run_id="r-db", model_id="m1")
-    assert counts == {"eval_results": 2 * len(WEIGHTS), "sessions": 2, "cost_ledger": 5}
+    assert counts == {"eval_results": 2 * len(WEIGHTS), "sessions": 2, "cost_ledger": 6}
+    ledger = dict(
+        rollback_conn.execute("select item, qty from cost_ledger where run_id='r-db'").fetchall()
+    )
+    assert (
+        ledger["episodes"] == 2 and ledger["episodes_passed"] == 1
+    )  # the no_jargon failure is non-advisory
     row = rollback_conn.execute(
         "select family, scorer, detail from eval_results where run_id='r-db' and pass=false"
     ).fetchone()
