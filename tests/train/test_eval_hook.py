@@ -254,3 +254,14 @@ def test_select_candidate_prefers_zero_unsupported_claims_then_task_completion(t
     ranked = select_candidates([table("base", 40.0, 0), table("run1", 70.0, 2), table("run2", 65.0, 0)])
     assert [r["model"] for r in ranked] == ["run2", "base", "run1"]
     assert ranked[0]["rank"] == 1 and ranked[2]["reason"].startswith("2 unsupported")
+
+
+def test_table_from_an_existing_runner_output(tmp_path):
+    from train.eval_hook import table_from_scores
+
+    out = tmp_path / "run"
+    out.mkdir()
+    (out / "scores.jsonl").write_text("\n".join(json.dumps(r) for r in E_ROWS) + "\n")
+    table = table_from_scores(out, model_name="r3-voice-base")
+    assert table["model"] == "r3-voice-base" and table["run_id"] == "r" and table["selection"]["task_completion"] == 50.0
+    assert (out / "family_table.json").exists() and (out / "family_table.md").exists()

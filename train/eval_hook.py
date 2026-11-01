@@ -414,8 +414,36 @@ def serve_side_stack(model_dir: str | Path, model_name: str, port: int, out_dir:
     return info
 
 
+def table_from_scores(run_dir: str | Path, model_name: str | None = None, run_id: str | None = None) -> dict:
+    """family_table.{json,md} for a run directory the runner already wrote (e.g. E's base baseline),
+    so it can join the candidate ranking (train/select.py, train/report.py)."""
+    run_dir = Path(run_dir)
+    rows = collect_results(run_id or "", model_name or "", run_dir, database_url=None)
+    if not rows:
+        raise FileNotFoundError(f"no scores.jsonl / eval_results.jsonl in {run_dir}")
+    rid = run_id or rows[0].get("run_id")
+    name = model_name or rows[0].get("model_id")
+    table = family_table(rows)
+    table.update(model=name, request_model=name, model_dir=None, adapter=None, run_id=rid, scenarios=None, runner="r3-eval",
+                 returncode=0, server=None, rows_source=str(run_dir), created_at=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"))
+    (run_dir / "family_table.json").write_text(json.dumps(table, indent=2, default=str) + "\n")
+    (run_dir / "family_table.md").write_text(f"# {name} ({rid})\n\n" + format_family_table(table) + "\n")
+    return table
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    if argv is None:
+        argv = sys.argv[1:]
+    if argv[:1] == ["--from-scores"]:  # family table from an existing runner output: --from-scores <run dir> [--model-name N]
+        sub = argparse.ArgumentParser()
+        sub.add_argument("--from-scores", type=Path, required=True)
+        sub.add_argument("--model-name", default=None)
+        sub.add_argument("--run-id", default=None)
+        a = sub.parse_args(argv)
+        t = table_from_scores(a.from_scores, a.model_name, a.run_id)
+        print(format_family_table(t))
+        return 0
     ap.add_argument("--model-dir", required=True, type=Path, help="versioned fused model dir ($R3_ARTIFACTS/models/<id>)")
     ap.add_argument("--model-name", default=None, help="served model id (default: the dir name)")
     ap.add_argument("--run-id", default=None)
