@@ -32,7 +32,7 @@ def path_of(model_id: str) -> str:
 
 def live_calls(con, like: str | None) -> dict[str, list[dict]]:
     """Per served model (sessions.model_id): priced usage per call that reached call_end."""
-    q = "select call_id, model_id from sessions where ended_at is not null or call_id in (select call_id from turn_events where event='call_end')"
+    q = "select call_id, model_id from sessions where (ended_at is not null or call_id in (select call_id from turn_events where event='call_end'))"
     args: tuple = ()
     if like:
         q += " and call_id like %s"; args = (like,)
