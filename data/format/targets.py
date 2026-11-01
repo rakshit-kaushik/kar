@@ -2,9 +2,10 @@
 
 A target is one assistant turn of the episode; the example is the conversation up to and
 including that turn (the prefix is masked by the trainer, the loss falls on the target). At most
-three targets per episode, chosen to cover a tool call (the handoff decision beats a write, a write
-beats the lookup), a clarification (a question or read-back; when the episode has both a handoff
-and a write, the write takes this slot instead), and the closing line. Two per-target filters, applied to
+three targets per episode, chosen to cover a tool call (the handoff decision beats a write; a write
+beats the latest read; the lookup only when nothing else was called), a clarification (a question or
+read-back; when the episode has both a handoff and a write, the write takes this slot instead), and
+the closing line. Two per-target filters, applied to
 the target alone so the episode's other targets survive: the contract's brevity rule (at most two
 sentences and 35 spoken words, CONTRACT §2 rule 4) and an optional `fits` callback (the 2,048-token
 check, see data/format/length.py). Targets are dropped, never truncated.
@@ -140,9 +141,23 @@ def select_targets(
     def _is_write(t: Target) -> bool:
         return any(n in WRITE_TOOLS for n in t.tool_names)
 
+    def _is_lookup_only(t: Target) -> bool:
+        return t.tool_names == ["lookup_account"]
+
+    # Fallback order when the write overflows the length check: the LATEST read (check_availability
+    # carries the branch, service and date the scorers check), never the lookup. lookup_account is a
+    # target only when it is the episode's sole tool call (verification-failed flows); v2 otherwise
+    # had 706 lookup targets out of 1,252 tool calls.
+    tool_cands = by_kind["tool_call"]
+    if len(tool_cands) > 1:
+        tool_cands = [t for t in tool_cands if not _is_lookup_only(t)]
     tool_order = sorted(
-        by_kind["tool_call"],
-        key=lambda t: (not _is_handoff(t), not _is_write(t), t.message_idx),
+        tool_cands,
+        key=lambda t: (
+            not _is_handoff(t),
+            not _is_write(t),
+            t.message_idx if _is_write(t) else -t.message_idx,
+        ),
     )
     lookup_idx = next(
         (t.message_idx for t in by_kind["tool_call"] if "lookup_account" in t.tool_names), -1

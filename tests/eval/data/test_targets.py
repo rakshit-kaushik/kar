@@ -172,6 +172,39 @@ async def test_handoff_without_a_write_keeps_the_clarification_slot():
     assert chosen[2].text.startswith("I couldn't verify")
 
 
+def _reject(*tool_names):
+    """A `fits` callback that drops any target whose tool call is one of `tool_names`."""
+
+    def fits(ex):
+        calls = ex["messages"][-1].get("tool_calls") or []
+        return not any(c["function"]["name"] in tool_names for c in calls)
+
+    return fits
+
+
+@pytest.mark.asyncio
+async def test_when_the_write_overflows_the_fallback_is_the_latest_read_not_the_lookup():
+    """v2 had 706 lookup_account targets out of 1,252 tool calls: the write turn overflowed 2,048
+    in half the episodes and the fallback was the earliest call. The fallback must be the latest
+    read (check_availability carries the branch, service and date arguments the scorers check)."""
+    ep = await make_episode(scenario(), HAPPY, LINES)
+    chosen, dropped = select_targets(ep, fits=_reject("book_appointment"))
+    assert chosen[0].tool_names == ["check_availability"]
+    assert [t.kind for t in chosen] == ["tool_call", "clarification", "closing"]
+    assert [t.tool_names for t in dropped] == [["book_appointment"]]
+
+
+@pytest.mark.asyncio
+async def test_lookup_is_a_target_only_when_it_is_the_episodes_only_tool_call():
+    ep = await make_episode(scenario(), HAPPY, LINES)
+    chosen, _ = select_targets(ep, fits=_reject("book_appointment", "check_availability"))
+    assert [t.kind for t in chosen] == ["clarification", "closing"]  # two targets, no lookup
+    lookup_only = VERIFY + [say("I can only help with appointments and cards. Goodbye.")]
+    ep2 = await make_episode(scenario(), lookup_only, VERIFY_LINES + [("ok bye", True)])
+    chosen2, _ = select_targets(ep2)
+    assert chosen2[0].tool_names == ["lookup_account"]
+
+
 @pytest.mark.asyncio
 async def test_extra_length_check_is_pluggable():
     ep = await make_episode(scenario(), HAPPY, LINES)
