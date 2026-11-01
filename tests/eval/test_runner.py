@@ -882,3 +882,33 @@ def test_failures_report_summarizes_tool_calls_causes(tmp_path):
     assert "**tool_calls failures by cause**" in md
     assert "| missing call | check_availability | 1 |" in md
     assert "cause: missing call check_availability" in md
+
+
+def test_caller_fault_judges_the_raw_reply_not_the_shaped_noise():
+    from eval.runner import caller_fault
+
+    # the simulator's STT shaping turned "eight zero" into "ate oh": intended noise, not the caller's fault
+    ep = _ep_for_caller_fault(
+        ["five five five zero one nine eight eight two three", "july fourth nineteen seventy five"],
+        [({"phone": "5550198823", "date_of_birth": "1975-03-04"}, False)],
+    )
+    ep["messages"][0]["content"] = "five five five zero one nine ate ate two three"
+    ep["turns"] = [
+        {"caller_text_raw": "five five five zero one nine eight eight two three"},
+        {"caller_text_raw": "july fourth nineteen seventy five"},
+    ]
+    assert caller_fault(ep) is None
+    # the caller itself got the digits wrong: fault, whatever the shaping did
+    ep["turns"][0]["caller_text_raw"] = "five five five zero one nine eight eight two"
+    assert caller_fault(ep) == "caller never stated the true phone number"
+
+
+def test_caller_fault_when_the_caller_never_gives_a_phone_number_at_all():
+    from eval.runner import caller_fault
+
+    # the greeting always asks for the phone; a caller who derails and never states it sank the call
+    ep = _ep_for_caller_fault(["i just want to check my balance", "ok bye"], [])
+    assert caller_fault(ep) == "caller never stated the true phone number"
+    # but a missing date of birth with no lookup attempted may be the agent never asking: not the caller's fault
+    ep = _ep_for_caller_fault(["five five five zero one nine eight eight two three", "hello"], [])
+    assert caller_fault(ep) is None

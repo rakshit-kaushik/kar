@@ -738,15 +738,20 @@ def caller_fault(ep: dict) -> str | None:
     if not any(c.get("tool") == "lookup_account" and c.get("ok", True) for c in expected):
         return None
     lookups = [t for t in ep.get("tool_log") or [] if t.get("tool") == "lookup_account"]
-    if not lookups or any(t.get("ok") for t in lookups):
+    if any(t.get("ok") for t in lookups):
         return None
     knows = (sc.get("caller") or {}).get("knows") or {}
+    # judge what the caller meant to say (the reply before STT shaping); the shaping is the harness's
+    # intended noise and the agent is expected to cope with it
+    raw = [t.get("caller_text_raw") for t in ep.get("turns") or [] if t.get("caller_text_raw")]
     said = " ".join(
-        m.get("content") or "" for m in ep.get("messages") or [] if m.get("role") == "user"
+        raw or [m.get("content") or "" for m in ep.get("messages") or [] if m.get("role") == "user"]
     )
     phone = re.sub(r"\D", "", str(knows.get("phone") or ""))
     if phone and phone not in _spoken_digits(said):
-        return "caller never stated the true phone number"
+        return "caller never stated the true phone number"  # the greeting always asks for it
+    if not lookups:
+        return None  # no lookup attempted: the agent may never have asked for the date of birth
     dob = knows.get("date_of_birth")
     if dob and not _dob_spoken(said, str(dob)):
         return "caller never stated the true date of birth"
