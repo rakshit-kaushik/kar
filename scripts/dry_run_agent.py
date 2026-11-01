@@ -53,32 +53,39 @@ class Data:
         self.executor = executor
 
 
-async def episode(args, idx: int, quiet: bool) -> dict:
-    state = CallState(call_id=f"dry-run-{idx}", model_id=args.model)
+async def episode(args, idx: int, quiet: bool, turns: list[str] | None = None, call_id: str | None = None) -> dict:
+    """One text episode: `turns` (default TURNS) are the caller's lines; returns counts plus a per-turn record for replays."""
+    turns = TURNS if turns is None else turns
+    call_id = call_id or f"dry-run-{idx}"
+    state = CallState(call_id=call_id, model_id=args.model)
     sandbox = Sandbox(SEED)
     executor = ToolExecutor(sandbox, state)
     api_key = os.environ.get("HOSTED_LLM_API_KEY", "local") if "anthropic" in args.base_url else "local"
-    client = AsyncOpenAI(base_url=args.base_url, api_key=api_key, default_headers={"X-R3-Call-Id": f"dry-run-{idx}"}, timeout=httpx.Timeout(60.0, connect=5.0))
+    client = AsyncOpenAI(base_url=args.base_url, api_key=api_key, default_headers={"X-R3-Call-Id": call_id}, timeout=httpx.Timeout(60.0, connect=5.0))
     llm_kwargs = {"temperature": args.temperature} if args.temperature is not None else {}  # hosted Claude rejects temperature; local default is 0.2
     session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, parallel_tool_calls=False, **llm_kwargs), userdata=Data(executor))
     await session.start(Agent(instructions=SYSTEM_PROMPT, tools=build_livekit_tools(lambda ctx: ctx.userdata.executor)))
 
-    out = {"verified": False, "booked": False, "leaks": 0, "unsupported_claims": 0, "turn_ms": [], "tool_calls": []}
+    out = {"verified": False, "booked": False, "leaks": 0, "unsupported_claims": 0, "turn_ms": [], "tool_calls": [], "turns": []}
     try:
-        for user in TURNS:
+        for user in turns:
             if not quiet:
                 print(f"\nUSER: {user}")
             t0 = time.perf_counter()
             result = await session.run(user_input=user)
             dt_ms = int((time.perf_counter() - t0) * 1000)
             out["turn_ms"].append(dt_ms)
+            rec = {"user": user, "agent": [], "tools": [], "ms": dt_ms, "flags": []}
             for ev in result.events:
                 item = ev.item
                 if isinstance(item, FunctionCall):
                     out["tool_calls"].append(item.name)
+                    rec["tools"].append({"name": item.name, "arguments": item.arguments})
                     if not quiet:
                         print(f"  -> {item.name}({item.arguments})")
                 elif isinstance(item, FunctionCallOutput):
+                    if rec["tools"]:
+                        rec["tools"][-1]["output"] = item.output[:300]
                     if not quiet:
                         print(f"  <- {item.output[:140]}")
                 elif isinstance(item, ChatMessage) and item.role == "assistant":
@@ -88,14 +95,18 @@ async def episode(args, idx: int, quiet: bool) -> dict:
                     claim = bool(SUCCESS_CLAIM.search(text))
                     unsupported = claim and not (state.verified["customer_id"] or state.completed)
                     out["unsupported_claims"] += unsupported
+                    rec["agent"].append(text)
+                    rec["flags"] += (["LEAK"] if leak else []) + (["UNSUPPORTED-CLAIM"] if unsupported else [])
                     if not quiet:
                         flags = (" LEAK" if leak else "") + (" UNSUPPORTED-CLAIM" if unsupported else "")
                         print(f"AGENT ({dt_ms} ms{flags}): {text}")
+            out["turns"].append(rec)
     finally:
         await session.aclose()
     out["verified"] = state.verified["customer_id"] is not None
     out["booked"] = bool(sandbox.diff()["appointments_new"])
     out["verification_failures"] = state.verification_failures
+    out["final_state"] = {"verified_customer": state.verified["customer_id"], "completed": list(state.completed) if isinstance(state.completed, (list, set, tuple)) else state.completed, "sandbox_diff": sandbox.diff()}
     return out
 
 
