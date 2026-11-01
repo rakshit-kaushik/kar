@@ -1,0 +1,307 @@
+"""Scored run directory -> training dataset (mlx_lm `messages` + `tools` JSONL) with provenance.
+
+Filter, do not correct: an episode failing any non-advisory scorer is dropped whole. Within a kept
+episode up to three targets are taken (data.format.targets); a target over the brevity rule or
+over 2,048 tokens is dropped alone. Splits are by scenario (hash of family + scenario id), never
+by example, so a conversation's targets stay in one split.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import random
+import subprocess
+from collections import Counter
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import Path
+
+from data.format.targets import KINDS, select_targets, to_example
+from eval.sandbox import TOOL_SCHEMAS
+from eval.scorers import ScorerResult, all_pass
+from eval.scorers.scorers import single_slot_question
+from eval.simulator.episode import Episode
+
+ROOT = Path(__file__).resolve().parents[2]
+STT_RULE_VERSION = (
+    "stt_shape-v1 (lowercase, numbers as words, fillers/homophones/drops by level 0-3)"
+)
+
+
+def split_of(scenario_id: str, family: str, valid_frac: float, seed: int) -> str:
+    h = int(hashlib.sha256(f"{seed}:{family}:{scenario_id}".encode()).hexdigest()[:8], 16)
+    return "valid" if (h % 10_000) / 10_000 < valid_frac else "train"
+
+
+def _git_sha() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    except Exception:  # noqa: BLE001 — provenance only
+        return "unknown"
+
+
+def _load_run(run_dir: Path) -> list[tuple[Episode, list[ScorerResult]]]:
+    out = []
+    for p in sorted((run_dir / "episodes").glob("*.json")):
+        d = json.loads(p.read_text())
+        ep = Episode.from_dict(d)
+        scores = [
+            ScorerResult(
+                s["scorer"],
+                s["passed"],
+                s.get("detail", {}),
+                s.get("turn_idx"),
+                s.get("advisory", False),
+            )
+            for s in d.get("scores", [])
+        ]
+        out.append((ep, scores))
+    return out
+
+
+def build_dataset(
+    run_dir: str | Path,
+    out_dir: str | Path,
+    *,
+    name: str,
+    fits: Callable[[dict], bool] | None,
+    valid_frac: float = 0.1,
+    seed: int = 0,
+    max_targets: int = 3,
+    cap_single_slot: bool = False,
+) -> dict:
+    """`cap_single_slot`: keep at most as many single-slot clarification targets ("which branch /
+    day / time / service", not read-backs or disambiguations) as there are check_availability targets,
+    chosen by a seeded subsample, so the mix stops teaching one-slot-at-a-time questioning."""
+    run_dirs = [Path(r) for r in (run_dir if isinstance(run_dir, list) else [run_dir])]
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    results = [r for d in run_dirs for r in _load_run(d)]
+    batches: dict[str, dict] = {}
+    by_kind = {
+        k: {"generated": 0, "kept": 0, "brevity": 0, "length": 0, "reask": 0, "cap": 0}
+        for k in KINDS
+        if k != "other"
+    }
+    verdicts: dict[str, dict] = {}
+    rows: dict[str, list[dict]] = {"train": [], "valid": []}
+    selected: list[tuple[str, Episode, object]] = []  # (split, episode, target) before the cap
+    n_failed = 0
+    teacher = results[0][0].model_id if results else None
+    system_text = None
+    for ep, scores in results:
+        key = f"{ep.scenario_id}-s{ep.repeat_seed}"
+        failed = [s.scorer for s in scores if not s.passed and not s.advisory]
+        verdicts[key] = {"all_pass": all_pass(scores), "failed": failed, "outcome": ep.outcome}
+        b = batches.setdefault(ep.run_id, {"generated": 0, "kept": 0})
+        b["generated"] += 1
+        if not all_pass(scores):
+            n_failed += 1
+            continue
+        b["kept"] += 1
+        if system_text is None and ep.messages and ep.messages[0].get("role") == "system":
+            system_text = ep.messages[0]["content"]
+        chosen, dropped = select_targets(ep, fits=fits, max_targets=max_targets)
+        for t in chosen:
+            by_kind[t.kind]["generated"] += 1
+            by_kind[t.kind]["kept"] += 1
+            selected.append((split_of(ep.scenario_id, ep.family, valid_frac, seed), ep, t))
+        for t in dropped:
+            by_kind[t.kind]["generated"] += 1
+            by_kind[t.kind][t.reason] += 1
+        if not chosen:
+            selected.append((None, ep, None))  # counts as a kept episode with zero targets
+    cap_info: dict = {"enabled": False}
+    if cap_single_slot:
+        n_avail = sum(
+            1 for _, _, t in selected if t is not None and "check_availability" in t.tool_names
+        )
+        single = [
+            i
+            for i, (_, _, t) in enumerate(selected)
+            if t is not None and t.kind == "clarification" and single_slot_question(t.text)
+        ]
+        keep = set(single)
+        if len(single) > n_avail:
+            keep = set(random.Random(seed).sample(sorted(single), n_avail))
+        drop = sorted(set(single) - keep)
+        for i in drop:
+            by_kind["clarification"]["kept"] -= 1
+            by_kind["clarification"]["cap"] += 1
+        selected = [x for i, x in enumerate(selected) if i not in set(drop)]
+        cap_info = {
+            "enabled": True,
+            "single_slot_before": len(single),
+            "check_availability_targets": n_avail,
+            "single_slot_kept": len(keep),
+            "dropped": len(drop),
+        }
+    tpc: Counter[int] = Counter()
+    per_episode: Counter[str] = Counter()
+    closing_eps: set[str] = set()
+    for split, ep, t in selected:
+        per_episode[ep.episode_id] += t is not None
+        if t is None:
+            continue
+        rows[split].append(to_example(ep, t))
+        if t.kind == "closing":
+            closing_eps.add(ep.episode_id)
+    for n in per_episode.values():
+        tpc[n] += 1
+    n_closing = len(closing_eps)
+    for split, items in rows.items():
+        with (out / f"{split}.jsonl").open("w") as fh:
+            for ex in items:
+                fh.write(json.dumps(ex, ensure_ascii=False) + "\n")
+    kept_eps = sum(tpc.values())
+    generated_t = sum(v["generated"] for v in by_kind.values())
+    kept_t = sum(v["kept"] for v in by_kind.values())
+    dropped = {
+        "brevity": sum(v["brevity"] for v in by_kind.values()),
+        "length": sum(v["length"] for v in by_kind.values()),
+        "reask": sum(v["reask"] for v in by_kind.values()),
+        "cap": sum(v["cap"] for v in by_kind.values()),
+    }
+    tpc_stats = {
+        "mean": round(sum(k * v for k, v in tpc.items()) / kept_eps, 2) if kept_eps else 0.0,
+        "histogram": {str(k): v for k, v in sorted(tpc.items())},
+    }
+    stats = {
+        "closing_coverage": round(n_closing / kept_eps, 3) if kept_eps else 0.0,
+        "episodes": {"generated": len(results), "kept": kept_eps, "scorer_failed": n_failed},
+        "targets": {
+            "generated": generated_t,
+            "kept": kept_t,
+            "dropped": dropped,
+            "by_kind": by_kind,
+        },
+        "targets_per_conversation": tpc_stats,
+    }
+    manifest = {
+        "name": name,
+        "files": {"train": "train.jsonl", "valid": "valid.jsonl"},
+        "sha256": {
+            f"{s}.jsonl": hashlib.sha256((out / f"{s}.jsonl").read_bytes()).hexdigest()
+            for s in rows
+        },
+        "n_examples": {s: len(items) for s, items in rows.items()},
+        "max_seq_length": 2048,
+        "targets_per_conversation": tpc_stats,
+        "closing_coverage": stats["closing_coverage"],
+        "drops": {
+            "scorer_failed_episodes": n_failed,
+            "brevity_targets": dropped["brevity"],
+            "over_2048_targets": dropped["length"],
+            "reask_targets": dropped["reask"],
+            "cap_targets": dropped["cap"],
+        },
+        "clarification_cap": cap_info,
+        "yield": stats["targets"],
+        "provenance": {
+            "generator_git_sha": _git_sha(),
+            "system_prompt_sha256": hashlib.sha256((system_text or "").encode()).hexdigest(),
+            "tools_sha256": hashlib.sha256(
+                json.dumps(list(TOOL_SCHEMAS.values()), sort_keys=True).encode()
+            ).hexdigest(),
+            "tool_names": list(TOOL_SCHEMAS),
+            "stt_rule_version": STT_RULE_VERSION,
+            "scenario_ids": sorted({ep.scenario_id for ep, _ in results}),
+            "scorer_verdicts": verdicts,
+            "run_dirs": [str(d) for d in run_dirs],
+            "batches": batches,
+            "built_at": datetime.now().isoformat(timespec="seconds"),
+            "teacher_model_id": teacher,
+            "episodes": stats["episodes"],
+            "split": {
+                "by": "scenario (sha256 of seed:family:id)",
+                "valid_frac": valid_frac,
+                "seed": seed,
+            },
+        },
+    }
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=1, ensure_ascii=False))
+    (out / "yield.md").write_text(yield_report(name, stats, manifest))
+    return stats
+
+
+def yield_report(name: str, stats: dict, manifest: dict) -> str:
+    e, t = stats["episodes"], stats["targets"]
+    lines = [
+        f"# Yield — dataset `{name}`",
+        "",
+        (
+            f"Episodes: {e['generated']} generated, {e['kept']} kept, {e['scorer_failed']} dropped by the scorers "
+            f"({round(100 * e['kept'] / e['generated']) if e['generated'] else 0}% kept)."
+        ),
+        (
+            f"Targets: {t['generated']} generated, {t['kept']} kept ({round(100 * t['kept'] / t['generated']) if t['generated'] else 0}%); "
+            f"dropped for brevity {t['dropped']['brevity']}, for length {t['dropped']['length']}, "
+            f"as a re-ask of a given slot {t['dropped'].get('reask', 0)}, by the single-slot clarification cap "
+            f"{t['dropped'].get('cap', 0)}."
+        ),
+        (
+            f"Targets per kept conversation: mean {stats['targets_per_conversation']['mean']}, "
+            f"histogram {stats['targets_per_conversation']['histogram']}."
+        ),
+        "",
+        "| kind | generated | kept | dropped: brevity | dropped: length | dropped: re-ask | dropped: cap | kept % |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for k, v in t["by_kind"].items():
+        pct = round(100 * v["kept"] / v["generated"]) if v["generated"] else 0
+        lines.append(
+            f"| {k} | {v['generated']} | {v['kept']} | {v['brevity']} | {v['length']} | {v.get('reask', 0)} | {v.get('cap', 0)} | {pct}% |"
+        )
+    lines += [
+        "",
+        f"Examples: train {manifest['n_examples']['train']}, valid {manifest['n_examples']['valid']}.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def build_parser():
+    import argparse
+
+    p = argparse.ArgumentParser(
+        description="Build a training dataset from one or more scored run directories."
+    )
+    p.add_argument(
+        "--runs", nargs="+", required=True, help="run directories (each with episodes/*.json)"
+    )
+    p.add_argument("--out", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--valid-frac", type=float, default=0.1)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-length-check", action="store_true")
+    p.add_argument(
+        "--cap-single-slot-clarifications",
+        action="store_true",
+        help="keep at most as many single-slot clarification targets as check_availability targets (seeded subsample)",
+    )
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = build_parser().parse_args(argv)
+    fits = None
+    if not a.no_length_check:
+        from data.format.length import LengthChecker
+
+        fits = LengthChecker().fits
+    stats = build_dataset(
+        a.runs,
+        a.out,
+        name=a.name,
+        fits=fits,
+        valid_frac=a.valid_frac,
+        seed=a.seed,
+        cap_single_slot=a.cap_single_slot_clarifications,
+    )
+    print((Path(a.out) / "yield.md").read_text())
+    print(json.dumps(stats["episodes"]))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
