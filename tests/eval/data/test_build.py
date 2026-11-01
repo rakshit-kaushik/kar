@@ -212,3 +212,15 @@ async def test_build_reports_closing_coverage_and_accepts_several_run_dirs(tmp_p
     }
     stats2 = build_dataset(r1, tmp_path / "ds2", name="one", fits=None, valid_frac=0.0, seed=0)
     assert stats2["closing_coverage"] == 1.0
+
+
+def test_build_cli_parser():
+    from data.format.build import build_parser
+
+    a = build_parser().parse_args(
+        ["--runs", "/r1", "/r2", "--out", "/ds", "--name", "v1", "--no-length-check"]
+    )
+    assert (
+        a.runs == ["/r1", "/r2"] and a.out == "/ds" and a.name == "v1" and a.no_length_check is True
+    )
+    assert a.valid_frac == 0.1 and a.seed == 0

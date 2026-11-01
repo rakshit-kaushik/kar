@@ -80,3 +80,19 @@ def test_short_profile_yields_short_call_scenarios_only():
         assert s["expect"]["max_turns"] <= 12
     sb = Sandbox()
     assert all(not validate_against_seed(parse_scenario(d, d["id"]), sb) for d in out)
+
+
+def test_phrasing_bank_is_clean_and_seeds_personas():
+    from data.gen.banks import load_bank
+
+    bank = load_bank()
+    assert len(bank) >= 200
+    for u in bank:
+        assert 3 <= len(u.split()) <= 18 and "\n" not in u
+        assert not __import__("re").search(r"\d{7,}", u)  # no phone-like numbers from the corpora
+    assert len(set(bank)) == len(bank)
+    out = generate(10, seed=4)
+    assert all("Phrasing seeds:" in s["caller"]["persona"] for s in out)
+    assert all(len(s["caller"]["persona"]) < 400 for s in out)
+    plain = generate(5, seed=4, phrasing=False)
+    assert all("Phrasing seeds:" not in s["caller"]["persona"] for s in plain)

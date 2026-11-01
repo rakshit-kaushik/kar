@@ -116,9 +116,17 @@ def test_signatures(test_dir: str | Path = TEST_DIR) -> set[tuple]:
 
 
 class _Gen:
-    def __init__(self, seed: int, sb: Sandbox, sigs: set[tuple], short: bool = False):
+    def __init__(
+        self,
+        seed: int,
+        sb: Sandbox,
+        sigs: set[tuple],
+        short: bool = False,
+        phrasing: list[str] | None = None,
+    ):
         self.rng = random.Random(seed)
         self.short = short
+        self.phrasing = phrasing or []
         self.sb = sb
         self.sigs = set(sigs)
         self.used: set[tuple] = set()
@@ -159,10 +167,14 @@ class _Gen:
             ]
         if extra:
             knows.update(extra)
+        persona = self.rng.choice(PERSONAS)
+        if self.phrasing:
+            a, b = self.rng.sample(self.phrasing, 2)
+            persona += f". Phrasing seeds: '{a}' / '{b}'"
         c = {
             "customer_id": cust.customer_id,
             "name": f"{cust.first_name} {cust.last_name}",
-            "persona": self.rng.choice(PERSONAS),
+            "persona": persona,
             "knows": knows,
             "noise": noise,
         }
@@ -777,10 +789,19 @@ def generate(
     mix: dict[str, float] | None = None,
     test_dir: str | Path = TEST_DIR,
     profile: str = "default",
+    phrasing: bool = True,
 ) -> list[dict]:
     """n schema-valid generation scenarios; `mix` = family weights (default: equal), met by quota."""
     sb = Sandbox()
-    gen = _Gen(seed, sb, test_signatures(test_dir), short=profile == "short")
+    from data.gen.banks import load_bank
+
+    gen = _Gen(
+        seed,
+        sb,
+        test_signatures(test_dir),
+        short=profile == "short",
+        phrasing=load_bank() if phrasing else None,
+    )
     if profile == "short" and mix is None:
         mix = {"ordinary": 5, "needs_person": 3, "duplicate": 1}
     weights = mix or dict.fromkeys(FAMILIES, 1)

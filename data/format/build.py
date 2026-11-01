@@ -206,3 +206,39 @@ def yield_report(name: str, stats: dict, manifest: dict) -> str:
         f"Examples: train {manifest['n_examples']['train']}, valid {manifest['n_examples']['valid']}.",
     ]
     return "\n".join(lines) + "\n"
+
+
+def build_parser():
+    import argparse
+
+    p = argparse.ArgumentParser(
+        description="Build a training dataset from one or more scored run directories."
+    )
+    p.add_argument(
+        "--runs", nargs="+", required=True, help="run directories (each with episodes/*.json)"
+    )
+    p.add_argument("--out", required=True)
+    p.add_argument("--name", required=True)
+    p.add_argument("--valid-frac", type=float, default=0.1)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--no-length-check", action="store_true")
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = build_parser().parse_args(argv)
+    fits = None
+    if not a.no_length_check:
+        from data.format.length import LengthChecker
+
+        fits = LengthChecker().fits
+    stats = build_dataset(
+        a.runs, a.out, name=a.name, fits=fits, valid_frac=a.valid_frac, seed=a.seed
+    )
+    print((Path(a.out) / "yield.md").read_text())
+    print(json.dumps(stats["episodes"]))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
