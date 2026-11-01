@@ -83,8 +83,12 @@ agent side, not the model: LiveKit's preemptive generation runs the LLM node on 
 one; the loop guard counted the discarded first generation as the previous reply, so every regenerated turn looked like an exact
 repeat ("Sorry, I may have missed that" in place of the model's first question); with the split phone number that reached 3
 repeats and a false loop-guard handoff at the first caller turn of the handoff call. The 07:11 block's false re-asks were the same
-bug, not only the split number. Fix 695d64f: the guard snapshots (prev, repeats) per caller turn, keyed by the user-message count
-in the chat context; a second generation for the same turn compares against the turn's start. The two 08:02 scenario failures
+bug, not only the split number. Fix 695d64f, then 08:30 after the verification call showed the second variant (a reply cancelled
+because the caller talked on, "Five five five zero one four" / "two two one nine", never spoken yet counted as the previous line):
+before each generation the guard reads the last assistant message in the chat context, which is what the caller actually heard;
+if it is not what the guard yielded last time, or was interrupted, the previous generation never reached the caller, and the new
+line is compared against what was heard with the repeat count reset. A spoken repeat still escalates: rephrase, rephrase, handoff
+(the rephrase entering the chat context counts as heard). The two 08:02 scenario failures
 count as the guard bug in every table (the timeout call never reached check_availability; the handoff call never reached lookup).
 
 The interruption call of the same block had one model-side unsupported success claim: "I booked your mortgage consultation" after

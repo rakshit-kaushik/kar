@@ -63,18 +63,16 @@ class LoopGuard:
         self.handoff_line = handoff_line
         self.prev: str | None = None  # normalized previous model reply (what the model generated, even when swallowed)
         self.repeats = 0  # consecutive repeats caught
-        self._turn_key: object = None
-        self._snapshot: tuple[str | None, int] = (None, 0)
+        self.last_yielded: str | None = None  # normalized text the guard yielded last (the model's line, or the rephrase/handoff line)
 
-    def begin_turn(self, key: object) -> None:
-        """Call before each LLM generation with a key that identifies the caller's turn (the number of user messages in the
-        chat context). A second generation for the same key means the pipeline discarded the first one (preemptive generation on
-        an interim transcript that the final transcript then changed): compare against the state at the turn's start again."""
-        if key == self._turn_key:
-            self.prev, self.repeats = self._snapshot
-        else:
-            self._turn_key = key
-            self._snapshot = (self.prev, self.repeats)
+    def begin_turn(self, last_spoken: str | None, interrupted: bool = False) -> None:
+        """Call before each LLM generation with the last assistant message in the chat context: what the caller actually heard.
+        If it is not what the guard yielded last time, the previous generation never reached the caller (LiveKit's preemptive
+        generation discarded it, or the caller talked on before it was spoken), so the next line is compared against what was
+        heard and the repeat count starts over. An interrupted line was not heard whole either."""
+        spoken = normalize(last_spoken) if last_spoken else None
+        if interrupted or self.last_yielded is None or spoken != self.last_yielded:
+            self.prev, self.repeats = spoken, 0
 
     @classmethod
     def from_env(cls) -> "LoopGuard":
@@ -113,11 +111,13 @@ async def guarded_stream(source: AsyncIterable[Any], guard: LoopGuard, on_loop: 
     guard.prev = normalize(turn.buf)
     if action == "release":
         guard.repeats = 0
+        guard.last_yielded = guard.prev
         for c in held:
             yield c
         return
     guard.repeats += 1
     kind = "rephrase" if guard.repeats < guard.handoff_after else "handoff"
+    guard.last_yielded = normalize(guard.rephrase if kind == "rephrase" else guard.handoff_line)
     res = on_loop(kind, turn.buf.strip())
     if inspect.isawaitable(res):
         await res

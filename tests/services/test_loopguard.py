@@ -127,28 +127,21 @@ async def test_handoff_threshold_comes_from_the_environment(monkeypatch):
     assert await collect(guarded_stream(agen(line), guard, on_loop)) == [HANDOFF_LINE] and calls == ["rephrase", "handoff"]
 
 
-async def test_a_regeneration_for_the_same_user_turn_is_not_a_repeat():
-    """Preemptive generation (LiveKit): the LLM node runs on the interim transcript and again on the final one when they differ;
-    the first generation is discarded and never spoken, so it must not count as the previous reply (Nov 1 08:03: every call
-    got "Sorry, I may have missed that" in place of its first question, one escalated to a false handoff)."""
+async def test_a_generation_the_caller_never_heard_is_not_the_previous_line():
+    """LiveKit's preemptive generation runs the LLM node on the interim transcript and again on the final one, and a reply is
+    cancelled when the caller talks on before it is spoken. Neither enters the chat context, so the next generation compares
+    against the last assistant line the caller actually heard, not the discarded one (Nov 1 08:03 and 08:24: "Sorry, I may have
+    missed that" in place of the first question, one false handoff)."""
     guard = LoopGuard()
     line = [Chunk("Thanks. What's your date of birth?")]
-    guard.begin_turn(1)
-    assert await collect(guarded_stream(agen(line), guard, no_loop)) == line  # preemptive generation on the interim transcript
-    guard.begin_turn(1)
-    assert await collect(guarded_stream(agen(line), guard, no_loop)) == line  # final transcript: same turn, same line, not a repeat
+    guard.begin_turn(last_spoken="Can I get the phone number on your account?")
+    assert await collect(guarded_stream(agen(line), guard, no_loop)) == line  # generated, then discarded by the pipeline
+    guard.begin_turn(last_spoken="Can I get the phone number on your account?")  # the greeting is still the last line heard
+    assert await collect(guarded_stream(agen(line), guard, no_loop)) == line  # not a repeat
     assert guard.repeats == 0
-    calls = []
-
-    async def on_loop(action, repeated):
-        calls.append(action)
-
-    guard.begin_turn(2)
-    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE]  # a new user turn with the same line is a repeat
-    assert calls == ["rephrase"]
 
 
-async def test_a_regeneration_restores_the_repeat_count_of_the_turn_start():
+async def test_a_spoken_line_repeated_is_caught_and_escalates_through_the_rephrase():
     guard = LoopGuard()
     line = [Chunk("Which day would you like?")]
     calls = []
@@ -156,10 +149,22 @@ async def test_a_regeneration_restores_the_repeat_count_of_the_turn_start():
     async def on_loop(action, repeated):
         calls.append(action)
 
-    guard.begin_turn(1)
+    guard.begin_turn(last_spoken="You're verified. How can I help?")
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == line
+    guard.begin_turn(last_spoken="Which day would you like?")  # spoken as yielded: the generation counts
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE] and guard.repeats == 1
+    guard.begin_turn(last_spoken=REPHRASE)  # the rephrase was spoken: the count stands
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE] and guard.repeats == 2
+    guard.begin_turn(last_spoken=REPHRASE)
+    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [HANDOFF_LINE] and guard.repeats == 3
+    assert calls == ["rephrase", "rephrase", "handoff"]
+
+
+async def test_an_interrupted_line_does_not_count_as_heard():
+    guard = LoopGuard()
+    line = [Chunk("Thanks. What's your date of birth?")]
+    guard.begin_turn(last_spoken="Can I get the phone number on your account?")
     await collect(guarded_stream(agen(line), guard, no_loop))
-    guard.begin_turn(2)
-    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE] and guard.repeats == 1
-    guard.begin_turn(2)  # regenerated for the same turn: counts from the turn start again, not a second repeat
-    assert await collect(guarded_stream(agen(line), guard, on_loop)) == [REPHRASE] and guard.repeats == 1
-    assert calls == ["rephrase", "rephrase"]  # never "handoff": the regeneration did not advance the count
+    guard.begin_turn(last_spoken="Thanks.", interrupted=True)  # the caller talked on after the first word
+    assert await collect(guarded_stream(agen(line), guard, no_loop)) == line
+    assert guard.repeats == 0
