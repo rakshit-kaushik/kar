@@ -1,5 +1,7 @@
 # R3 — 24-hour build plan (condensed)
 
+> **Note (Nov 1, 2026):** this plan predates the contract. The workflow became branch appointment booking for a fictional retail bank (Marlow Mutual), and the machine has 36 GB, not 64. `CONTRACT.md` is authoritative; results are in `results/`.
+
 Living version with checklists, the GPU schedule drawing, targets and risks: https://claude.ai/artifact/X8x6CZrHjiQ9DZvUD9xSKz
 
 ## What R3 is

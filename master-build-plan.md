@@ -2,6 +2,8 @@
 
 Oct 31, 2026 · @Ab Gup
 
+> **Note (Nov 1, 2026):** this plan predates the contract. The workflow became branch appointment booking for a fictional retail bank (Marlow Mutual), and the machine has 36 GB, not 64. `CONTRACT.md` is authoritative; results are in `results/`.
+
 ## Scope and decisions locked
 
 R3 is one person, one Mac and three or four coding-agent sessions building, in 24 hours, a voice agent for one field-service workflow and a ticket router, both as LoRA adapters on Qwen3-4B, trained and served with MLX. The demo compares base, adapted and hosted models on task completion, per-stage latency and cost per successful task. The budget that matters is not tokens but two things that don't parallelize: your judgment (the contract, the test scenarios, the data spot-check, the failure labels) and the Mac GPU (it trains or it serves, never both).

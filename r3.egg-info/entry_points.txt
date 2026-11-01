@@ -1,2 +1,0 @@
-[console_scripts]
-r3-eval = eval.runner:main
