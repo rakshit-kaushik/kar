@@ -75,7 +75,7 @@ async def test_build_filters_failed_episodes_and_writes_dataset(tmp_path):
         stats["targets"]["by_kind"]["tool_call"]["kept"] == 4
         and stats["targets"]["by_kind"]["closing"]["kept"] == 4
     )
-    assert stats["targets"]["dropped"] == {"brevity": 0, "length": 0, "reask": 0}
+    assert stats["targets"]["dropped"] == {"brevity": 0, "length": 0, "reask": 0, "cap": 0}
     assert stats["targets_per_conversation"] == {"mean": 3.0, "histogram": {"3": 4}}
     train = [json.loads(line) for line in (out / "train.jsonl").read_text().splitlines()]
     valid = [json.loads(line) for line in (out / "valid.jsonl").read_text().splitlines()]
@@ -111,6 +111,7 @@ async def test_build_filters_failed_episodes_and_writes_dataset(tmp_path):
         "brevity_targets": 0,
         "over_2048_targets": 0,
         "reask_targets": 0,
+        "cap_targets": 0,
     }
     report = (out / "yield.md").read_text()
     assert "tool_call" in report and "kept" in report and "smoke" in report
@@ -154,6 +155,7 @@ async def test_length_filter_is_applied_per_target_and_counted(tmp_path):
         "brevity": 0,
         "length": 1,
         "reask": 0,
+        "cap": 0,
     }
 
 
@@ -226,3 +228,86 @@ def test_build_cli_parser():
         a.runs == ["/r1", "/r2"] and a.out == "/ds" and a.name == "v1" and a.no_length_check is True
     )
     assert a.valid_frac == 0.1 and a.seed == 0
+
+
+@pytest.mark.asyncio
+async def test_cap_single_slot_clarifications_at_the_check_availability_count(tmp_path):
+    from helpers import DANA_LOOKUP
+
+    expect = {
+        "tool_calls": [
+            {"tool": "lookup_account", "args": DANA_LOOKUP, "ok": True},
+            {
+                "tool": "book_appointment",
+                "args": {k: v for k, v in BOOK.items() if k != "idempotency_key"},
+                "ok": True,
+            },
+        ]
+    }
+    scens = [
+        scenario(id="gen_ordinary_aa_00", expect=expect),
+        scenario(id="gen_ordinary_aa_01", caller={"persona": "Terse"}, expect=expect),
+    ]
+    script = VERIFY + [
+        say(
+            "Which branch would you like?"
+        ),  # a single-slot clarification; no check_availability call at all
+        tools(tc("book_appointment", BOOK)),
+        say("Booked. Anything else?"),
+        say("Thanks Dana, goodbye."),
+    ]
+    lines = VERIFY_LINES + [
+        "a mortgage consultation tuesday at nine thirty",
+        "market street",
+        "yes",
+        ("no that's it", True),
+    ]
+    run_dir = tmp_path / "run"
+    await run_scenarios(
+        scens,
+        lambda: ScriptedAgent(script),
+        lambda scen, seed: ScriptedCaller(lines),
+        out_dir=run_dir,
+        run_id="g1",
+        model_id="teacher",
+        parallel=2,
+        repeats=1,
+    )
+    plain = build_dataset(
+        run_dir, tmp_path / "plain", name="plain", fits=None, valid_frac=0.0, seed=0
+    )
+    assert (
+        plain["targets"]["by_kind"]["clarification"]["kept"] == 2
+        and plain["targets"]["dropped"]["cap"] == 0
+    )
+    capped = build_dataset(
+        run_dir,
+        tmp_path / "capped",
+        name="capped",
+        fits=None,
+        valid_frac=0.0,
+        seed=0,
+        cap_single_slot=True,
+    )
+    # zero check_availability targets -> every single-slot clarification goes; closings and tool calls stay
+    assert (
+        capped["targets"]["by_kind"]["clarification"]["kept"] == 0
+        and capped["targets"]["by_kind"]["clarification"]["cap"] == 2
+    )
+    assert (
+        capped["targets"]["by_kind"]["closing"]["kept"] == 2
+        and capped["targets"]["by_kind"]["tool_call"]["kept"] == 2
+    )
+    manifest = json.loads((tmp_path / "capped" / "manifest.json").read_text())
+    assert manifest["clarification_cap"] == {
+        "enabled": True,
+        "single_slot_before": 2,
+        "check_availability_targets": 0,
+        "single_slot_kept": 0,
+        "dropped": 2,
+    }
+    assert manifest["drops"]["cap_targets"] == 2 and manifest["n_examples"]["train"] == 4
+    assert (
+        "re-ask" in (tmp_path / "capped" / "yield.md").read_text()
+        and "cap" in (tmp_path / "capped" / "yield.md").read_text()
+    )

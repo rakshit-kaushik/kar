@@ -804,6 +804,15 @@ def reask_slots(truth: dict[str, str], caller_texts: list[str], question: str) -
     return out
 
 
+def single_slot_question(text: str) -> str | None:
+    """The one booking slot (branch / date / time / service) a question asks for, or None when it asks
+    for none, for several, or offers two or more candidates (a disambiguation)."""
+    hits = [slot for slot, rx in _SLOT_QUESTIONS.items() if rx.search(text or "")]
+    if len(hits) != 1 or _is_disambiguation(hits[0], text, ""):
+        return None
+    return hits[0]
+
+
 def reasked_given_slot(ep: Episode, sc: Scenario) -> ScorerResult:
     """Advisory: the agent asked for a booking detail (branch, day, time, service) that the caller had
     already stated in an earlier or the same turn. Over-asking otherwise only shows up as max_turns or a

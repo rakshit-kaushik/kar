@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import subprocess
 from collections import Counter
 from collections.abc import Callable
@@ -19,6 +20,7 @@ from pathlib import Path
 from data.format.targets import KINDS, select_targets, to_example
 from eval.sandbox import TOOL_SCHEMAS
 from eval.scorers import ScorerResult, all_pass
+from eval.scorers.scorers import single_slot_question
 from eval.simulator.episode import Episode
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -67,21 +69,25 @@ def build_dataset(
     valid_frac: float = 0.1,
     seed: int = 0,
     max_targets: int = 3,
+    cap_single_slot: bool = False,
 ) -> dict:
+    """`cap_single_slot`: keep at most as many single-slot clarification targets ("which branch /
+    day / time / service", not read-backs or disambiguations) as there are check_availability targets,
+    chosen by a seeded subsample, so the mix stops teaching one-slot-at-a-time questioning."""
     run_dirs = [Path(r) for r in (run_dir if isinstance(run_dir, list) else [run_dir])]
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     results = [r for d in run_dirs for r in _load_run(d)]
     batches: dict[str, dict] = {}
     by_kind = {
-        k: {"generated": 0, "kept": 0, "brevity": 0, "length": 0, "reask": 0}
+        k: {"generated": 0, "kept": 0, "brevity": 0, "length": 0, "reask": 0, "cap": 0}
         for k in KINDS
         if k != "other"
     }
     verdicts: dict[str, dict] = {}
     rows: dict[str, list[dict]] = {"train": [], "valid": []}
-    tpc: Counter[int] = Counter()
-    n_failed = n_closing = 0
+    selected: list[tuple[str, Episode, object]] = []  # (split, episode, target) before the cap
+    n_failed = 0
     teacher = results[0][0].model_id if results else None
     system_text = None
     for ep, scores in results:
@@ -100,13 +106,50 @@ def build_dataset(
         for t in chosen:
             by_kind[t.kind]["generated"] += 1
             by_kind[t.kind]["kept"] += 1
-            rows[split_of(ep.scenario_id, ep.family, valid_frac, seed)].append(to_example(ep, t))
+            selected.append((split_of(ep.scenario_id, ep.family, valid_frac, seed), ep, t))
         for t in dropped:
             by_kind[t.kind]["generated"] += 1
             by_kind[t.kind][t.reason] += 1
-        tpc[len(chosen)] += 1
-        if any(t.kind == "closing" for t in chosen):
-            n_closing += 1
+        if not chosen:
+            selected.append((None, ep, None))  # counts as a kept episode with zero targets
+    cap_info: dict = {"enabled": False}
+    if cap_single_slot:
+        n_avail = sum(
+            1 for _, _, t in selected if t is not None and "check_availability" in t.tool_names
+        )
+        single = [
+            i
+            for i, (_, _, t) in enumerate(selected)
+            if t is not None and t.kind == "clarification" and single_slot_question(t.text)
+        ]
+        keep = set(single)
+        if len(single) > n_avail:
+            keep = set(random.Random(seed).sample(sorted(single), n_avail))
+        drop = sorted(set(single) - keep)
+        for i in drop:
+            by_kind["clarification"]["kept"] -= 1
+            by_kind["clarification"]["cap"] += 1
+        selected = [x for i, x in enumerate(selected) if i not in set(drop)]
+        cap_info = {
+            "enabled": True,
+            "single_slot_before": len(single),
+            "check_availability_targets": n_avail,
+            "single_slot_kept": len(keep),
+            "dropped": len(drop),
+        }
+    tpc: Counter[int] = Counter()
+    per_episode: Counter[str] = Counter()
+    closing_eps: set[str] = set()
+    for split, ep, t in selected:
+        per_episode[ep.episode_id] += t is not None
+        if t is None:
+            continue
+        rows[split].append(to_example(ep, t))
+        if t.kind == "closing":
+            closing_eps.add(ep.episode_id)
+    for n in per_episode.values():
+        tpc[n] += 1
+    n_closing = len(closing_eps)
     for split, items in rows.items():
         with (out / f"{split}.jsonl").open("w") as fh:
             for ex in items:
@@ -118,6 +161,7 @@ def build_dataset(
         "brevity": sum(v["brevity"] for v in by_kind.values()),
         "length": sum(v["length"] for v in by_kind.values()),
         "reask": sum(v["reask"] for v in by_kind.values()),
+        "cap": sum(v["cap"] for v in by_kind.values()),
     }
     tpc_stats = {
         "mean": round(sum(k * v for k, v in tpc.items()) / kept_eps, 2) if kept_eps else 0.0,
@@ -150,7 +194,9 @@ def build_dataset(
             "brevity_targets": dropped["brevity"],
             "over_2048_targets": dropped["length"],
             "reask_targets": dropped["reask"],
+            "cap_targets": dropped["cap"],
         },
+        "clarification_cap": cap_info,
         "yield": stats["targets"],
         "provenance": {
             "generator_git_sha": _git_sha(),
@@ -191,20 +237,21 @@ def yield_report(name: str, stats: dict, manifest: dict) -> str:
         (
             f"Targets: {t['generated']} generated, {t['kept']} kept ({round(100 * t['kept'] / t['generated']) if t['generated'] else 0}%); "
             f"dropped for brevity {t['dropped']['brevity']}, for length {t['dropped']['length']}, "
-            f"as a re-ask of a given slot {t['dropped'].get('reask', 0)}."
+            f"as a re-ask of a given slot {t['dropped'].get('reask', 0)}, by the single-slot clarification cap "
+            f"{t['dropped'].get('cap', 0)}."
         ),
         (
             f"Targets per kept conversation: mean {stats['targets_per_conversation']['mean']}, "
             f"histogram {stats['targets_per_conversation']['histogram']}."
         ),
         "",
-        "| kind | generated | kept | dropped: brevity | dropped: length | dropped: re-ask | kept % |",
-        "|---|---|---|---|---|---|---|",
+        "| kind | generated | kept | dropped: brevity | dropped: length | dropped: re-ask | dropped: cap | kept % |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for k, v in t["by_kind"].items():
         pct = round(100 * v["kept"] / v["generated"]) if v["generated"] else 0
         lines.append(
-            f"| {k} | {v['generated']} | {v['kept']} | {v['brevity']} | {v['length']} | {v.get('reask', 0)} | {pct}% |"
+            f"| {k} | {v['generated']} | {v['kept']} | {v['brevity']} | {v['length']} | {v.get('reask', 0)} | {v.get('cap', 0)} | {pct}% |"
         )
     lines += [
         "",
@@ -227,6 +274,11 @@ def build_parser():
     p.add_argument("--valid-frac", type=float, default=0.1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--no-length-check", action="store_true")
+    p.add_argument(
+        "--cap-single-slot-clarifications",
+        action="store_true",
+        help="keep at most as many single-slot clarification targets as check_availability targets (seeded subsample)",
+    )
     return p
 
 
@@ -238,7 +290,13 @@ def main(argv: list[str] | None = None) -> int:
 
         fits = LengthChecker().fits
     stats = build_dataset(
-        a.runs, a.out, name=a.name, fits=fits, valid_frac=a.valid_frac, seed=a.seed
+        a.runs,
+        a.out,
+        name=a.name,
+        fits=fits,
+        valid_frac=a.valid_frac,
+        seed=a.seed,
+        cap_single_slot=a.cap_single_slot_clarifications,
     )
     print((Path(a.out) / "yield.md").read_text())
     print(json.dumps(stats["episodes"]))

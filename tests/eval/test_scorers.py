@@ -918,3 +918,20 @@ async def test_reasked_given_slot_resets_after_a_completed_write():
     )
     r = results(ep, scen)["reasked_given_slot"]
     assert r.passed is True, r.detail
+
+
+def test_single_slot_question_names_the_one_slot_asked_for():
+    from eval.scorers.scorers import single_slot_question
+
+    assert single_slot_question("Which branch would you like?") == "branch"
+    assert single_slot_question("What time works for you on Tuesday?") == "time"
+    assert single_slot_question("Which day and what time would you like?") is None  # two slots
+    assert (
+        single_slot_question("Which branch: Market Street or Marker Street?") is None
+    )  # disambiguation
+    assert (
+        single_slot_question(
+            "To confirm: Tuesday at nine thirty at Market Street. Shall I book it?"
+        )
+        is None
+    )
