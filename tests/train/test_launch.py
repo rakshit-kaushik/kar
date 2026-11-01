@@ -224,3 +224,14 @@ def test_tail_metrics_skips_a_partially_written_last_line_and_does_not_repeat(tm
     assert seen == 2 and [r["iteration"] for r in printed] == [10]
     seen, printed = tail_metrics(p, seen)
     assert seen == 2 and printed == []
+
+
+def test_rehearse_can_deploy_a_model_dir_through_restart_sh(tmp_path, monkeypatch):
+    root = _fake_services_root(tmp_path, monkeypatch)
+    (root / "scripts" / "restart.sh").write_text('#!/bin/bash\necho "restart owner=${R3_OWNER:-} model=${MODEL_DIR:-base}" >> "$(dirname "$0")/../events.log"\n')
+    rc = main(["--rehearse", "--services-root", str(root), "--artifacts", str(tmp_path / "art"), "--run-id", "dep1",
+               "--serve-model-dir", "/models/r3-voice-abc", "--config", str(REPO / "train" / "configs" / "smoke.yaml"), "--data", "-"])
+    assert rc == 0
+    assert (root / "events.log").read_text().splitlines()[-1] == "restart owner=T model=/models/r3-voice-abc"
+    run = json.loads((tmp_path / "art" / "runs" / "dep1" / "run.json").read_text())
+    assert run["served_model_dir"] == "/models/r3-voice-abc"

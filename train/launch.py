@@ -386,11 +386,15 @@ def stop_server(port: int = SERVER_PORT, timeout: float = 30.0, root: Path = REP
         os.kill(pid, signal.SIGKILL)
 
 
-def start_server(root: Path = REPO_ROOT) -> int:
+def start_server(root: Path = REPO_ROOT, model_dir: str | None = None) -> int:
+    """restart.sh (or $R3_SERVER_START_CMD) with R3_OWNER=T (it refuses while another owner holds the
+    lock) and, for a deploy, MODEL_DIR=<versioned model dir> (restart.sh serves it as LOCAL_LLM_MODEL)."""
     cmd = os.environ.get("R3_SERVER_START_CMD") or "bash scripts/restart.sh"
-    print(f"[server] start in {root}: R3_OWNER={LOCK_OWNER} {cmd}", flush=True)
-    # restart.sh refuses while the GPU lock is held by another owner name; T holds it during the cycle
-    rc = subprocess.run(cmd, shell=True, cwd=root, env={**os.environ, "R3_OWNER": LOCK_OWNER}).returncode
+    env = {**os.environ, "R3_OWNER": LOCK_OWNER}
+    if model_dir:
+        env["MODEL_DIR"] = str(model_dir)
+    print(f"[server] start in {root}: R3_OWNER={LOCK_OWNER}{' MODEL_DIR=' + str(model_dir) if model_dir else ''} {cmd}", flush=True)
+    rc = subprocess.run(cmd, shell=True, cwd=root, env=env).returncode
     if rc != 0:
         print(f"[server] WARNING: start command exited {rc} (scripts/restart.sh is session S's); start the server by hand", flush=True)
     return rc
@@ -483,7 +487,7 @@ def server_cycle(root: Path, opts, ctx: dict, work) -> dict:
             except Exception as e:  # noqa: BLE001
                 print(f"[server] WARNING: gpu_flip.sh local failed: {e}", flush=True)
         if state["stopped"]:
-            state["restarted"] = start_server(root)
+            state["restarted"] = start_server(root, model_dir=getattr(opts, "serve_model_dir", None))
             if state["restarted"] == 0:
                 state["probe"] = probe_stack(root)
         if state["lock"] and state["lock"]["acquired"]:
@@ -505,6 +509,7 @@ def rehearse(opts) -> int:
     state = server_cycle(root, opts, ctx, lambda: print("[rehearse] (no training)", flush=True))
     status = "rehearsed" if not state["error"] else "failed"
     write_run_json(run_dir, {"run_id": run_id, "status": status, "task": "rehearse", "services_root": str(root),
+                             "served_model_dir": opts.serve_model_dir,
                              "started_at": t0, "finished_at": time.time(), "lock": state["lock"], "probe": state["probe"],
                              "restarted": state["restarted"], "error": state["error"], "command": sys.argv})
     print(f"[rehearse] {status}: lock {state['lock']} · restart rc {state['restarted']} · probe {state['probe']}")
@@ -520,6 +525,7 @@ def parse_args(argv=None):
     ap.add_argument("--lock-minutes", type=int, default=None, help="lock duration; default: estimated training time + 15")
     ap.add_argument("--lock-wait-minutes", type=float, default=120.0, help="how long to wait for a held lock")
     ap.add_argument("--rehearse", action="store_true", help="server cycle only: lock, flip, stop, restart, probe, release")
+    ap.add_argument("--serve-model-dir", default=None, help="MODEL_DIR for restart.sh after the cycle (deploy a versioned model); default: the base")
     ap.add_argument("--run-id", default=None)
     ap.add_argument("--artifacts", default=None, help="override $R3_ARTIFACTS")
     ap.add_argument("--window-minutes", type=float, default=None, help="GPU window; default from the recipe's r3.window_minutes")
@@ -564,7 +570,7 @@ def main(argv=None) -> int:
     ledger = write_ledger(rows, ctx["run_id"], ctx["model_id"] if status == "done" else None, database_url, run_dir / "ledger.jsonl")
     record = run_record(ctx, status, started_at=t_start, finished_at=time.time(), wall_seconds=time.time() - t_start,
                         metrics=metrics, fuse=fuse_meta, ledger=ledger, error=error, services_root=str(root),
-                        lock=state["lock"], probe=state["probe"], restarted=state["restarted"])
+                        lock=state["lock"], probe=state["probe"], restarted=state["restarted"], served_model_dir=opts.serve_model_dir)
     write_run_json(run_dir, record)
     print(f"[launch] {status}: run.json {run_dir / 'run.json'} · ledger {'postgres + ' if ledger['db'] else ''}{ledger['jsonl']}"
           + (f" (db error: {ledger['error']})" if ledger["error"] else ""))
