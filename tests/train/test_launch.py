@@ -235,3 +235,12 @@ def test_rehearse_can_deploy_a_model_dir_through_restart_sh(tmp_path, monkeypatc
     assert (root / "events.log").read_text().splitlines()[-1] == "restart owner=T model=/models/r3-voice-abc"
     run = json.loads((tmp_path / "art" / "runs" / "dep1" / "run.json").read_text())
     assert run["served_model_dir"] == "/models/r3-voice-abc"
+
+
+def test_sizing_counts_validation_passes_in_the_estimate():
+    cfg, sizing = resolve_config(_recipe("voice_run1.yaml"), n_train=2044, mean_tokens=1771.0, data_dir=Path("/d"), run_dir=Path("/r"),
+                                 window_minutes=120, tokens_per_sec=850.0, n_valid=244)
+    assert cfg["val_batches"] == 96
+    # 3 validation passes (it=1, midpoint, end) over 96 examples, forward-only at ~3x a training step's rate
+    assert sizing["est_eval_seconds"] == round(3 * 96 * 1771.0 / 850.0 / 3, 1)
+    assert sizing["est_total_seconds"] == round(sizing["est_train_seconds"] + sizing["est_eval_seconds"], 1)

@@ -24,7 +24,7 @@ learning_rate: 1.0e-4
 grad_checkpoint: true
 mask_prompt: true
 steps_per_report: 10
-val_batches: -1
+val_batches: 96                               # validation examples per eval point (the whole set when smaller)
 seed: 0
 r3:
   task: routing

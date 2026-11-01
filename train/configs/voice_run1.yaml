@@ -27,7 +27,7 @@ learning_rate: 1.0e-4                         # peak lr; the launcher turns this
 grad_checkpoint: true
 mask_prompt: true                             # loss on the final assistant turn only (tool-call tokens in, tool results out)
 steps_per_report: 10                          # loss + tokens/s every 10 steps
-val_batches: -1                               # whole validation set at each eval point
+val_batches: 96                               # validation examples per eval point (the whole set when smaller); 3 evals must not eat the window
 seed: 0
 # iters / steps_per_eval / save_every are NOT set here: one epoch = len(train.jsonl) at batch 1, sized by the launcher
 # to end inside the GPU window, with validation + a checkpoint at the midpoint and the end.

@@ -125,7 +125,7 @@ def expand_strings(obj):
 
 
 def resolve_config(recipe: dict, *, n_train: int, mean_tokens: float, data_dir: Path, run_dir: Path,
-                   window_minutes: float | None, tokens_per_sec: float | None) -> tuple[dict, dict]:
+                   window_minutes: float | None, tokens_per_sec: float | None, n_valid: int = 0) -> tuple[dict, dict]:
     """The recipe plus the run-sized keys mlx_lm.lora needs: iters, steps_per_eval, save_every,
     lr_schedule (cosine over the optimizer steps with linear warmup), data, adapter_path."""
     cfg = expand_strings(copy.deepcopy(recipe))
@@ -149,6 +149,10 @@ def resolve_config(recipe: dict, *, n_train: int, mean_tokens: float, data_dir: 
             iters = new
     steps_per_eval = int(recipe.get("steps_per_eval") or max(1, iters // 2))
     save_every = int(recipe.get("save_every") or steps_per_eval)
+    val_batches = int(cfg.get("val_batches", -1))
+    n_val = n_valid if val_batches == -1 else min(n_valid, val_batches)
+    n_evals = 1 + max(1, iters // steps_per_eval) if n_valid else 0  # it == 1, every steps_per_eval, and the end
+    est_eval_seconds = round(n_evals * n_val * batch * mean_tokens / tokens_per_sec / 3, 1) if (tokens_per_sec and n_val) else None
     decay_steps = max(1, math.ceil(iters / ga))
     warmup = int(round(float(r3.get("warmup_ratio", 0.0)) * decay_steps))
     lr = float(cfg["learning_rate"])
@@ -177,6 +181,10 @@ def resolve_config(recipe: dict, *, n_train: int, mean_tokens: float, data_dir: 
         "safety_factor": safety,
         "budget_seconds": budget_seconds,
         "est_train_seconds": (iters * seconds_per_iter) if seconds_per_iter else None,
+        "est_eval_seconds": est_eval_seconds,
+        "est_total_seconds": round(iters * seconds_per_iter + (est_eval_seconds or 0), 1) if seconds_per_iter else None,
+        "n_valid": n_valid,
+        "val_examples_per_eval": n_val,
         "cut": cut,
     }
     return cfg, sizing
@@ -298,7 +306,8 @@ def preflight(opts) -> dict:
 
     tps, tps_source = (opts.tokens_per_sec, "--tokens-per-sec") if opts.tokens_per_sec else reference_tokens_per_sec(artifacts, task, opts.reference_run)
     cfg, sizing = resolve_config(recipe, n_train=len(train_examples), mean_tokens=report.stats["mean_tokens"],
-                                 data_dir=manifest.dir, run_dir=run_dir, window_minutes=opts.window_minutes, tokens_per_sec=tps)
+                                 data_dir=manifest.dir, run_dir=run_dir, window_minutes=opts.window_minutes, tokens_per_sec=tps,
+                                 n_valid=valid_report.n if valid_report else 0)
     sizing["tokens_per_sec_source"] = tps_source
     git = git_info()
     chash = config_hash(cfg)
@@ -327,6 +336,7 @@ def preflight(opts) -> dict:
           f"(grad accum {sizing['grad_accumulation_steps']}), warmup {sizing['warmup_steps']}, eval+checkpoint every {sizing['steps_per_eval']}")
     if tps:
         print(f"[plan] sized from {tps:.0f} total tokens/s ({tps_source}): est. {sizing['est_train_seconds']/60:.1f} min of training"
+              f" + {(sizing['est_eval_seconds'] or 0)/60:.1f} min of validation ({sizing['val_examples_per_eval']} examples x {1 + max(1, sizing['iters'] // sizing['steps_per_eval'])} passes)"
               + (f" within {sizing['window_minutes']} min x {sizing['safety_factor']}" if sizing["window_minutes"] else ""))
     elif not sizing["fixed_iters"]:
         print("[plan] no measured tokens/s (pass --tokens-per-sec or run the smoke first): one full epoch, unsized")
@@ -463,7 +473,7 @@ def server_cycle(root: Path, opts, ctx: dict, work) -> dict:
     """lock -> flip hosted -> stop :8000 -> work() -> flip local -> restart -> probe -> release, with
     the restore steps in a finally block so nobody waits on a human. Returns what happened."""
     state = {"lock": None, "probe": None, "flipped": False, "stopped": False, "restarted": None, "error": None}
-    minutes = int(opts.lock_minutes or math.ceil(((ctx.get("sizing") or {}).get("est_train_seconds") or 600) / 60) + 15)
+    minutes = int(opts.lock_minutes or math.ceil(((ctx.get("sizing") or {}).get("est_total_seconds") or (ctx.get("sizing") or {}).get("est_train_seconds") or 600) / 60) + 15)
     try:
         if not opts.no_lock:
             state["lock"] = acquire_gpu(root, LOCK_OWNER, minutes, ctx["run_id"], wait_minutes=opts.lock_wait_minutes)

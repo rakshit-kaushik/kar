@@ -39,7 +39,7 @@ def test_voice_run1_carries_the_locked_recipe():
     assert c["grad_checkpoint"] is True
     assert c["mask_prompt"] is True
     assert c["steps_per_report"] == 10
-    assert c["val_batches"] == -1
+    assert c["val_batches"] == 96  # bounded validation: 3 evals over 244 examples would cost ~15 min of run 1
     assert "packing" not in c and "iters" not in c  # one epoch, sized by the launcher
     r3 = c["r3"]
     assert r3["task"] == "voice" and r3["model_prefix"] == "r3-voice"
