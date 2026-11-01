@@ -61,7 +61,7 @@ TURN = {
     "preemptive": os.environ.get("AGENT_PREEMPTIVE", "0") == "1",
     # caller speech that VAD heard but STT never transcribed (two rehearsal stalls, Nov 1): after this many seconds the session
     # emits user_transcription_timeout and the agent asks the caller to say it again; 0 disables (LiveKit docs: "use it to prompt the user")
-    "transcription_timeout_s": float(os.environ.get("AGENT_TRANSCRIPTION_TIMEOUT", "2.5")),
+    "transcription_timeout_s": float(os.environ.get("AGENT_TRANSCRIPTION_TIMEOUT", "4.0")),
 }
 AUDIBLE_RMS = 300.0
 
