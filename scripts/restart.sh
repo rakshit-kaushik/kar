@@ -7,8 +7,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # values given on the command line win over .env (MODEL_DIR=... LLM_MODEL=... LOCAL_LLM_MODEL=... scripts/restart.sh)
-_OVR_LLM_MODEL="${LLM_MODEL:-}"; _OVR_LOCAL_LLM_MODEL="${LOCAL_LLM_MODEL:-}"; _OVR_LLM_BASE_URL="${LLM_BASE_URL:-}"
+_OVR_LLM_MODEL="${LLM_MODEL:-}"; _OVR_LOCAL_LLM_MODEL="${LOCAL_LLM_MODEL:-}"; _OVR_LLM_BASE_URL="${LLM_BASE_URL:-}"; _OVR_MODEL_DIR="${MODEL_DIR:-}"
 set -a; source .env; set +a
+# Nov 1 08:02 incident: .env had gained a MODEL_DIR line (deploy_model.sh writes one), so sourcing it clobbered the deploy's
+# MODEL_DIR override while the served name kept the override; run 1's weights were served under run 2's name for two hours.
+[ -n "$_OVR_MODEL_DIR" ] && export MODEL_DIR="$_OVR_MODEL_DIR"
 [ -n "$_OVR_LLM_MODEL" ] && export LLM_MODEL="$_OVR_LLM_MODEL"
 [ -n "$_OVR_LOCAL_LLM_MODEL" ] && export LOCAL_LLM_MODEL="$_OVR_LOCAL_LLM_MODEL"
 [ -n "$_OVR_LLM_BASE_URL" ] && export LLM_BASE_URL="$_OVR_LLM_BASE_URL"
