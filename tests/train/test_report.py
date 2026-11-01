@@ -44,3 +44,24 @@ def test_report_lists_runs_candidates_and_the_selection(tmp_path):
     md = render_report(rep)
     assert "train-smoke-1" in md and "r3-voice-bbb" in md and "failed" in md and "selected" in md.lower()
     assert "| r3-voice-aaa |" in md
+
+
+def test_report_has_a_routing_row_from_zero_shot_scores_and_the_adapters_ledger_rows(tmp_path):
+    for name, model, acc, f1, cov, err in (("routing-base-zeroshot-1", "r3-voice-base", 0.81, 0.8348, 0.94, 23),
+                                           ("routing-hosted-zeroshot-1", "claude-sonnet-5-5", 0.99, 0.9936, 0.99, 1)):
+        d = tmp_path / "runs" / name
+        d.mkdir(parents=True)
+        (d / "scores.json").write_text(json.dumps({"model": model, "split": "test", "n": 100, "coverage": cov, "accuracy": acc,
+                                                   "macro_f1": f1, "weighted_error": err}))
+    _run(tmp_path, "routing-run1", "routing", "done", "r3-routing-abc", 600.0, 0.04)
+
+    def ledger(run_id):  # stands in for the Postgres cost_ledger: S's batch job writes routing.* rows
+        assert run_id == "routing-r3-routing-abc"
+        return {"routing.accuracy": 0.91, "routing.macro_f1": 0.908, "routing.coverage": 0.98, "routing.weighted_error": 11, "routing.n": 100}
+
+    rep = build_report(tmp_path, ledger_reader=ledger)
+    rows = {r["model"]: r for r in rep["routing"]}
+    assert rows["r3-routing-abc"]["accuracy"] == 0.91 and rows["r3-routing-abc"]["weighted_error"] == 11
+    assert rows["r3-voice-base"]["macro_f1"] == 0.8348 and rows["claude-sonnet-5-5"]["accuracy"] == 0.99
+    md = render_report(rep)
+    assert "## Routing" in md and "| r3-routing-abc | adapter | 0.91 |" in md

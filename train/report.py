@@ -21,7 +21,46 @@ def _load(p: Path) -> dict | None:
         return None
 
 
-def build_report(artifacts: Path, extra_tables: list[Path] | None = None, tasks: tuple[str, ...] = ("voice", "routing", "rehearse")) -> dict:
+def ledger_routing_scores(run_id: str) -> dict:
+    """routing.* rows that session S's batch job writes to cost_ledger for a routing model (run_id routing-<model id>)."""
+    import os
+
+    from train.env import load_env
+
+    load_env()
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        return {}
+    try:
+        import psycopg
+
+        with psycopg.connect(url, connect_timeout=5) as conn, conn.cursor() as cur:
+            cur.execute("select item, qty from cost_ledger where run_id = %s and item like 'routing.%%'", (run_id,))
+            return {item: float(qty) for item, qty in cur.fetchall()}
+    except Exception:  # noqa: BLE001 - the report must render without Postgres
+        return {}
+
+
+def routing_rows(artifacts: Path, runs: list[dict], ledger_reader=ledger_routing_scores) -> list[dict]:
+    """The routing row of the write-up: zero-shot baselines (E's scores.json) and every fused routing adapter
+    (S's batch-job rows in the ledger), all on the same 100 test tickets."""
+    rows = []
+    for p in sorted((Path(artifacts) / "runs").glob("routing-*-zeroshot-*/scores.json")):
+        d = _load(p) or {}
+        rows.append({"model": d.get("model"), "kind": "zero-shot", "accuracy": d.get("accuracy"), "macro_f1": round(d["macro_f1"], 4) if d.get("macro_f1") is not None else None,
+                     "coverage": d.get("coverage"), "weighted_error": d.get("weighted_error"), "n": d.get("n"), "source": str(p.parent.name)})
+    for r in runs:
+        if r.get("task") != "routing" or r.get("status") != "done":
+            continue
+        got = ledger_reader(f"routing-{r['model_id']}") or {}
+        rows.append({"model": r["model_id"], "kind": "adapter", "accuracy": got.get("routing.accuracy"), "macro_f1": got.get("routing.macro_f1"),
+                     "coverage": got.get("routing.coverage"), "weighted_error": got.get("routing.weighted_error"), "n": got.get("routing.n"),
+                     "source": f"cost_ledger run_id routing-{r['model_id']}" if got else "not scored yet"})
+    return rows
+
+
+def build_report(artifacts: Path, extra_tables: list[Path] | None = None, tasks: tuple[str, ...] = ("voice", "routing", "rehearse"),
+                 ledger_reader=ledger_routing_scores) -> dict:
     runs_dir = Path(artifacts) / "runs"
     runs, tables = [], []
     for d in sorted(runs_dir.glob("*")) if runs_dir.exists() else []:
@@ -48,7 +87,8 @@ def build_report(artifacts: Path, extra_tables: list[Path] | None = None, tasks:
             tables.append(t)
     ranked = select_candidates(tables) if tables else []
     return {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "artifacts": str(artifacts), "runs": runs,
-            "selection": {"selected": ranked[0] if ranked else None, "ranked": ranked}}
+            "selection": {"selected": ranked[0] if ranked else None, "ranked": ranked},
+            "routing": routing_rows(artifacts, runs, ledger_reader)}
 
 
 def render_report(rep: dict) -> str:
@@ -74,6 +114,12 @@ def render_report(rep: dict) -> str:
         out += ["", f"**Selected: {s['model']}** ({s['reason']}); model dir `{s.get('model_dir')}`."]
     else:
         out.append("No scored candidates yet.")
+    if rep.get("routing"):
+        out += ["", "## Routing (100 hand-check test tickets; adapter scored by the batch job, zero-shot by r3-eval)", "",
+                "| model | kind | accuracy | macro F1 | coverage | weighted error | source |", "|---|---|---|---|---|---|---|"]
+        for r in rep["routing"]:
+            fmt = lambda v: "-" if v is None else (f"{v:g}" if isinstance(v, (int, float)) else str(v))
+            out.append(f"| {r['model']} | {r['kind']} | {fmt(r['accuracy'])} | {fmt(r['macro_f1'])} | {fmt(r['coverage'])} | {fmt(r['weighted_error'])} | {r['source']} |")
     return "\n".join(out) + "\n"
 
 
