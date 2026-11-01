@@ -2,17 +2,19 @@
 # Lane S measurement block (≤12 min under lock S), no redeploy: probe, trie check lines, N sequential simulated calls + 1
 # interruption call on whatever :8000 serves, g1_report + cost into the ledger, release. For the clean latency numbers of
 # a deployed candidate once the GPU is free (training and eval batches pollute TTFT).
-# Usage: [CALLS=3] [TAG=clean] [INT_TURN=5] [TIMEOUT_CALL=1] scripts/measure_block.sh
+# Usage: [CALLS=3] [TAG=clean] [INT_TURN=5] [TIMEOUT_CALL=1] [HANDOFF_CALL=1] [LOCK_MINUTES=15] scripts/measure_block.sh
 #   INT_TURN: caller turn that cuts into the agent's reply (5 = the read-back; the candidate's slot question is too short to cut into at 4)
 #   TIMEOUT_CALL=1: one timeout-scenario call (fault injected via the room name) scored by scripts/demo_check.py
+#   HANDOFF_CALL=1: one handoff-scenario call (suspected fraud; exercises the claim guard) scored by scripts/demo_check.py
+#   LOCK_MINUTES: lock S duration; 15 covers CALLS=3 + interruption, add ~2 per extra scenario call
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; set -a; . ./.env; set +a
-ART="${R3_ARTIFACTS:-$HOME/r3-artifacts}"; CALLS="${CALLS:-3}"; TAG="${TAG:-clean}"; INT_TURN="${INT_TURN:-5}"; TIMEOUT_CALL="${TIMEOUT_CALL:-0}"
+ART="${R3_ARTIFACTS:-$HOME/r3-artifacts}"; CALLS="${CALLS:-3}"; TAG="${TAG:-clean}"; INT_TURN="${INT_TURN:-5}"; TIMEOUT_CALL="${TIMEOUT_CALL:-0}"; HANDOFF_CALL="${HANDOFF_CALL:-0}"; LOCK_MINUTES="${LOCK_MINUTES:-15}"
 ID="$(curl -s -m 5 http://127.0.0.1:8000/v1/models | uv run python -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null || echo unknown)"
 RUN="measure-$ID-$(date +%m%d-%H%M)"; OUT="$ART/runs/$RUN"; mkdir -p "$OUT"; LOG="$OUT/block.log"; BATCH="$(date +%H%M)"
 step() { echo; echo "=== $(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
 run() { "$@" 2>&1 | tee -a "$LOG"; }
-scripts/gpu_lock.sh wait S 15 "$RUN" | tee -a "$LOG"
+scripts/gpu_lock.sh wait S "$LOCK_MINUTES" "$RUN" | tee -a "$LOG"
 trap 'scripts/gpu_lock.sh release S | tee -a "$LOG"' EXIT
 step "serving $ID; TTS=${AGENT_TTS:-cartesia}; probe"
 run uv run python scripts/probe_dispatch.py --timeout 40
@@ -26,6 +28,12 @@ if [ "$TIMEOUT_CALL" = "1" ]; then
   step "timeout scenario: one call with check_availability timing out once (demo/scenarios.md #3)"
   run uv run python scripts/sim_caller.py --calls 1 --lines-file demo/turns/timeout.json --prefix "demo-timeout-$TAG-$BATCH--fault-check_availability-timeout" --json "$OUT/timeout.json"
   run uv run python scripts/demo_check.py --like "demo-timeout-$TAG-$BATCH%" --scenario timeout | tee "$OUT/timeout.check.txt"
+fi
+if [ "$HANDOFF_CALL" = "1" ]; then
+  step "handoff scenario: one call reporting an unrecognized charge (demo/scenarios.md #5; the claim guard's live test)"
+  run uv run python scripts/sim_caller.py --calls 1 --lines-file demo/turns/handoff.json --prefix "demo-handoff-$TAG-$BATCH" --json "$OUT/handoff.json"
+  run uv run python scripts/demo_check.py --like "demo-handoff-$TAG-$BATCH%" --scenario handoff | tee "$OUT/handoff.check.txt"
+  run uv run python scripts/g1_report.py --like "demo-handoff-$TAG-$BATCH%" | tee "$OUT/handoff_report.txt"
 fi
 grep -E "Prefix trie cache HIT" "$ART/logs/server.log" | tail -3 | tee -a "$LOG"
 step "done: $OUT"
