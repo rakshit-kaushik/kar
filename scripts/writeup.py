@@ -74,8 +74,11 @@ def eval_table(con, run_ids: list[str]) -> str:
         for f in fams:
             ok, n = data[run_id].get(f, (0, 0)); tot_ok += ok or 0; tot_n += n
             cells.append(f"{ok}/{n}" if n else "-")
-        out.append([f"{run_id} ({model_of[run_id]})"] + cells + [f"**{tot_ok}/{tot_n}** ({100 * tot_ok / tot_n:.0f}%)" if tot_n else "-"])
-    return md_table(header, out) + "\n\n_Cells: episodes passing every non-advisory scorer / episodes. Source: eval_results (E's runner)._"
+        caller = "caller: local base model" if "localcaller" in run_id else "caller: claude-sonnet-5-5"
+        out.append([f"{run_id} ({model_of[run_id]}; {caller})"] + cells + [f"**{tot_ok}/{tot_n}** ({100 * tot_ok / tot_n:.0f}%)" if tot_n else "-"])
+    return md_table(header, out) + ("\n\n_Cells: episodes passing every non-advisory scorer / episodes. Source: eval_results (E's runner). "
+            "Runs marked 'caller: local base model' were scored with Qwen3-4B playing the caller while the hosted account was out of credits; "
+            "a 4B caller derails scenarios, so compare those rows only with each other, never with the hosted-caller rows._")
 
 
 def ledger_metrics(con, run_like: str) -> dict[str, dict[str, float]]:
