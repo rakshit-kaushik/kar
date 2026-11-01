@@ -264,3 +264,17 @@ def test_start_server_drops_the_worktrees_env_values_so_restart_sh_reads_its_own
     assert seen.read_text() == "unset|unset|T|/m/r3-voice-x|yes"
     assert launch.start_server() == 0
     assert seen.read_text() == "unset|unset|T|unset|yes"
+
+
+def test_acquire_gpu_trusts_only_a_status_read_that_names_the_owner(tmp_path, monkeypatch):
+    """A gpu_lock.sh whose acquire prints success while status still shows another holder (the fail-open read
+    seen Nov 1 07:14) is not treated as acquired."""
+    from train.launch import acquire_gpu
+
+    root = tmp_path / "svc"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "gpu_lock.sh").write_text(
+        "#!/usr/bin/env bash\ncase \"$1\" in acquire) echo \"gpu: acquired by $2 for $3 min ($4)\"; exit 0;; "
+        "status) echo \"gpu: held by S for another 9 min (block)\"; exit 1;; release) echo released; exit 0;; esac\n")
+    res = acquire_gpu(root, "T", 5, "smoke", wait_minutes=0, poll_seconds=0)
+    assert res["acquired"] is False and res["attempts"] == 1

@@ -60,7 +60,8 @@ def service_env(**extra: str) -> dict:
     root: every key this worktree's .env defines is dropped, because this process loaded that (possibly stale)
     copy and restart.sh lets environment values win over the .env it sources itself (a stale LOCAL_LLM_MODEL
     once made :8000 advertise the deployed model as r3-voice-base). Only `extra` (R3_OWNER, MODEL_DIR) is added."""
-    env = {k: v for k, v in os.environ.items() if k not in env_file_keys()}
+    keep = {"R3_ARTIFACTS"}  # S's scripts re-source it from their own .env; tests point it at a private dir
+    env = {k: v for k, v in os.environ.items() if k not in env_file_keys() or k in keep}
     env.update({k: str(v) for k, v in extra.items() if v is not None})
     return env
 
@@ -82,7 +83,12 @@ def acquire_gpu(root: Path, owner: str, minutes: int, purpose: str, wait_minutes
         attempts += 1
         rc, out = gpu_lock(root, "acquire", owner, str(minutes), purpose)
         if rc == 0:
-            return {"acquired": True, "waited_s": round(time.time() - t0), "attempts": attempts, "output": out, "minutes": minutes}
+            # Nov 1 07:14: an acquire succeeded against a valid lock S (gpu_lock.sh read the file as empty and
+            # treated that as free). The lock is only ours if a fresh status read agrees.
+            src, status = gpu_lock(root, "status")
+            if f"held by {owner} " in status or f"held by {owner}" == status.strip() or status.startswith("no "):
+                return {"acquired": True, "waited_s": round(time.time() - t0), "attempts": attempts, "output": out, "minutes": minutes}
+            print(f"[lock] acquire said '{out}' but status reads '{status}'; not ours, retrying", flush=True)
         if time.time() >= deadline:
             return {"acquired": False, "waited_s": round(time.time() - t0), "attempts": attempts, "output": out, "minutes": minutes}
         if attempts == 1:
