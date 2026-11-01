@@ -75,6 +75,39 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Fallback on the fly: `scripts/gpu_flip.sh hosted`.
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
 
+### Nov 1 07:11-07:31: hand-back block, lock overlap, served-name mismatch, caller TTS fallback
+What happened, in order. (1) T's hand-back restart (07:10) served run 1's weights under the name `r3-voice-base` and started
+the proxy and agent with LLM_MODEL=r3-voice-base: T's launcher carried its worktree's stale .env in its environment, and
+restart.sh lets environment values win over kar/.env (by design, for command-line overrides). My 07:11 block therefore
+logged run 1 as r3-voice-base; relabeled afterwards with `scripts/relabel_model.py` (816 rows: sessions, turn_events,
+ledger run ids g1-sim/g1-interrupt/cost-r3-voice-206506525c; dir renamed measure-r3-voice-206506525c-1101-0711-contended).
+(2) Lock overlap 07:14-07:17: T's test suite ran gpu_lock.sh against the real lock file (its stripped environment lost
+R3_ARTIFACTS, so the script fell back to $HOME/r3-artifacts), rewrote and released lock S, and later released T's own
+lock; T's batch acquired at 07:14:27 while my block ran. Separately, my 05:14 `pkill` of a stuck block had left its
+`gpu_lock.sh wait` child alive, and that orphan took lock S at 07:11:1x for nobody. gpu_lock.sh is now fail-closed
+(unreadable lock = held), writes atomically (temp + rename), honours GPU_LOCK_FILE for tests, and `wait` gives up when its
+parent is gone (tests/scripts/test_gpu_lock.py). Block numbers: calls 1-2 clean, call 3 and the interruption call
+contended by T's side servers; indicative only (below). (3) 07:24-07:30 live turns broken: my clean proxy restart sent
+the candidate's name to a server advertising r3-voice-base, and vllm-mlx answers 404 to any other name; restart.sh's
+proxy check failed and exited before its agent step, so the agent kept the base label. Fix: the proxy sends local
+requests under the single id from the server's /v1/models and keeps the caller's id on every label and event
+(`/health` shows `upstream_model`; LOCAL_LLM_UPSTREAM_NAME overrides). Verified 07:31: proxy check ok, one-token turn
+200, probe session labeled r3-voice-206506525c. (4) Both scenario calls (timeout, handoff) aborted before the first word:
+the simulated caller synthesizes new lines through Cartesia, which is out of credits (402). `scripts/sim_caller.py` now
+falls back to Deepgram Aura (SIM_TTS=auto: Cartesia first so cached lines keep their voice; `aura-2-orion-en` for new
+lines; SIM_TTS=deepgram forces one voice, which the rehearsal uses); all five demo scripts are pre-synthesized
+(`--prepare --lines-file`). (5) Loop guard escalation moved from the 2nd to the 3rd exact repeat
+(AGENT_LOOP_GUARD_HANDOFF_AFTER=3): in call 1 the caller's phone number was split by turn detection into two utterances,
+the model asked for the date of birth after each fragment, and the guard handed off a recoverable call (request_handoff
+recorded, call continued, booking then claimed without the tool).
+
+Indicative numbers, run 1 with filler + loop guard, 3 calls + interruption (calls 3-4 contended): eos→first audio heard
+p50 1492 / p95 2528 ms (04:32 clean block 1466 / 2592); filler before tool calls 4 turns, filler audible p50 1555 ms,
+first reply audible p50 2063 ms (the filler fills ~0.5 s of the tool-call wait); turn-taking 494; LLM TTFT spoken 139 /
+tool-call 820; Deepgram TTS first byte 170; 3/3 lookups, 1/3 bookings; unsupported claims 2 calls (both "I booked..."
+without book_appointment, the known run-1 failure mode); loop guard 5 interventions in 3 calls (threshold 2 at the time);
+claim guard 0. The clean filler A/B and the claim guard's live call run in the deploy block of the final candidate.
+
 ### Nov 1 05:42: claim guard (reviewer item from the run-1 failure labels)
 In 6 of 81 text episodes (E's failures.md: "transfer 6"; the reviewer's label pass counted 5) the candidate said "I've opened
 your ticket and I'm transferring you" right after create_ticket and called request_handoff a turn late or never (the contract counts a transfer announced without the tool as an unsupported

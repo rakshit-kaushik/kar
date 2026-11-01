@@ -7,6 +7,7 @@
 #   INT_TURN: the caller turn that cuts into the agent's reply in the interruption scenario (5 = the read-back; the run-1
 #   candidate answers the slot question in one sentence, too short to cut into at turn 4).
 set -uo pipefail
+export SIM_TTS="${SIM_TTS:-deepgram}"   # one caller voice across all five scenarios while Cartesia is out of credits (cached per voice)
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; set -a; . ./.env; set +a
 ART="${R3_ARTIFACTS:-$HOME/r3-artifacts}"; RUNS="${RUNS:-5}"; INT_TURN="${INT_TURN:-5}"
 SCENARIOS="${SCENARIOS:-ordinary correction timeout interruption handoff}"
