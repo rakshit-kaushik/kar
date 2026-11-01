@@ -60,3 +60,12 @@ targets all follow a request_handoff result, and no text target claims anything 
 the claims rule is taught only implicitly. Options, none taken in this sprint (the plan forbids raising seq):
 trim the scaffold by ~260 tokens (shorter tool descriptions or system prompt, a contract change), raise seq
 to 2,304 (+12.5% run time), or generate more short-profile calls (23 of 26 of their closings fit).
+
+## Next sprint (session E, after G4 on 2026-11-01)
+
+Three named gaps with the numbers behind them, written up in full in `.context/next-sprint-E.md` of the
+e/sim worktree: (1) handoff after a ticket or after a double tool fault, 10 of run 2's 23 data-fixable failing
+episodes, profiles `double_fault`, `double_fault_short` and the lost-card builders ready; (2) the 2,048-token
+closing gap above, 236 of 2,708 targets are closings and five of nine families have none; (3) the local-caller
+harness share, 15 of 81 run-2 episodes, to be replaced by a hosted-caller rerun when the key works, followed by
+the v5.1 slice (170 validated scenarios in `datasets/r3-voice-gen-v51-slice`).
