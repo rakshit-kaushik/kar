@@ -491,6 +491,14 @@ def compare_runs(run_dirs: list[str | Path], exclude_caller_faults: bool = False
             (label, {eid: e for eid, e in eps.items() if e["key"] not in excluded})
             for label, eps in runs
         ]
+    labels = [label for label, _ in runs]
+    if len(set(labels)) < len(labels):  # same model id scored twice (e.g. hosted vs local caller)
+        runs = [
+            (f"{label} ({Path(d).parent.name if Path(d).name == 'eval' else Path(d).name})", eps)
+            if labels.count(label) > 1
+            else (label, eps)
+            for (label, eps), d in zip(runs, run_dirs)
+        ]
     families = sorted({e["family"] for _, eps in runs for e in eps.values()})
     lines = []
     if exclude_caller_faults:

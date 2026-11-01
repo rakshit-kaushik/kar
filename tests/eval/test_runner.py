@@ -751,3 +751,17 @@ def test_agent_repeats_exempts_a_repeated_farewell_like_the_live_guard():
     ]:
         msgs += [{"role": "assistant", "content": line}, {"role": "user", "content": "goodbye"}]
     assert agent_repeats({"messages": msgs}) == {"rephrase": 0, "handoff": 0, "max_streak": 1}
+
+
+def test_compare_disambiguates_runs_that_share_a_model_id(tmp_path):
+    from eval.runner import compare_runs
+
+    good = _ep_for_caller_fault(
+        ["five five five zero one nine eight eight two three", "july fourth nineteen seventy five"],
+        [({}, True)],
+    )
+    a, b = tmp_path / "hosted-caller", tmp_path / "local-caller"
+    _write_run(a, "r3-voice-base", [("ordinary_01", 0, set(), good)])
+    _write_run(b, "r3-voice-base", [("ordinary_01", 0, {"handoff"}, good)])
+    md = compare_runs([a, b])
+    assert "| family | r3-voice-base (hosted-caller) | r3-voice-base (local-caller) |" in md
