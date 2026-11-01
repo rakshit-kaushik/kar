@@ -120,6 +120,23 @@ consumed; and 5b `handoff_person` (Dana asks for a person, then insists; expecte
 nothing written) was added as the reviewer's alternative handoff flow, since the direct fraud report (5) opened the ticket but did
 not transfer in its one live call on run 2. The rehearsal runs six scenarios; the demo uses whichever handoff flow passes.
 
+### Nov 1 08:40-09:25: rehearsal on the final model, and the executor retry
+Rehearsal `rehearsal-r3-voice-730f8ba68e-1101-0840` (six scenarios x 5, Deepgram caller voice, recordings under its run dir). Early
+rows: ordinary 3/5 (the model re-asked the day the caller had given in 2 calls; the loop guard caught the resulting repeat and the
+claim guard held a false "I booked" at the scripted "no, that's everything" in both; nothing unsupported was spoken), correction 5/5,
+timeout 0/5: after the injected book_appointment timeout the model asks "Would you like me to try again?" and then never calls
+book_appointment again when the caller says yes (repeats the apology, or drifts); two calls ended in a transfer line without the
+tool, which the transfer guard made real. The final model does not retry a failed write on request.
+
+Response, same category and conditions as the guards (identical for every model, its own count, never shown as the model's
+recovery): `services/tools/executor.py` retries a tool once when the sandbox answers timeout or unavailable (state.INFRA_ERRORS),
+same arguments and idempotency key; the model sees only the final result; events: tool_end attempt 1 (ok false), tool_retry,
+tool_start/tool_end attempt 2; `AGENT_TOOL_RETRY=0` turns it off; `scripts/demo_check.py` prints `retry=` per call and writes
+`rehearsal.<scenario>.retried`. The agent was restarted with it only after the rehearsal's lock was released; the timeout scenario
+was then re-run five times and both rows are reported. The handoff reason after an infrastructure failure is now tool_failure
+(`state_view` carries tool_failures and business_errors; the timeout had been counted as an infrastructure failure, so the earlier
+business_errors rule never fired).
+
 ### Nov 1 07:58: gate-fail fallback ready
 If run 2's fused 8-bit artifact fails the precision gate, `scripts/serve_unfused.sh $R3_ARTIFACTS/models/r3-voice-730f8ba68e`
 (under lock S) replaces the vllm-mlx server with mlx_lm.server 0.32.2 serving the unfused adapter on the trained base
