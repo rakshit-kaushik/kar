@@ -18,3 +18,9 @@ def test_decode_rate_is_none_for_a_tool_call_turn_whose_first_token_is_the_whole
 
 def test_decode_rate_is_none_without_enough_tokens():
     assert g1_report.decode_rate(completion_tokens=1, first_ms=100, done_ms=900) is None
+
+
+def test_turn_kind_splits_tool_call_turns_from_spoken_turns():
+    assert g1_report.turn_kind({"tool_calls": 1, "completion_tokens": 46}) == "tool"
+    assert g1_report.turn_kind({"tool_calls": 0, "completion_tokens": 53}) == "spoken"
+    assert g1_report.turn_kind({}) == "spoken"

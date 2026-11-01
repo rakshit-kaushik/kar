@@ -41,6 +41,12 @@ def fmt(xs, unit="ms"):
     return f"p50 {pct(xs, 0.5):.0f} {unit} · p95 {pct(xs, 0.95):.0f} {unit} · n={len(xs)}"
 
 
+def turn_kind(llm_done_payload: dict) -> str:
+    """'tool' when the model's reply was a tool call (vllm-mlx streams it only when complete, so its first token is the whole
+    turn and the caller hears nothing until the tool ran and a second turn spoke), else 'spoken'."""
+    return "tool" if (llm_done_payload or {}).get("tool_calls") else "spoken"
+
+
 def decode_rate(completion_tokens, first_ms, done_ms, min_window_ms: int = 250) -> float | None:
     """Tokens after the first over the streaming window, tok/s. None when the window is too short to measure: a
     tool-call turn (vllm-mlx emits the call only when complete, so first token = done) or a one-token reply."""
@@ -102,7 +108,10 @@ def main() -> None:
             req, ft, done = first("llm_request"), first("llm_first_token"), first("llm_done")
             audible, heard, spk = first("tts_first_audible"), first("caller_first_audio"), first("agent_speaking")
             if req: M["turn_taking_overhead"].append(req - t)
-            if ft: M["llm_ttft"].append(first("llm_first_token", "ms")); M[f"llm_ttft_{first('llm_first_token', 'source') or 'local'}"].append(first("llm_first_token", "ms"))
+            if ft:
+                M["llm_ttft"].append(first("llm_first_token", "ms")); M[f"llm_ttft_{first('llm_first_token', 'source') or 'local'}"].append(first("llm_first_token", "ms"))
+                done_payload = next((e[5] for e in window if e[3] == "llm_done"), {})
+                M[f"llm_ttft_{turn_kind(done_payload)}"].append(first("llm_first_token", "ms"))
             if done and first("llm_done", "completion_tokens") and first("llm_first_token", "ms") is not None:
                 ct = first("llm_done", "completion_tokens"); total = first("llm_done", "ms"); f0 = first("llm_first_token", "ms")
                 rate = decode_rate(ct, f0, total)
@@ -134,6 +143,7 @@ def main() -> None:
     print(f"turn-taking overhead -> LLM request  {fmt(M['turn_taking_overhead'])}   (VAD + STT final + endpointing)")
     print(f"  EOU delay (LiveKit)                {fmt(M['eou_delay'])}   STT final after VAD end {fmt(M['transcription_delay'])}")
     print(f"LLM TTFT (proxy)                     {fmt(M['llm_ttft'])}   local {fmt(M['llm_ttft_local'])}   hosted {fmt(M['llm_ttft_hosted'])}")
+    print(f"  by turn type                       tool-call turns {fmt(M['llm_ttft_tool'])}   spoken turns {fmt(M['llm_ttft_spoken'])}   (tool-call turns: first token = whole call)")
     print(f"LLM decode                           {fmt(M['decode_tok_s'], 'tok/s')}")
     print(f"TTS first byte (Cartesia)            {fmt(M['tts_ttfb'])}   (target ≤ 200)")
     print(f"prompt / completion tokens           {fmt(M['prompt_tokens'], 'tok')} / {fmt(M['completion_tokens'], 'tok')}")
@@ -146,7 +156,7 @@ def main() -> None:
     if args.ledger:
         note = args.note or f"{kind} matching {args.like}"
         items = [("calls", len(per_call), "calls"), ("lookups_ok", ok_calls, "calls"), ("structural_leak_calls", leak_calls, "calls"), ("fallbacks", fb_total, "requests")]
-        for name in ("eos_to_first_audio_heard", "eos_to_tts_audible", "transport", "turn_taking_overhead", "eou_delay", "transcription_delay", "llm_ttft_local", "llm_ttft_hosted", "decode_tok_s", "tts_ttfb", "prompt_tokens", "completion_tokens", "agent_dispatch"):
+        for name in ("eos_to_first_audio_heard", "eos_to_tts_audible", "transport", "turn_taking_overhead", "eou_delay", "transcription_delay", "llm_ttft_local", "llm_ttft_hosted", "llm_ttft_tool", "llm_ttft_spoken", "decode_tok_s", "tts_ttfb", "prompt_tokens", "completion_tokens", "agent_dispatch"):
             xs = M.get(name) or []
             unit = "tok/s" if name == "decode_tok_s" else ("tok" if "tokens" in name else "ms")
             if xs:
