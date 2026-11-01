@@ -75,7 +75,7 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Fallback on the fly: `scripts/gpu_flip.sh hosted`.
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
 
-### Nov 1 05:20: loop guard; demo rehearsal tooling
+### Nov 1 05:01: loop guard; demo rehearsal tooling
 - Loop guard (services/agent/loopguard.py, in R3Agent.llm_node): a reply is held only while it is still identical to the previous
   assistant line; an exact repeat is swallowed and a rephrased re-ask is spoken, a second consecutive repeat becomes the handoff
   line plus request_handoff(out_of_scope) through the executor. `loop_guard` turn events {action, repeated, repeats}.
@@ -87,7 +87,7 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
   never parsed (batch suffix appended after it), so the timeout scenario had never been injected through sim_caller; fixed
   (services/sim/naming.py). measure_block.sh: INT_TURN (default 5) and TIMEOUT_CALL=1.
 
-### Nov 1 05:05: filler line before tool-call turns (reviewer decision on the G3 numbers)
+### Nov 1 04:49: filler line before tool-call turns (reviewer decision on the G3 numbers)
 - Tool-call turns on the candidate have no audio for ~2 s (model writes the tool call 748 ms, tool runs, model speaks the result,
   TTS). The agent now says `AGENT_FILLER` ("One moment.") the instant a tool starts: once per caller turn, never while it is
   already speaking, never on spoken turns, not added to the chat context (the model never sees it). services/agent/filler.py,
