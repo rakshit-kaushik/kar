@@ -885,8 +885,13 @@ def prefix_counts_from_dataset(dataset_dir: str | Path) -> dict[str, int]:
     return dict(counts)
 
 
+# Same phrase set as the live claim guard (services/agent/claimguard.TRANSFER_RE), applied to the
+# normalized line, so the post-hoc count and the live `claim_guard` events mean the same thing.
 _TRANSFER_LINE = re.compile(
-    r"\b(transferring you|transfer you to|connect you (to|with) a person)\b", re.IGNORECASE
+    r"\b(transferr?ing you|transfer you|hand(?:ing)? you (?:over|off)|connect(?:ing)? you (?:to|with)|"
+    r"put(?:ting)? you through|(?:a |my |our )?(?:specialist|colleague|team member|representative|agent|person) "
+    r"(?:will|is going to|can) (?:take over|take it from here|help|be with you|assist)|"
+    r"let me get (?:a|my) (?:colleague|specialist))\b"
 )
 
 
@@ -907,7 +912,7 @@ def one_strike_handoff(ep: dict) -> bool:
     if any(t.get("tool") == "request_handoff" for t in ep.get("tool_log") or []):
         return True
     return any(
-        _TRANSFER_LINE.search(m.get("content") or "")
+        _TRANSFER_LINE.search(_normalize_line(m.get("content") or ""))
         for m in ep.get("messages") or []
         if m.get("role") == "assistant"
     )

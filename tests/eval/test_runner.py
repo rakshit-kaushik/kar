@@ -1049,3 +1049,26 @@ def test_failures_report_splits_claims_by_action(tmp_path):
     (tmp_path / "episodes" / "correction_03-s0-abc.json").write_text(json.dumps(ep))
     md = failures_report(tmp_path)
     assert "**success claims by claimed action**: transfer 1, write 1" in md
+
+
+def test_one_strike_handoff_uses_the_live_claim_guard_phrase_set():
+    from eval.runner import one_strike_handoff
+
+    def ep(line):
+        return {
+            "tool_log": [
+                {
+                    "idx": 0,
+                    "tool": "lookup_account",
+                    "args": {},
+                    "ok": False,
+                    "error": "not_verified",
+                }
+            ],
+            "messages": [{"role": "assistant", "content": line}],
+        }
+
+    assert one_strike_handoff(ep("A specialist will take over from here.")) is True
+    assert one_strike_handoff(ep("Let me put you through to a colleague.")) is True
+    assert one_strike_handoff(ep("I'll hand you over to a banker now.")) is True
+    assert one_strike_handoff(ep("Could you read me your date of birth again?")) is False
