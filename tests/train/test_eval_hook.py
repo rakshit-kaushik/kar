@@ -253,7 +253,7 @@ def test_select_candidate_prefers_zero_unsupported_claims_then_task_completion(t
 
     ranked = select_candidates([table("base", 40.0, 0), table("run1", 70.0, 2), table("run2", 65.0, 0)])
     assert [r["model"] for r in ranked] == ["run2", "base", "run1"]
-    assert ranked[0]["rank"] == 1 and ranked[2]["reason"].startswith("2 unsupported")
+    assert ranked[0]["rank"] == 1 and "2 unsupported" in ranked[2]["reason"]
 
 
 def test_table_from_an_existing_runner_output(tmp_path):
@@ -301,3 +301,19 @@ def test_table_from_scores_can_exclude_the_caller_fault_episodes_listed_by_the_c
     assert table["overall"]["n"] == 0 and (out / "family_table_excl.json").exists()
     table = table_from_scores(out, model_name="m")  # no exclusion: all 4 non-advisory rows
     assert table["overall"]["n"] == 4
+
+
+def test_selection_has_all_pass_per_episode_and_g4_ordering():
+    """G4 rule (plan owner's stand-in, 05:35): rank by all-pass rate (every non-advisory scorer) excluding
+    caller faults, unsupported claims as the tie-breaker toward zero, then completion, then tool calls."""
+    from train.select import select_candidates
+
+    rows = [dict(r, episode_id=f"{r['scenario_id']}-s{r['repeat_seed']}-x") for r in E_ROWS]
+    t = family_table(rows)
+    assert t["selection"]["all_pass"] == 0.0  # e1 fails the claim scorer, e2 fails final_state
+    rows2 = [dict(r, **{"pass": True}) for r in rows]
+    assert family_table(rows2)["selection"]["all_pass"] == 100.0
+    def tbl(name, ap, claims, tc):
+        return {"model": name, "selection": {"all_pass": ap, "unsupported_success_claims": claims, "task_completion": tc, "tool_calls": 50.0, "episodes": 27}}
+    ranked = select_candidates([tbl("base", 15.0, 0, 85.0), tbl("run1", 24.0, 6, 85.0), tbl("run2", 24.0, 1, 80.0)])
+    assert [r["model"] for r in ranked] == ["run2", "run1", "base"]

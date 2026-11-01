@@ -248,7 +248,12 @@ def family_table(rows: list[dict]) -> dict:
     passed = sum(1 for r in rows if r.get("pass"))
     table = {"overall": {"n": n, "passed": passed, "pass_rate": _rate(passed, n)}, "families": dict(sorted(fams.items())),
              "advisory": {"n": len(advisory), "failed": sum(1 for r in advisory if not r.get("pass"))}}
+    by_episode: dict = {}
+    for r in rows:
+        key = r.get("episode_id") or (r.get("scenario_id"), r.get("repeat_seed"))
+        by_episode[key] = by_episode.get(key, True) and bool(r.get("pass"))
     table["selection"] = {
+        "all_pass": _rate(sum(1 for ok in by_episode.values() if ok), len(by_episode)),
         "task_completion": _scorer_rate(table, TASK_COMPLETION) if _has_scorer(table, TASK_COMPLETION) else None,
         "tool_calls": _scorer_rate(table, TOOL_ARGS) if _has_scorer(table, TOOL_ARGS) else None,
         "unsupported_success_claims": sum(1 for r in rows if r.get("scorer") == SUCCESS_CLAIM and not r.get("pass")),
@@ -274,7 +279,7 @@ def format_family_table(table: dict) -> str:
     sel = table.get("selection")
     if sel:
         lines.append("")
-        lines.append(f"selection: task completion {sel['task_completion']} · tool calls {sel['tool_calls']} · "
+        lines.append(f"selection: all-pass {sel.get('all_pass')} · task completion {sel['task_completion']} · tool calls {sel['tool_calls']} · "
                      f"unsupported success claims {sel['unsupported_success_claims']} · episodes {sel['episodes']}"
                      + (f" · advisory failures {table['advisory']['failed']}/{table['advisory']['n']}" if table.get("advisory") else ""))
     return "\n".join(lines)
