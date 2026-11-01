@@ -37,3 +37,11 @@ def test_local_caller_batch_serves_the_caller_pair_and_scores_candidates_with_it
     step = next(s for s in batch["steps"] if s["step"] == "eval")
     assert step["run_id"] == "fake-cand-eval-localcaller" and step["selection"]["episodes"] == 1
     assert "--caller-base-url" in step["runner_args"] and f"127.0.0.1:{port + 3}" in step["runner_args"]
+
+
+def test_candidate_spec_parses_dir_repeats_and_optional_served_name():
+    from train.eval_batch import parse_candidate
+
+    assert parse_candidate("r3-voice-abc:3") == ("r3-voice-abc", 3, "r3-voice-abc")
+    assert parse_candidate("Qwen3-4B-8bit:1:r3-voice-base") == ("Qwen3-4B-8bit", 1, "r3-voice-base")
+    assert parse_candidate("r3-voice-abc") == ("r3-voice-abc", 3, "r3-voice-abc")

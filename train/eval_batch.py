@@ -34,9 +34,18 @@ from train.select import select_candidates
 LOCK_OWNER = "T"
 
 
+def parse_candidate(spec: str) -> tuple[str, int, str]:
+    """`<model dir name>[:<repeats>[:<served name>]]` -> (dir name, repeats, served name)."""
+    parts = spec.split(":")
+    d = parts[0]
+    repeats = int(parts[1]) if len(parts) > 1 and parts[1] else 3
+    name = parts[2] if len(parts) > 2 and parts[2] else d
+    return d, repeats, name
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--candidates", nargs="*", default=[], help="<model id>:<repeats> ... (none = routing and/or base serving only)")
+    ap.add_argument("--candidates", nargs="*", default=[], help="<model dir>[:<repeats>[:<served name>]] ... (none = routing and/or base serving only)")
     ap.add_argument("--routing-data", default=None, help="train the routing adapter first (routing.yaml) on this dataset")
     ap.add_argument("--base-minutes", type=float, default=0.0, help="serve the base on the side ports for E afterwards")
     ap.add_argument("--base-model", default=None, help="base model dir (default $R3_ARTIFACTS/models/Qwen3-4B-8bit)")
@@ -57,8 +66,8 @@ def main(argv=None) -> int:
     batch_id = f"eval-batch-{time.strftime('%Y%m%d-%H%M%S')}"
     out = artifacts / "runs" / batch_id
     out.mkdir(parents=True, exist_ok=True)
-    cands = [(c.split(":")[0], int(c.split(":")[1]) if ":" in c else 3) for c in a.candidates]
-    minutes = a.lock_minutes or (10 + (8 if a.routing_data else 0) + sum(5 + 25 * r for _, r in cands) + int(a.base_minutes))
+    cands = [parse_candidate(c) for c in a.candidates]
+    minutes = a.lock_minutes or (10 + (8 if a.routing_data else 0) + sum(5 + 25 * r for _, r, _ in cands) + int(a.base_minutes))
     record: dict = {"batch_id": batch_id, "candidates": cands, "steps": [], "started_at": time.time()}
 
     def save():
@@ -107,8 +116,8 @@ def main(argv=None) -> int:
             rec = json.loads(rr.read_text()) if rr.exists() else {}
             record["steps"].append({"step": "routing", "rc": rc, "seconds": round(time.time() - t0), "model_id": rec.get("model_id"), "status": rec.get("status")})
             save()
-        for model_id, repeats in cands:
-            model_dir = artifacts / "models" / model_id
+        for dir_name, repeats, model_id in cands:
+            model_dir = artifacts / "models" / dir_name
             run_id = f"{model_id}-eval{suffix}"
             runner_base = (os.environ.get("R3_EVAL_RUNNER") or "/Users/abgup/conductor/workspaces/kar/stockholm/.venv/bin/r3-eval run").split(" --repeats")[0].split(" --caller-base-url")[0]
             os.environ["R3_EVAL_RUNNER_CWD"] = os.environ.get("R3_EVAL_RUNNER_CWD") or "/Users/abgup/conductor/workspaces/kar/stockholm"
@@ -116,7 +125,7 @@ def main(argv=None) -> int:
             if not os.environ.get("R3_EVAL_FORCE_STUB"):
                 os.environ["R3_EVAL_RUNNER"] = runner_base + runner_args  # one template per candidate: repeats differ
             t0 = time.time()
-            step = {"step": "eval", "model_id": model_id, "repeats": repeats, "run_id": run_id, "runner_args": runner_args}
+            step = {"step": "eval", "model_id": model_id, "model_dir": str(model_dir), "repeats": repeats, "run_id": run_id, "runner_args": runner_args}
             try:
                 table = evaluate_model_dir(model_dir, model_name=model_id, run_id=run_id, scenarios=a.scenarios,
                                            out_dir=artifacts / "runs" / run_id / "eval", port=a.port,
@@ -125,7 +134,7 @@ def main(argv=None) -> int:
                 # mirror the table into the training run's directory when there is one
                 for rj in (artifacts / "runs").glob("*/run.json"):
                     rec = _safe(rj)
-                    if rec and rec.get("model_id") == model_id:
+                    if rec and rec.get("model_id") == model_id and rec.get("task") in ("voice", "routing"):
                         (rj.parent / "eval").mkdir(exist_ok=True)
                         (rj.parent / "eval" / "family_table.json").write_text(json.dumps(table, indent=2, default=str) + "\n")
             except Exception as e:  # noqa: BLE001
