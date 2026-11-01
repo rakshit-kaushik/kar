@@ -44,8 +44,8 @@ run uv run python scripts/g1_report.py --like "r3-dep-$BATCH-%" --ledger --run-i
 run uv run python scripts/g1_report.py --like "r3-depint-$BATCH-%" --ledger --run-id "g1-interrupt-$ID" --note "candidate $ID interruption test" | tee "$OUT/interrupt_report.txt"
 run uv run python scripts/cost_report.py --like "r3-dep-$BATCH-%" --ledger --run-id "cost-$ID"
 if [ "$TIMEOUT_CALL" = "1" ]; then
-  step "timeout scenario on $ID: check_availability times out once (demo/scenarios.md #3)"
-  run uv run python scripts/sim_caller.py --calls 1 --lines-file demo/turns/timeout.json --prefix "demo-timeout-dep-$BATCH--fault-check_availability-timeout" --json "$OUT/timeout.json"
+  step "timeout scenario on $ID: book_appointment times out once (demo/scenarios.md #3)"
+  run uv run python scripts/sim_caller.py --calls 1 --lines-file demo/turns/timeout.json --prefix "demo-timeout-dep-$BATCH--fault-book_appointment-timeout" --json "$OUT/timeout.json"
   run uv run python scripts/demo_check.py --like "demo-timeout-dep-$BATCH%" --scenario timeout --ledger --run-id "deploy-$ID" | tee "$OUT/timeout.check.txt"
 fi
 if [ "$HANDOFF_CALL" = "1" ]; then

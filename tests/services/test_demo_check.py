@@ -48,12 +48,31 @@ def test_correction_needs_wednesday_and_no_tuesday():
     assert any("stale" in r for r in reasons)
 
 
-def test_timeout_needs_a_failed_first_check_then_a_successful_retry():
-    evs = [ok_tool("lookup_account", 10), _ev("tool_end", 20, {"name": "check_availability", "ok": False, "error": "timeout"}),
-           said("The system is slow, let me try again.", 25), ok_tool("check_availability", 30), ok_tool("book_appointment", 40), said("I've booked it.", 50)]
+def test_timeout_needs_a_failed_first_booking_attempt_then_a_successful_retry():
+    """The fault sits on book_appointment: run 2 books directly when the caller names the time and never calls check_availability on
+    this path (0 calls in 7 live bookings on Nov 1), so a check_availability fault would never be consumed."""
+    fail = _ev("tool_end", 20, {"name": "book_appointment", "ok": False, "error": "timeout"})
+    evs = [ok_tool("lookup_account", 10), fail, said("The system is slow, let me try again.", 25), ok_tool("book_appointment", 30), said("I've booked it.", 50)]
     assert check_call("timeout", {"completed": [booked("2026-11-03T09:30")], "handoff": None}, evs) == []
-    no_fault = [ok_tool("lookup_account", 10), ok_tool("check_availability", 20), ok_tool("book_appointment", 40)]
+    no_fault = [ok_tool("lookup_account", 10), ok_tool("book_appointment", 40)]
     assert any("fault not injected" in r for r in check_call("timeout", {"completed": [booked("2026-11-03T09:30")], "handoff": None}, no_fault))
+    both_failed = [ok_tool("lookup_account", 10), fail, _ev("tool_end", 30, {"name": "book_appointment", "ok": False, "error": "timeout"})]
+    assert check_call("timeout", {"completed": [], "handoff": {"requested": True, "reason": "tool_failure", "summary": "x"}}, both_failed) == []
+    assert any("no successful retry" in r for r in check_call("timeout", {"completed": [], "handoff": None}, both_failed))
+
+
+def test_handoff_person_needs_the_transfer_the_caller_asked_for_and_nothing_else():
+    evs = [ok_tool("lookup_account", 10), ok_tool("request_handoff", 30), said("Of course. Let me get a colleague to help you.", 40)]
+    good = {"completed": [], "handoff": {"requested": True, "reason": "caller_requested", "summary": "x"}}
+    assert check_call("handoff_person", good, evs) == []
+    assert any("no handoff" in r for r in check_call("handoff_person", {"completed": [], "handoff": None}, evs))
+    assert any("expected caller_requested" in r for r in check_call("handoff_person", {"completed": [], "handoff": {"requested": True, "reason": "out_of_scope"}}, evs))
+    assert any("ticket" in r for r in check_call("handoff_person", {"completed": [ticket(customer=DANA)], "handoff": good["handoff"]}, evs))
+
+
+def test_unfinished_lists_the_calls_whose_state_is_not_final_yet():
+    from services.demo.check import unfinished
+    assert unfinished([("a", None), ("b", "2026-11-01 08:26:20")]) == ["a"]
 
 
 def test_interruption_requires_that_an_interruption_happened():

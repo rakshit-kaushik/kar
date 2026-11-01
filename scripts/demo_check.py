@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 import pathlib
 import sys
 
@@ -14,7 +15,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import psycopg  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
 
-from services.demo.check import SCENARIOS, call_summary, check_call  # noqa: E402
+from services.demo.check import SCENARIOS, call_summary, check_call  # noqa: E402, unfinished
 
 load_dotenv(pathlib.Path(__file__).resolve().parents[1] / ".env")
 
@@ -27,6 +28,14 @@ def main() -> int:
     ap.add_argument("--run-id", default=None)
     args = ap.parse_args()
     with psycopg.connect(os.environ["DATABASE_URL"]) as con:
+        # the final state lands at call end: wait for every matched call to end before scoring (services.demo.check.unfinished)
+        for _ in range(int(os.environ.get("DEMO_CHECK_WAIT_S", "45"))):
+            pending = unfinished(con.execute("select call_id, ended_at from sessions where call_id like %s", (args.like,)).fetchall())
+            if not pending:
+                break
+            time.sleep(1)
+        else:
+            print(f"warning: {len(pending)} call(s) still open after the wait, scored on their opening checkpoint: {', '.join(pending)}")
         calls = con.execute("select call_id, model_id, outcome, state from sessions where call_id like %s order by started_at", (args.like,)).fetchall()
         if not calls:
             print(f"no sessions match {args.like}")

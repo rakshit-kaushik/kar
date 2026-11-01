@@ -8,7 +8,8 @@ from typing import Any
 
 from services.common.claims import unsupported_claims
 
-SCENARIOS = ("ordinary", "correction", "timeout", "interruption", "handoff")
+SCENARIOS = ("ordinary", "correction", "timeout", "interruption", "handoff", "handoff_person")
+TIMEOUT_TOOL = "book_appointment"  # the write the final model actually calls on the booking path (it books directly when the caller names the time)
 DANA, MARCUS = "C-1001", "C-1002"
 DANA_BOOKING = {"customer_id": DANA, "branch_id": "market_st", "service_type": "mortgage_consultation", "slot_start": "2026-11-03T09:30"}
 ID_RE = re.compile(r"\b[CAT]-\d{3,}\b")  # customer, appointment and ticket ids are never spoken
@@ -42,9 +43,9 @@ def check_call(scenario: str, state: dict[str, Any], events) -> list[str]:
 
     if scenario in ("ordinary", "interruption", "timeout"):
         if scenario == "timeout":
-            checks = [e[5] for e in sorted(events, key=lambda e: e[4]) if e[3] == "tool_end" and (e[5] or {}).get("name") == "check_availability"]
+            checks = [e[5] for e in sorted(events, key=lambda e: e[4]) if e[3] == "tool_end" and (e[5] or {}).get("name") == TIMEOUT_TOOL]
             if not checks or checks[0].get("ok"):
-                reasons.append("the first check_availability did not time out (fault not injected)")
+                reasons.append(f"the first {TIMEOUT_TOOL} did not time out (fault not injected)")
             elif not any(c.get("ok") for c in checks[1:]):
                 # both attempts failed: the contract's path is a handoff with no booking
                 if not handoff.get("requested") or bookings:
@@ -89,7 +90,22 @@ def check_call(scenario: str, state: dict[str, Any], events) -> list[str]:
         bad = sorted({m.group(0).lower() for t in texts for m in FALSE_PROMISE_RE.finditer(t)})
         if bad:
             reasons.append("promised what no tool does: " + ", ".join(bad))
+    elif scenario == "handoff_person":  # the caller asks for a person twice: transfer for that reason, nothing written
+        if not handoff.get("requested"):
+            reasons.append("no handoff requested")
+        elif handoff.get("reason") != "caller_requested":
+            reasons.append(f"handoff reason {handoff.get('reason')!r}, expected caller_requested")
+        if tickets:
+            reasons.append("a ticket was created")
+        if bookings:
+            reasons.append("an appointment was booked")
     return reasons
+
+
+def unfinished(rows) -> list[str]:
+    """call ids whose session has no ended_at yet: the agent writes the final state once, at call end, so a checker that reads
+    earlier scores the opening checkpoint (Nov 1 08:26: "0 bookings" for a booked call, read 3 s before the state landed)."""
+    return [r[0] for r in rows if r[1] is None]
 
 
 def call_summary(events) -> dict[str, Any]:

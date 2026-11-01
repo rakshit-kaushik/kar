@@ -10,7 +10,7 @@ set -uo pipefail
 export SIM_TTS="${SIM_TTS:-deepgram}"   # one caller voice across all five scenarios while Cartesia is out of credits (cached per voice)
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; set -a; . ./.env; set +a
 ART="${R3_ARTIFACTS:-$HOME/r3-artifacts}"; RUNS="${RUNS:-5}"; INT_TURN="${INT_TURN:-5}"
-SCENARIOS="${SCENARIOS:-ordinary correction timeout interruption handoff}"
+SCENARIOS="${SCENARIOS:-ordinary correction timeout interruption handoff handoff_person}"
 ID="$(curl -s -m 5 http://127.0.0.1:8000/v1/models | uv run python -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])" 2>/dev/null || echo unknown)"
 STAMP="$(date +%m%d-%H%M)"; RUN="rehearsal-$ID-$STAMP"; OUT="$ART/runs/$RUN"; mkdir -p "$OUT/audio"; LOG="$OUT/block.log"
 N_SC=$(echo $SCENARIOS | wc -w | tr -d ' '); MINUTES=$(( RUNS * N_SC * 2 + 8 ))   # ~1.5-2 min per call + reports
@@ -23,7 +23,7 @@ run uv run python scripts/probe_dispatch.py --timeout 40
 for SC in $SCENARIOS; do
   PREFIX="demo-$SC-$STAMP"; EXTRA=""
   case "$SC" in
-    timeout) PREFIX="$PREFIX--fault-check_availability-timeout";;          # the first check_availability times out (services/agent/faults.py)
+    timeout) PREFIX="$PREFIX--fault-book_appointment-timeout";;          # the first book_appointment times out (services/agent/faults.py; the final model books directly)
     interruption) EXTRA="--interrupt-turn $INT_TURN --interrupt-after-ms 2500";;
   esac
   step "$SC x$RUNS (rooms $PREFIX-*)"
