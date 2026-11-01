@@ -36,6 +36,11 @@ def call_usage(events: list[tuple]) -> dict:
     return {"duration_min": duration_min, "stt_audio_min": stt_audio_min, "agent_chars": chars, "tokens": {k: dict(v) for k, v in tokens.items()}, "success": bool(success), "outcome": outcome}
 
 
+def local_llm_seconds(prompt_tokens: float, completion_tokens: float, rates: dict) -> float:
+    """GPU seconds a local text run needed, from measured single-stream prefill and decode rates (text evals log tokens, not wall time)."""
+    return prompt_tokens / rates["mac.prefill_tok_s"] + completion_tokens / rates["mac.decode_tok_s"]
+
+
 def mac_hourly_usd(rates: dict, workday: bool = False) -> float:
     hours = rates["mac.workday_amortization_hours"] if workday else rates["mac.amortization_hours"]
     return rates["mac.purchase_usd"] / hours + rates["mac.power_kw"] * rates["electricity_usd_per_kwh"]
