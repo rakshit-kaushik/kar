@@ -35,7 +35,7 @@ from psycopg.types.json import Jsonb
 from services.agent.state import CallState
 from services.agent.faults import faults_from_room_name
 from services.agent.filler import FillerPolicy, filler_text
-from services.agent.claimguard import ClaimGuard, claim_guarded_stream, handoff_reason
+from services.agent.claimguard import ClaimGuard, claim_guarded_stream, handoff_reason, state_view
 from services.agent.loopguard import LoopGuard, guarded_stream
 from services.agent.tts import make_tts, tts_vendor
 from services.common.events import PostgresSink
@@ -178,7 +178,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     async def on_claim(text: str) -> None:
         """The model announced a transfer with no request_handoff in the call: record the handoff first, then let it speak."""
-        reason = handoff_reason(state.to_dict())
+        reason = handoff_reason(state_view(state))
         await emit("claim_guard", {"claimed": text[:200], "reason": reason})
         await executor.execute("request_handoff", {"reason": reason, "summary": f"agent announced a transfer without calling request_handoff: {text[:120]}"})
 

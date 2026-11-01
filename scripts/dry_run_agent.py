@@ -77,8 +77,14 @@ async def episode(args, idx: int, quiet: bool, turns: list[str] | None = None, c
             if action == "handoff":
                 await executor.execute("request_handoff", {"reason": "out_of_scope", "summary": f"agent repeated itself: {repeated[:120]}"})
 
+        async def on_claim(text: str) -> None:
+            reason = agent_main.handoff_reason(agent_main.state_view(state))
+            out["agent_events"].append(("claim_guard", {"claimed": text[:200], "reason": reason}))
+            await executor.execute("request_handoff", {"reason": reason, "summary": f"agent announced a transfer without calling request_handoff: {text[:120]}"})
+
         session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, parallel_tool_calls=False, **llm_kwargs), userdata=data)
-        agent = agent_main.R3Agent(instructions=agent_main.SYSTEM_PROMPT, tools=agent_main.TOOLS, on_first_audible=lambda p: None, guard=data.guard, on_loop=on_loop)
+        agent = agent_main.R3Agent(instructions=agent_main.SYSTEM_PROMPT, tools=agent_main.TOOLS, on_first_audible=lambda p: None, guard=data.guard, on_loop=on_loop,
+                                   claim_guard=data.claim_guard, handoff_done=lambda: bool(state.handoff), on_claim=on_claim)
     else:
         session = AgentSession(llm=lk_openai.LLM(model=args.model, client=client, parallel_tool_calls=False, **llm_kwargs), userdata=Data(executor))
         agent = Agent(instructions=SYSTEM_PROMPT, tools=build_livekit_tools(lambda ctx: ctx.userdata.executor))
@@ -133,7 +139,7 @@ async def main() -> int:
     ap.add_argument("--repeats", type=int, default=1)
     ap.add_argument("--temperature", type=float, default=None, help="omit to use the server default (0.2 locally); the hosted endpoint rejects it")
     ap.add_argument("--quiet", action="store_true")
-    ap.add_argument("--real-agent", action="store_true", help="use the production agent wiring (R3Agent: loop guard, filler hook, CallData) and report its events")
+    ap.add_argument("--real-agent", action="store_true", help="use the production agent wiring (R3Agent: loop guard, claim guard, filler hook, CallData) and report its events")
     args = ap.parse_args()
 
     eps = [await episode(args, i, args.quiet) for i in range(args.repeats)]
@@ -147,7 +153,7 @@ async def main() -> int:
     if args.real_agent:
         from collections import Counter
         c = Counter(ev for e in eps for ev, _ in e["agent_events"])
-        print(f"agent events: filler_start={c.get('filler_start', 0)}  loop_guard={c.get('loop_guard', 0)}  " + " ".join(f"{k}={v}" for k, v in c.items() if k not in ("filler_start", "loop_guard")))
+        print(f"agent events: filler_start={c.get('filler_start', 0)}  loop_guard={c.get('loop_guard', 0)}  claim_guard={c.get('claim_guard', 0)}  " + " ".join(f"{k}={v}" for k, v in c.items() if k not in ("filler_start", "loop_guard")))
         for e in eps:
             for ev, payload in e["agent_events"]:
                 if ev == "loop_guard":

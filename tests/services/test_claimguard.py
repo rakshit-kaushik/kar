@@ -1,6 +1,6 @@
 """Claim guard (reviewer, from the run-1 failure labels): the model says "I'm transferring you" without calling request_handoff
 in 5 of 81 episodes; the agent records the handoff through the executor before the sentence completes and logs claim_guard."""
-from services.agent.claimguard import ClaimGuard, claim_guarded_stream, handoff_reason, transfer_claimed
+from services.agent.claimguard import ClaimGuard, claim_guarded_stream, handoff_reason, state_view, transfer_claimed
 
 
 class Delta:
@@ -44,8 +44,8 @@ async def test_stream_records_the_handoff_before_the_completing_chunk_and_only_o
         order.append(("chunk", c))
         out.append(c)
     assert out == chunks
-    assert order[0] == ("chunk", chunks[0]) and order[1] == ("claim", "I've opened your ticket and I'm transferring") and order[2] == ("chunk", chunks[1])
-    assert sum(1 for kind, _ in order if kind == "claim") == 1
+    # "transferring you" completes on the third chunk: the handoff is recorded before that chunk is yielded, never before
+    assert order == [("chunk", chunks[0]), ("chunk", chunks[1]), ("claim", "I've opened your ticket and I'm transferring you to a specialist."), ("chunk", chunks[2])]
 
 
 async def test_stream_leaves_a_turn_alone_when_the_handoff_already_exists_or_when_disabled():
@@ -65,3 +65,11 @@ def test_env_switch(monkeypatch):
     assert ClaimGuard.from_env().enabled is False
     monkeypatch.delenv("AGENT_CLAIM_GUARD")
     assert ClaimGuard.from_env().enabled is True
+
+
+def test_state_view_carries_the_verification_failure_count_without_widening_the_schema():
+    from services.agent.state import CallState
+    s = CallState(call_id="c", model_id="m")
+    s.verification_failures = 2
+    assert "verification_failures" not in s.to_dict()
+    assert state_view(s)["verification_failures"] == 2 and handoff_reason(state_view(s)) == "verification_failed"

@@ -57,3 +57,11 @@ def test_loop_guard_interventions_counts_the_agent_events():
            _ev("c", "loop_guard", 3, {"action": "handoff", "repeats": 2})]
     assert g1_report.loop_guard_interventions(evs) == 2
     assert g1_report.loop_guard_interventions([]) == 0
+
+
+
+def test_claim_guard_interventions_counts_the_agent_events_apart_from_the_loop_guard():
+    evs = [_ev("c", "claim_guard", 1, {"claimed": "I'm transferring you", "reason": "suspected_fraud"}), _ev("c", "loop_guard", 2, {"action": "rephrase", "repeats": 1})]
+    assert g1_report.claim_guard_interventions(evs) == 1
+    assert g1_report.loop_guard_interventions(evs) == 1
+    assert g1_report.claim_guard_interventions([]) == 0

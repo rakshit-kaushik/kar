@@ -26,6 +26,12 @@ def transfer_claimed(text: str) -> bool:
     return TRANSFER_RE.search(normalize(text)) is not None
 
 
+def state_view(state: Any) -> dict[str, Any]:
+    """What the guard reads: the contract's session state plus the verification-failure count, which the state schema does not
+    carry (CallState.to_dict is the schema; lane S does not widen it)."""
+    return {**state.to_dict(), "verification_failures": getattr(state, "verification_failures", 0)}
+
+
 def handoff_reason(state: dict[str, Any]) -> str:
     """The contract's handoff reason that fits the call so far (schemas/tools/request_handoff.json)."""
     for c in state.get("completed") or []:
