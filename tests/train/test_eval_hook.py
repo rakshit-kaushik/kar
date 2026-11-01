@@ -382,3 +382,15 @@ def test_paired_gate_compares_only_episodes_both_runs_scored_with_the_same_exclu
     assert main(["--paired-gate", str(fd), str(ad)]) == 0
     res = json.loads((fd / "precision_gate.json").read_text())
     assert res["paired"] and res["episodes_paired"] == 3 and res["pass"] is True
+
+
+def test_from_scores_cli_still_builds_a_table_after_the_paired_gate_subcommand_was_added(tmp_path):
+    """09:40: the --paired-gate block had swallowed --from-scores' parse, so the rebuild fell through to the
+    full parser and died with 'the following arguments are required: --model-dir'."""
+    from train.eval_hook import main
+
+    rows = [{"run_id": "r", "model_id": "m", "scenario_id": "ordinary_01", "episode_id": "ordinary_01-s0-abc", "repeat_seed": 0, "family": "ordinary",
+             "scorer": sc, "pass": True, "advisory": False, "detail": {}} for sc in ("final_state", "tool_calls")]
+    (tmp_path / "scores.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    assert main(["--from-scores", str(tmp_path), "--model-name", "m", "--run-id", "r"]) == 0
+    assert json.loads((tmp_path / "family_table.json").read_text())["selection"]["episodes"] == 1

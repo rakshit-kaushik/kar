@@ -547,7 +547,11 @@ def main(argv=None) -> int:
         sub.add_argument("--model-name", default=None)
         sub.add_argument("--run-id", default=None)
         sub.add_argument("--exclude-from", type=Path, default=None, help="E's compare-excl-caller-faults.md")
-    if argv and argv[0] == "--paired-gate":
+        a = sub.parse_args(argv)
+        t = table_from_scores(a.from_scores, a.model_name, a.run_id, exclude_file=a.exclude_from)
+        print(format_family_table(t))
+        return 0
+    if argv[:1] == ["--paired-gate"]:  # precision gate paired on scenario x seed: --paired-gate <fused eval dir> <adapter eval dir>
         sub = argparse.ArgumentParser(description="precision gate paired on scenario x seed: --paired-gate <fused eval dir> <adapter eval dir>")
         sub.add_argument("--paired-gate", nargs=2, type=Path, required=True, metavar=("FUSED_DIR", "ADAPTER_DIR"))
         sub.add_argument("--exclude-from", type=Path, default=None, help="E's compare-excl-caller-faults.md")
@@ -568,10 +572,6 @@ def main(argv=None) -> int:
               f"vs adapter {res['adapter']['all_pass']} / {res['adapter']['final_state']}; claims {res['fused']['unsupported_success_claims']} vs "
               f"{res['adapter']['unsupported_success_claims']}; delta {res['delta_points']:+.2f} points ({res['delta_episodes']:+d} episodes): "
               f"{'PASS' if res['pass'] else 'FAIL'} -> {out}")
-        return 0
-        a = sub.parse_args(argv)
-        t = table_from_scores(a.from_scores, a.model_name, a.run_id, exclude_file=a.exclude_from)
-        print(format_family_table(t))
         return 0
     ap.add_argument("--model-dir", required=True, type=Path, help="versioned fused model dir ($R3_ARTIFACTS/models/<id>)")
     ap.add_argument("--model-name", default=None, help="served model id (default: the dir name)")
