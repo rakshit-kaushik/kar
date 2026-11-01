@@ -134,7 +134,7 @@ def main() -> None:
     if args.ledger:
         note = args.note or f"{kind} matching {args.like}"
         items = [("calls", len(per_call), "calls"), ("lookups_ok", ok_calls, "calls"), ("structural_leak_calls", leak_calls, "calls"), ("fallbacks", fb_total, "requests")]
-        for name in ("eos_to_first_audio_heard", "eos_to_tts_audible", "transport", "turn_taking_overhead", "llm_ttft_local", "llm_ttft_hosted", "decode_tok_s", "tts_ttfb", "prompt_tokens", "completion_tokens", "agent_dispatch"):
+        for name in ("eos_to_first_audio_heard", "eos_to_tts_audible", "transport", "turn_taking_overhead", "eou_delay", "transcription_delay", "llm_ttft_local", "llm_ttft_hosted", "decode_tok_s", "tts_ttfb", "prompt_tokens", "completion_tokens", "agent_dispatch"):
             xs = M.get(name) or []
             unit = "tok/s" if name == "decode_tok_s" else ("tok" if "tokens" in name else "ms")
             if xs:
