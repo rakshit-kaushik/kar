@@ -27,6 +27,7 @@ import argparse
 import datetime as dt
 import importlib.util
 import json
+import re
 import os
 import shlex
 import signal
@@ -429,13 +430,18 @@ def serve_side_stack(model_dir: str | Path, model_name: str, port: int, out_dir:
 
 
 def excluded_episode_prefixes(compare_file: str | Path) -> list[str]:
-    """The `<scenario>-s<seed>` ids E's compare-excl-caller-faults.md lists on its first line (episodes in
-    which the simulated caller mis-stated its own credentials); rows whose episode_id starts with one are
-    dropped from every candidate alike."""
-    first = Path(compare_file).read_text().splitlines()[0] if Path(compare_file).exists() else ""
-    if ":" not in first:
+    """The `<scenario>-s<seed>` ids E's compare --exclude-caller-faults output lists on its "Excluded N scenario x seed
+    episode(s) ...: a, b, c" line (episodes in which the simulated caller mis-stated its own credentials); rows whose
+    episode_id starts with one are dropped from every candidate alike. The line is found anywhere in the file (E's
+    final-compare files carry a title above it); only tokens shaped like an episode prefix count."""
+    if not Path(compare_file).exists():
         return []
-    return [tok.strip().rstrip(".") for tok in first.split(":", 1)[1].split(",") if tok.strip()]
+    lines = Path(compare_file).read_text().splitlines()
+    line = next((ln for ln in lines if ln.lstrip("#* ").startswith("Excluded ") and ":" in ln), lines[0] if lines and ":" in lines[0] else "")
+    if not line:
+        return []
+    toks = [tok.strip().rstrip(".").strip("`*") for tok in line.split(":", 1)[1].split(",")]
+    return [t for t in toks if re.fullmatch(r"[A-Za-z0-9_]+-s\d+", t)]
 
 
 def table_from_scores(run_dir: str | Path, model_name: str | None = None, run_id: str | None = None,

@@ -317,3 +317,20 @@ def test_selection_has_all_pass_per_episode_and_g4_ordering():
         return {"model": name, "selection": {"all_pass": ap, "unsupported_success_claims": claims, "task_completion": tc, "tool_calls": 50.0, "episodes": 27}}
     ranked = select_candidates([tbl("base", 15.0, 0, 85.0), tbl("run1", 24.0, 6, 85.0), tbl("run2", 24.0, 1, 80.0)])
     assert [r["model"] for r in ranked] == ["run2", "run1", "base"]
+
+
+def test_excluded_prefixes_are_read_from_the_excluded_line_anywhere_in_the_file(tmp_path):
+    from train.eval_hook import excluded_episode_prefixes
+
+    f = tmp_path / "final-compare-excl-caller-faults.md"
+    f.write_text("# Final comparison: hosted baseline, base rerun, run 1 rerun, run 2\n\n"
+                 "Excluded 3 scenario x seed episode(s) in which the simulated caller mis-stated its own phone or date of birth "
+                 "in at least one run: ambiguous_branch_01-s0, duplicate_03-s2, tool_timeout_02-s1.\n\n| family | a | b |\n")
+    assert excluded_episode_prefixes(f) == ["ambiguous_branch_01-s0", "duplicate_03-s2", "tool_timeout_02-s1"]
+    g = tmp_path / "none.md"  # E's format when nothing is excluded: the list reads "none"
+    g.write_text("Excluded 0 scenario x seed episode(s) in which the simulated caller mis-stated its own phone or date of birth "
+                 "in at least one run: none\n| family |\n")
+    assert excluded_episode_prefixes(g) == []
+    h = tmp_path / "plain.md"
+    h.write_text("Excluded 1 scenario x seed episode(s) ...: ordinary_02-s1\n")
+    assert excluded_episode_prefixes(h) == ["ordinary_02-s1"]
