@@ -79,6 +79,12 @@ class LoopGuard:
         return cls(enabled=os.environ.get("AGENT_LOOP_GUARD", "1") != "0", handoff_after=int(os.environ.get("AGENT_LOOP_GUARD_HANDOFF_AFTER", "3")))
 
 
+def loop_guarded(source: AsyncIterable[Any], guard: "LoopGuard", on_loop: Callable[[str, str], Any], handoff_done: Callable[[], bool] = lambda: False):
+    """The loop guard applies only while no handoff exists: once the transfer is recorded the call is ending, and a repeated
+    "I'm transferring you now" serves the caller better than "could you tell me again what you'd like?" (Nov 1 08:37)."""
+    return source if handoff_done() else guarded_stream(source, guard, on_loop)
+
+
 def _text_of(chunk: Any) -> str | None:
     if isinstance(chunk, str):
         return chunk

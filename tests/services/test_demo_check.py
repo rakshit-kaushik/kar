@@ -58,6 +58,10 @@ def test_timeout_needs_a_failed_first_booking_attempt_then_a_successful_retry():
     assert any("fault not injected" in r for r in check_call("timeout", {"completed": [booked("2026-11-03T09:30")], "handoff": None}, no_fault))
     both_failed = [ok_tool("lookup_account", 10), fail, _ev("tool_end", 30, {"name": "book_appointment", "ok": False, "error": "timeout"})]
     assert check_call("timeout", {"completed": [], "handoff": {"requested": True, "reason": "tool_failure", "summary": "x"}}, both_failed) == []
+    # one failed attempt and no retry is not recovery, even when the call ends in a handoff (Nov 1 08:36: the model asked "shall I try
+    # again?", the script said goodbye, and the claim guard turned the model's transfer line into the handoff)
+    no_retry = [ok_tool("lookup_account", 10), fail, ok_tool("request_handoff", 40)]
+    assert check_call("timeout", {"completed": [], "handoff": {"requested": True, "reason": "out_of_scope", "summary": "x"}}, no_retry) == ["no retry of book_appointment after the timeout"]
     assert any("no successful retry" in r for r in check_call("timeout", {"completed": [], "handoff": None}, both_failed))
 
 

@@ -1,6 +1,6 @@
 """Loop guard (E's finding: 6 of 81 run-1 episodes repeat a line 3+ times; seen live in 2 of 4 calls): a reply is held only
 while it is still identical to the previous assistant line; an exact repeat is swallowed and rephrased, a second one hands off."""
-from services.agent.loopguard import HANDOFF_LINE, REPHRASE, LoopGuard, TurnFilter, guarded_stream, normalize
+from services.agent.loopguard import HANDOFF_LINE, REPHRASE, LoopGuard, TurnFilter, guarded_stream, loop_guarded, normalize
 
 PREV = "Which day would you like the mortgage consultation?"
 
@@ -168,3 +168,14 @@ async def test_an_interrupted_line_does_not_count_as_heard():
     guard.begin_turn(last_spoken="Thanks.", interrupted=True)  # the caller talked on after the first word
     assert await collect(guarded_stream(agen(line), guard, no_loop)) == line
     assert guard.repeats == 0
+
+
+async def test_the_loop_guard_stands_down_once_a_handoff_is_recorded():
+    """After request_handoff the call is ending; a repeated "I'm transferring you now" is better than "could you tell me again what
+    you'd like?" (Nov 1 08:37, handoff_person call: the caller said goodbye, the model repeated the transfer line, the guard asked)."""
+    guard = LoopGuard()
+    line = [Chunk("I'm transferring you to a person now, Dana.")]
+    guard.begin_turn(last_spoken="You're verified. How can I help?")
+    assert await collect(loop_guarded(agen(line), guard, no_loop, handoff_done=lambda: False)) == line
+    guard.begin_turn(last_spoken="I'm transferring you to a person now, Dana.")
+    assert await collect(loop_guarded(agen(line), guard, no_loop, handoff_done=lambda: True)) == line  # repeated, but the handoff exists

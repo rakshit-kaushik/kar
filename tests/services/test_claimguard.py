@@ -31,6 +31,16 @@ def test_handoff_reason_from_the_call_state():
     assert handoff_reason(fraud) == "suspected_fraud"
     assert handoff_reason({"completed": [], "verification_failures": 2, "verified": {"customer_id": None}}) == "verification_failed"
     assert handoff_reason({"completed": [], "verification_failures": 0, "verified": {"customer_id": "C-1001"}}) == "out_of_scope"
+    # a failed write earlier in the call (timeout, conflict) makes the transfer a tool_failure handoff (Nov 1 08:36: the agent recorded
+    # out_of_scope after a book_appointment timeout)
+    assert handoff_reason({"completed": [], "verification_failures": 0, "verified": {"customer_id": "C-1001"}, "business_errors": 1}) == "tool_failure"
+
+
+def test_state_view_carries_the_business_error_count():
+    from services.agent.state import CallState
+    s = CallState(call_id="c", model_id="m")
+    s.business_errors = 1
+    assert "business_errors" not in s.to_dict() and state_view(s)["business_errors"] == 1
 
 
 async def test_stream_records_the_handoff_before_the_completing_chunk_and_only_once():

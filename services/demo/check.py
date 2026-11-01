@@ -46,6 +46,9 @@ def check_call(scenario: str, state: dict[str, Any], events) -> list[str]:
             checks = [e[5] for e in sorted(events, key=lambda e: e[4]) if e[3] == "tool_end" and (e[5] or {}).get("name") == TIMEOUT_TOOL]
             if not checks or checks[0].get("ok"):
                 reasons.append(f"the first {TIMEOUT_TOOL} did not time out (fault not injected)")
+            elif len(checks) < 2:  # one failed attempt and no retry is not recovery, whatever the call ended in
+                reasons.append(f"no retry of {TIMEOUT_TOOL} after the timeout")
+                return reasons
             elif not any(c.get("ok") for c in checks[1:]):
                 # both attempts failed: the contract's path is a handoff with no booking
                 if not handoff.get("requested") or bookings:

@@ -36,7 +36,7 @@ from services.agent.state import CallState
 from services.agent.faults import faults_from_room_name
 from services.agent.filler import FillerPolicy, filler_text
 from services.agent.claimguard import ClaimGuard, claim_guarded_stream, handoff_reason, state_view
-from services.agent.loopguard import LoopGuard, guarded_stream
+from services.agent.loopguard import LoopGuard, loop_guarded
 from services.agent.tts import make_tts, tts_vendor
 from services.common.events import PostgresSink
 from services.tools.executor import ToolExecutor
@@ -79,7 +79,7 @@ class R3Agent(Agent):
         self._guard.begin_turn(getattr(last, "text_content", None) if last is not None else None, interrupted=bool(getattr(last, "interrupted", False)))
         source = claim_guarded_stream(Agent.default.llm_node(self, chat_ctx, tools, model_settings), self._claim_guard, self._handoff_done, self._on_claim,
                                       completed_tools=self._completed_tools, on_action_claim=self._on_action_claim)
-        async for chunk in guarded_stream(source, self._guard, self._on_loop):
+        async for chunk in loop_guarded(source, self._guard, self._on_loop, self._handoff_done):
             yield chunk
 
     async def tts_node(self, text, model_settings):
