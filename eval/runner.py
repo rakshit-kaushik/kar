@@ -424,6 +424,57 @@ def rescore_dir(directory: str | Path, scenarios_dir: str | Path | None = None, 
     return len(results)
 
 
+# ----- compare -------------------------------------------------------------------------------
+
+
+def compare_runs(run_dirs: list[str | Path]) -> str:
+    """Side-by-side all-pass rates per family for several run directories (reads scores.jsonl)."""
+    runs: list[tuple[str, dict[str, dict]]] = []  # (label, episode_id -> {"family", "fails": set})
+    for d in run_dirs:
+        d = Path(d)
+        episodes: dict[str, dict] = {}
+        label = d.name
+        for line in (d / "scores.jsonl").read_text().splitlines():
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            label = r.get("model_id") or label
+            e = episodes.setdefault(
+                r["episode_id"], {"family": r["family"], "fails": set(), "advisory_fails": set()}
+            )
+            if not r["pass"]:
+                (e["advisory_fails"] if r.get("advisory") else e["fails"]).add(r["scorer"])
+        runs.append((label, episodes))
+    families = sorted({e["family"] for _, eps in runs for e in eps.values()})
+    lines = [
+        "| family | " + " | ".join(label for label, _ in runs) + " |",
+        "|---|" + "---|" * len(runs),
+    ]
+
+    def rate(eps: dict, fam: str | None) -> str:
+        sel = [e for e in eps.values() if fam is None or e["family"] == fam]
+        return _pct(sum(1 for e in sel if not e["fails"]), len(sel))
+
+    for fam in families:
+        lines.append(f"| {fam} | " + " | ".join(rate(eps, fam) for _, eps in runs) + " |")
+    lines.append("| all | " + " | ".join(rate(eps, None) for _, eps in runs) + " |")
+    lines += [
+        "",
+        "## Failures by scorer (episodes failing, non-advisory; advisory in brackets)",
+        "",
+        "| scorer | " + " | ".join(label for label, _ in runs) + " |",
+        "|---|" + "---|" * len(runs),
+    ]
+    for scorer in WEIGHTS:
+        cells = []
+        for _, eps in runs:
+            n = sum(1 for e in eps.values() if scorer in e["fails"])
+            adv = sum(1 for e in eps.values() if scorer in e["advisory_fails"])
+            cells.append(f"[{adv}]" if scorer in ADVISORY else str(n))
+        lines.append(f"| {scorer} | " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
 # ----- CLI -----------------------------------------------------------------------------------
 
 
@@ -476,6 +527,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--db", action="store_true", help="replace the run's eval_results rows in Postgres"
     )
     rs.add_argument("--database-url", default=None)
+    c = sub.add_parser(
+        "compare", help="side-by-side all-pass rates per family for several run directories"
+    )
+    c.add_argument("runs", nargs="+")
     return p
 
 
@@ -576,6 +631,9 @@ def main(argv: list[str] | None = None) -> int:
     a = build_parser().parse_args(argv)
     if a.command == "validate":
         return _cmd_validate(a)
+    if a.command == "compare":
+        print(compare_runs(a.runs))
+        return 0
     if a.command == "rescore":
         if a.db:
             import psycopg

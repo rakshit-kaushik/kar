@@ -304,3 +304,42 @@ async def test_rescore_with_db_replaces_the_runs_eval_results(tmp_path, rollback
     assert rollback_conn.execute(
         "select count(*) from eval_results where run_id='r-rescore'"
     ).fetchone()[0] == 2 * len(WEIGHTS)
+
+
+def test_compare_runs_side_by_side(tmp_path):
+    from eval.runner import compare_runs
+
+    def write_run(name, fails_by_scenario):
+        d = tmp_path / name
+        (d / "episodes").mkdir(parents=True)
+        rows = []
+        for sid, fam, fails in fails_by_scenario:
+            for seed in range(2):
+                for scorer in WEIGHTS:
+                    rows.append(
+                        {
+                            "run_id": name,
+                            "model_id": name,
+                            "scenario_id": sid,
+                            "episode_id": f"{sid}-s{seed}",
+                            "repeat_seed": seed,
+                            "family": fam,
+                            "scorer": scorer,
+                            "pass": scorer not in fails,
+                            "advisory": scorer in ADVISORY,
+                            "turn_idx": None,
+                            "detail": {},
+                        }
+                    )
+        (d / "scores.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+        return d
+
+    a = write_run("hosted", [("o1", "ordinary", set()), ("c1", "correction", set())])
+    b = write_run("base", [("o1", "ordinary", {"no_jargon"}), ("c1", "correction", {"brevity"})])
+    md = compare_runs([a, b])
+    assert "| family | hosted | base |" in md
+    assert "| ordinary | 100% | 0% |" in md and "| correction | 100% | 100% |" in md
+    assert "| all | 100% | 50% |" in md
+    assert "no_jargon" in md.split("## Failures by scorer")[1]
+    p = build_parser().parse_args(["compare", str(a), str(b)])
+    assert p.command == "compare" and p.runs == [str(a), str(b)]
