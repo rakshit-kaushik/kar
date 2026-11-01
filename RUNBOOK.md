@@ -75,7 +75,54 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Fallback on the fly: `scripts/gpu_flip.sh hosted`.
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
 
+### Nov 1 10:14: INCIDENT. From 08:02 to 10:52 the live server served run 1's weights under run 2's name
+Found at 10:14 while checking why the "final model" re-asked the weekday in 5 of 5 calls: `ps` showed :8000 running
+`vllm_mlx_serve.py serve .../models/r3-voice-206506525c --served-model-name r3-voice-730f8ba68e`, and the 08:02 deploy block log has
+the same line: "[2/5] model server :8000 (/Users/abgup/r3-artifacts/models/r3-voice-206506525c as r3-voice-730f8ba68e)".
+
+Cause: deploy_model.sh hands restart.sh the model directory as an environment override (`MODEL_DIR=... scripts/restart.sh`), and
+restart.sh re-sourced .env, preserving only the LLM_MODEL, LOCAL_LLM_MODEL and LLM_BASE_URL overrides. At 04:22 .env had no
+MODEL_DIR line, so the override survived and run 1 was deployed correctly; deploy_model.sh then wrote `MODEL_DIR=<run 1 dir>` into
+.env. At 08:02 sourcing .env clobbered the override: the served name became run 2, the weights stayed run 1, and deploy_model.sh then
+rewrote .env to run 2, so every later check that read .env or /v1/models agreed with the wrong label. This was the night's second
+served-name mismatch (07:11, below, was the first: that one changed the name, so the proxy's name warning fired; this one changed only
+the weights, so nothing fired). The deploy block's own "[2/5]" line showed the truth and nothing compared it with the target.
+
+Measured on run 1's weights while labelled r3-voice-730f8ba68e: the 08:02 deploy block, the 08:23 and 08:35 verification calls, the
+08:40 rehearsal (16/30), the 09:19 re-runs (timeout 5/5 with the retry, fraud 5/5 with the rule), the 09:45 interruption re-run and the
+09:59 block. The live behaviour fitted run 1's text profile (19 of 48 re-asks, 8 claims), not run 2's (0 and 0), which is how it was
+caught. Those rows are real data about the rollback model. Their latency numbers describe the pipeline with a same-size adapter on the
+same server; their task numbers say nothing about run 2.
+
+Not affected: the text eval. E and T confirmed from each eval run's server.log, whose first line is the serve command, that every row
+was served by a per-checkpoint process started from an explicit directory, never :8000: run 2 = `vllm-mlx serve
+.../models/r3-voice-730f8ba68e` on :8010 behind its own proxy on :8011; run 1 = `.../r3-voice-206506525c`; base = `.../Qwen3-4B-8bit`;
+the gate's unfused row = `mlx_lm.server --model .../Qwen3-4B-8bit --adapter-path .../r3-voice-730f8ba68e/adapter`; the episodes'
+served_models field matches each. T's 09:35 serving-path note stands: `mlx_lm.server --model .../models/r3-voice-730f8ba68e` and T's own
+vllm-mlx instance, both from the explicit directory. The G4 pick of run 2 therefore stands on the text eval.
+
+Fix: 3411c32 (restart.sh keeps the MODEL_DIR override; regression test tests/scripts/test_restart_overrides.py reproduces the 08:02
+result on the old script) and 30fca32 (scripts/serving_proof.py: the listener's model directory from ps, what /v1/models answers, and a
+behavioural fingerprint, one scripted booking turn decoded greedily; deploy_model.sh fails and leaves .env and the state files unchanged
+on a path or name mismatch; deploy_block.sh stops; rehearsal.sh runs the proof at the start and the end of every block and stops on a
+mismatch). Proof lines, before and after:
+
+    10:46 (incident-1101-0802-served-run1)  path .../r3-voice-206506525c, expected .../r3-voice-730f8ba68e: MISMATCH
+                                            /v1/models -> r3-voice-730f8ba68e;  fingerprint: "Which day would you like the consultation?"
+    10:52 (deploy-r3-voice-730f8ba68e-1101-1052)  path .../r3-voice-730f8ba68e: MATCH;  /v1/models -> r3-voice-730f8ba68e
+                                            fingerprint: check_availability(branch market_st, mortgage_consultation, 2026-11-03)
+
+Data, relabelled, never deleted: first the 30 proxy turn events that a shared-connection bug had dropped ("another command is already
+in progress"; fixed in 30fca32 with a lock) were backfilled from the saved proxy.log with payload backfilled_from_log; then the 09:59
+block was renamed -rules (its adaptive caller never fired, cb03aae); then 107 sessions, 13,165 turn events and 901 ledger rows in 23
+run ids from 08:02:50 to 10:52:34 were relabelled: model_id r3-voice-206506525c, run ids with `206506525c-mislabelled`, a note on
+every ledger row; the deploy action row keeps its requested id with a note, and the incident's proof rows stay as recorded. Seven run
+folders were renamed the same way, each with a WEIGHTS-NOTE.txt. Evidence (server, proxy and agent logs, ps, /v1/models) is in
+$R3_ARTIFACTS/runs/incident-1101-0802-served-run1. The write-up's first section, "What was measured on which weights", carries the
+window and a table of every serving proof. The rehearsal was then run again on the real run 2: next section.
+
 ### Nov 1 08:02-08:30: deploy block on run 2, a loop-guard bug, and the claim guard widened
+**Correction (10:14): the calls in this section ran on run 1's weights served under run 2's name; see the incident above. Run ids now carry `206506525c-mislabelled`.**
 The deploy block on r3-voice-730f8ba68e (08:02-08:10, ~/r3-artifacts/runs/deploy-r3-voice-730f8ba68e-1101-0802) served the final
 model under its own name, confirmed the trie hit (1 new token prefilled on turn 2) and completed 3 of 3 ordinary bookings, but
 both scenario checks FAILED and the loop guard fired 5 times in 3 ordinary calls and 3 times in each scenario call. Root cause,
@@ -102,6 +149,7 @@ so the claims counter does not count the swallowed claim; the claim_guard column
 fixed build before the rehearsal (results below).
 
 ### Nov 1 08:23-08:45: verification calls, a scoring race, two scenario changes
+**Correction (10:14): the calls in this section ran on run 1's weights served under run 2's name; see the incident above. Run ids now carry `206506525c-mislabelled`.**
 Verification on the fixed build (~/r3-artifacts/runs/verify-r3-voice-730f8ba68e-1101-0823): the widened claim guard fired live once,
 correctly (the model said "I've booked your mortgage consultation" after the caller declined; held, replaced by the question; no
 claim spoken; the sentence hold cost no latency: first audible TTS p50 1124 ms vs 1318 in the deploy block). Loop guard 0 in both
@@ -121,10 +169,11 @@ nothing written) was added as the reviewer's alternative handoff flow, since the
 not transfer in its one live call on run 2. The rehearsal runs six scenarios; the demo uses whichever handoff flow passes.
 
 ### Nov 1 08:40-09:45: rehearsal on the final model, the re-runs, and what the table means
-Rehearsal `rehearsal-r3-voice-730f8ba68e-1101-0840`: six scenarios (demo/scenarios.md rows 1-5 plus 5b) x 5 simulated calls, Deepgram
+**Correction (10:14): the calls in this section ran on run 1's weights served under run 2's name; see the incident above. Run ids now carry `206506525c-mislabelled`.**
+Rehearsal `rehearsal-r3-voice-206506525c-mislabelled-1101-0840`: six scenarios (demo/scenarios.md rows 1-5 plus 5b) x 5 simulated calls, Deepgram
 caller voice and agent TTS, one call at a time, recordings under its run dir. The model ran with the two guards only; the executor
 retry and the fraud-ticket policy rule were committed during the run and went live at the 09:19 restart, so the re-run rows
-(`rehearsal-r3-voice-730f8ba68e-1101-0919-rules`) are the agent with those two rules, the earlier rows the model with the guards.
+(`rehearsal-r3-voice-206506525c-mislabelled-1101-0919-rules`) are the agent with those two rules, the earlier rows the model with the guards.
 
 | scenario | model + guards (08:40) | + executor retry + policy rule (09:19) | what failed, model alone |
 | --- | --- | --- | --- |
@@ -158,13 +207,14 @@ needed them. Nothing in those two rows is the model's recovery.
 Write-up tables generated at the end: `/Users/abgup/r3-artifacts/runs/writeup-1101-0954.md` (scripts/writeup.py; eval, latency incl. the combined rehearsal batch, load, cost, routing, rehearsal, targets).
 
 ### Nov 1 09:40-10:00: the interruption stalls explained, the no-transcript re-prompt, and lane close-out
+**Correction (10:14): the calls in this section ran on run 1's weights served under run 2's name; see the incident above. Run ids now carry `206506525c-mislabelled`.**
 The two rehearsal interruption stalls (calls 3 and 5) were not the model's: the caller's barge-in audio was heard by VAD but Deepgram
 never returned a final transcript for it, LiveKit classified the interruption as false after 2 s and resumed the read-back (its
 default), and then both sides waited: the agent for the caller, the scripted caller for a reply. livekit-agents 1.8.10 has
 `transcription_timeout` for exactly this ("use it to prompt the user to repeat themselves"): the agent now sets it to
 AGENT_TRANSCRIPTION_TIMEOUT (2.5 s; 0 off) and on `user_transcription_timeout` says "Sorry, I didn't catch that. Could you say it
 again?" outside the chat context (the model and the loop guard never see it). Own event `stt_timeout_reprompt`, scorecard `reprompt=`,
-write-up "(reprompt n)". Reviewer-approved 09:48 under the standing conditions. Interruption re-run with it (`rehearsal-r3-voice-730f8ba68e-1101-0945-rules`): 2/5 (claim 3, reprompt 1); the 08:40 row 2/5 is kept.
+write-up "(reprompt n)". Reviewer-approved 09:48 under the standing conditions. Interruption re-run with it (`rehearsal-r3-voice-206506525c-mislabelled-1101-0945-rules`): 2/5 (claim 3, reprompt 1); the 08:40 row 2/5 is kept.
 The untranscribed barge-in did not recur, so the re-prompt's effect on that stall is unproven; the three failures were two calls in
 which Deepgram misread the spoken date of birth (lookup not_found) and the model transferred after one re-ask while the fixed
 script did not repeat the credential, and one call with the weekday re-ask. The re-prompt fired once, after a 5 s utterance whose
