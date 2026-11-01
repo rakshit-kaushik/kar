@@ -70,3 +70,16 @@ def test_reply_resolves_when_listening_arrives_without_an_observed_speaking_stat
     assert tl.agent_is_listening() is True
     [t] = tl.latencies()
     assert t["eos_to_first_audio_ms"] == 1200
+
+
+def test_agent_audible_for_reports_how_long_the_current_reply_has_been_heard():
+    """For the interruption test: the caller cuts in once the agent has been audibly speaking for N ms."""
+    tl = CallerTimeline()
+    tl.agent_state(0, "listening")
+    tl.caller_speech_end(1000)
+    assert tl.agent_audible_for_ms(now_ms=1500) == 0          # nothing heard yet
+    tl.agent_audio(2000, rms=900)
+    tl.agent_audio(2500, rms=900)
+    assert tl.agent_audible_for_ms(now_ms=2600) == 600        # since the reply's first audible frame
+    tl.agent_audio(2700, rms=0)
+    assert tl.agent_audible_for_ms(now_ms=3400) == 0          # 900 ms without an audible frame: the agent stopped

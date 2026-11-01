@@ -72,6 +72,16 @@ class CallerTimeline:
     def agent_is_listening(self) -> bool:
         return self._state == "listening" and not self._awaiting_reply
 
+    def agent_audible_for_ms(self, now_ms: int, gap_ms: int = 400) -> int:
+        """How long the agent's current reply has been audible, or 0 if nothing is heard (no audible frame
+        in the last gap_ms, or no reply pending)."""
+        if not self.turns or not self._awaiting_reply:
+            return 0
+        t = self.turns[-1]
+        if t.first_audio_ms is None or self.last_audible_ms is None or now_ms - self.last_audible_ms > gap_ms:
+            return 0
+        return now_ms - t.first_audio_ms
+
     def agent_quiet(self, now_ms: int, quiet_ms: int = 600) -> bool:
         """Safe to speak: the agent reports listening, no reply is pending, and no audible agent frame
         arrived in the last quiet_ms (the state flips before the audio buffer has drained)."""
