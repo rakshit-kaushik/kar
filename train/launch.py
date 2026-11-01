@@ -357,11 +357,17 @@ def _listening_pids(port: int) -> list[int]:
     return [int(p) for p in out.stdout.split()]
 
 
-def stop_server(port: int = SERVER_PORT, timeout: float = 30.0) -> None:
+def stop_server(port: int = SERVER_PORT, timeout: float = 30.0, root: Path = REPO_ROOT) -> None:
+    """Stop the model server: session S's scripts/server_stop.sh (kills the :8000 listener only; a bare
+    port kill also takes down clients connected to it, which is what cut E's eval on 01-11 01:32),
+    else $R3_SERVER_STOP_CMD, else the LISTEN-only kill below."""
     custom = os.environ.get("R3_SERVER_STOP_CMD")
+    script = Path(root) / "scripts" / "server_stop.sh"
+    if not custom and script.exists() and port == SERVER_PORT:  # the script is fixed to :8000
+        custom = f"bash {script}"
     if custom:
         print(f"[server] stop: {custom}", flush=True)
-        subprocess.run(custom, shell=True, cwd=REPO_ROOT)
+        subprocess.run(custom, shell=True, cwd=root)
         return
     pids = _listening_pids(port)
     if not pids:
@@ -447,7 +453,7 @@ def server_cycle(root: Path, opts, ctx: dict, work) -> dict:
             flip("hosted", root)
             state["flipped"] = True
         if not opts.no_server:
-            stop_server()
+            stop_server(root=root)
             state["stopped"] = True
         work()
     except BaseException as e:  # noqa: BLE001 - restore first, report after

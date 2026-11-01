@@ -189,3 +189,14 @@ def test_rehearse_cycles_the_server_through_the_services_root_under_the_lock(tmp
     from train.launch import gpu_lock
 
     assert gpu_lock(root, "status")[0] == 0  # free again
+
+
+def test_stop_server_prefers_the_services_root_stop_script(tmp_path, monkeypatch):
+    from train.launch import stop_server
+
+    root = _fake_services_root(tmp_path, monkeypatch)
+    (root / "scripts" / "server_stop.sh").write_text('#!/bin/bash\necho stop >> "$(dirname "$0")/../events.log"\n')
+    (root / "scripts" / "server_stop.sh").chmod(0o755)
+    monkeypatch.delenv("R3_SERVER_STOP_CMD", raising=False)
+    stop_server(root=root)
+    assert (root / "events.log").read_text().split() == ["stop"]
