@@ -115,6 +115,63 @@ async def test_to_example_has_the_loader_shape():
     json.dumps(ex)  # serialisable
 
 
+TICKET = {
+    "customer_id": "C-1001",
+    "category": "card_lost_stolen",
+    "summary": "Lost debit card ending 4219 at the gym; banker to block it.",
+}
+HANDOFF = {"reason": "out_of_scope", "summary": "Lost card ticket opened; card not yet blocked."}
+LOST_CARD = VERIFY + [
+    say(
+        "Sorry to hear that. I'll open a lost card ticket for the card ending four two one nine, then transfer you to a banker. Is that right?"
+    ),
+    tools(tc("create_ticket", TICKET)),
+    tools(tc("request_handoff", HANDOFF)),
+    say("Your ticket is open and I'm transferring you to a banker now."),
+]
+LOST_CARD_LINES = VERIFY_LINES + ["i lost my debit card ending four two one nine", "yes"]
+NOT_FOUND = {"phone": "5559999999", "date_of_birth": "1988-03-12"}
+UNVERIFIED = [
+    say("Thanks. And your date of birth?"),
+    tools(tc("lookup_account", NOT_FOUND)),
+    say("I couldn't find an account with that number. Could you repeat it, digit by digit?"),
+    tools(tc("lookup_account", NOT_FOUND)),
+    tools(
+        tc("request_handoff", {"reason": "verification_failed", "summary": "Two lookups failed."})
+    ),
+    say("I couldn't verify your account, so I'm transferring you to a person."),
+]
+UNVERIFIED_LINES = [
+    "five five five nine nine nine nine nine nine nine",
+    "march twelfth nineteen eighty eight",
+    "five five five nine nine nine nine nine nine nine",
+]
+
+
+@pytest.mark.asyncio
+async def test_handoff_turn_takes_the_tool_call_slot_and_the_write_moves_up():
+    """CONTRACT §1 handoff rules are scored by reason; the handoff decision must be a target even
+    when a write (the ticket) precedes it. The read-back clarification is what gives way."""
+    ep = await make_episode(scenario(family="needs_person"), LOST_CARD, LOST_CARD_LINES)
+    assert ep.outcome == "handoff"
+    chosen, dropped = select_targets(ep)
+    assert [t.tool_names for t in chosen[:2]] == [["request_handoff"], ["create_ticket"]]
+    assert [t.kind for t in chosen] == ["tool_call", "tool_call", "closing"]
+    assert chosen[2].text.startswith("Your ticket is open")
+    assert dropped == []
+
+
+@pytest.mark.asyncio
+async def test_handoff_without_a_write_keeps_the_clarification_slot():
+    ep = await make_episode(scenario(family="needs_person"), UNVERIFIED, UNVERIFIED_LINES)
+    assert ep.outcome == "handoff"
+    chosen, _ = select_targets(ep)
+    assert [t.kind for t in chosen] == ["tool_call", "clarification", "closing"]
+    assert chosen[0].tool_names == ["request_handoff"]
+    assert chosen[1].text.startswith("I couldn't find an account")
+    assert chosen[2].text.startswith("I couldn't verify")
+
+
 @pytest.mark.asyncio
 async def test_extra_length_check_is_pluggable():
     ep = await make_episode(scenario(), HAPPY, LINES)

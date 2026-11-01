@@ -2,8 +2,9 @@
 
 A target is one assistant turn of the episode; the example is the conversation up to and
 including that turn (the prefix is masked by the trainer, the loss falls on the target). At most
-three targets per episode, chosen to cover a tool call (a write beats the lookup), a
-clarification (a question or read-back), and the closing line. Two per-target filters, applied to
+three targets per episode, chosen to cover a tool call (the handoff decision beats a write, a write
+beats the lookup), a clarification (a question or read-back; when the episode has both a handoff
+and a write, the write takes this slot instead), and the closing line. Two per-target filters, applied to
 the target alone so the episode's other targets survive: the contract's brevity rule (at most two
 sentences and 35 spoken words, CONTRACT §2 rule 4) and an optional `fits` callback (the 2,048-token
 check, see data/format/length.py). Targets are dropped, never truncated.
@@ -129,31 +130,38 @@ def select_targets(
     by_kind: dict[str, list[Target]] = {k: [] for k in KINDS}
     for t in all_targets:
         by_kind[t.kind].append(t)
-    # order candidates per kind: the first write tool call beats the lookup; the clarification is
-    # preferably the last question before the first write (the read-back), after verification
+
+    # order candidates per kind: the handoff decision beats everything (CONTRACT §1 scores it by
+    # reason, and it is rare), then the first write tool call beats the lookup; the clarification
+    # is preferably the last question before the first write (the read-back), after verification
+    def _is_handoff(t: Target) -> bool:
+        return "request_handoff" in t.tool_names
+
+    def _is_write(t: Target) -> bool:
+        return any(n in WRITE_TOOLS for n in t.tool_names)
+
     tool_order = sorted(
         by_kind["tool_call"],
-        key=lambda t: (not any(n in WRITE_TOOLS for n in t.tool_names), t.message_idx),
+        key=lambda t: (not _is_handoff(t), not _is_write(t), t.message_idx),
     )
     lookup_idx = next(
         (t.message_idx for t in by_kind["tool_call"] if "lookup_account" in t.tool_names), -1
     )
-    write_idx = next(
-        (t.message_idx for t in tool_order if any(n in WRITE_TOOLS for n in t.tool_names)), None
-    )
+    write_idx = next((t.message_idx for t in tool_order if _is_write(t)), None)
     after = [t for t in by_kind["clarification"] if t.message_idx > lookup_idx]
     before_write = [t for t in after if write_idx is None or t.message_idx < write_idx]
     rest = [t for t in by_kind["clarification"] if t not in before_write]
     clar_order = sorted(before_write, key=lambda t: -t.message_idx) + rest
-    ordered: dict[str, list[Target]] = {
-        "tool_call": tool_order,
-        "clarification": clar_order,
-        "closing": by_kind["closing"],
-    }
+    # when the episode has both a handoff and a write (lost card: ticket, then transfer), the write
+    # takes the second slot instead of the read-back, so the ticket category stays supervised
+    second_slot = clar_order
+    if tool_order and _is_handoff(tool_order[0]) and write_idx is not None:
+        second_slot = [t for t in tool_order[1:] if _is_write(t)] + clar_order
+    slots: list[list[Target]] = [tool_order, second_slot, by_kind["closing"]]
     chosen: list[Target] = []
     dropped: list[Target] = []
-    for kind in ("tool_call", "clarification", "closing"):
-        for t in ordered[kind]:
+    for cands in slots:
+        for t in cands:
             if len(chosen) >= max_targets:
                 break
             ok, _, _ = brevity_ok(t.text) if t.text else (True, 0, 0)
