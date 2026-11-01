@@ -708,7 +708,7 @@ def test_bucket_for_max_turns_with_stuck_caller_is_harness():
 
 
 def test_agent_repeats_mirrors_the_loop_guard_rule():
-    from eval.runner import agent_repeats
+    from eval.runner import LOOP_GUARD_HANDOFF_AFTER, agent_repeats
 
     def ep(*assistant_lines):
         msgs = []
@@ -717,13 +717,20 @@ def test_agent_repeats_mirrors_the_loop_guard_rule():
             msgs.append({"role": "user", "content": "yes"})
         return {"messages": msgs}
 
-    # first consecutive repeat -> the guard rephrases; second -> it hands off and the call ends
+    # the live guard (AGENT_LOOP_GUARD_HANDOFF_AFTER=3) rephrases the first two consecutive repeats and
+    # hands off at the third; a split caller utterance makes one re-ask legitimate
+    assert LOOP_GUARD_HANDOFF_AFTER == 3
     assert agent_repeats(
         ep("What day is that?", "What day is that?", "what day is that", "x", "x")
     ) == {
-        "rephrase": 1,
-        "handoff": 1,
+        "rephrase": 3,
+        "handoff": 0,
         "max_streak": 3,
+    }
+    assert agent_repeats(ep("Same.", "Same.", "Same.", "Same.", "Later.")) == {
+        "rephrase": 2,
+        "handoff": 1,
+        "max_streak": 4,
     }
     assert agent_repeats(ep("Which branch?", "Which branch?", "Marker Street, got it.")) == {
         "rephrase": 1,

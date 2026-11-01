@@ -799,11 +799,17 @@ _GUARD_FAREWELL = re.compile(
 )
 
 
+# The live guard rephrases each exact repeat and hands off at this many consecutive repeats
+# (services/agent AGENT_LOOP_GUARD_HANDOFF_AFTER; raised from 2 to 3 at 07:11 because a caller
+# utterance split by turn detection makes one re-ask legitimate).
+LOOP_GUARD_HANDOFF_AFTER = 3
+
+
 def agent_repeats(ep: dict) -> dict:
-    """How often S's application-side loop guard would have intervened on this transcript: the
-    first consecutive identical assistant line is swallowed and rephrased, the second becomes a
-    handoff that ends the call. The runner talks to the model directly, so it never sees the guard;
-    this is the same rule applied after the fact. Tool-call-only turns are not lines."""
+    """How often S's application-side loop guard would have intervened on this transcript: each
+    consecutive identical assistant line is swallowed and rephrased, and the LOOP_GUARD_HANDOFF_AFTER-th
+    becomes a handoff that ends the call. The runner talks to the model directly, so it never sees the
+    guard; this is the same rule applied after the fact. Tool-call-only turns are not lines."""
     lines = [
         _normalize_line(m.get("content") or "")
         for m in ep.get("messages") or []
@@ -814,11 +820,11 @@ def agent_repeats(ep: dict) -> dict:
     for a, b in zip(lines, lines[1:]):
         run = run + 1 if a == b and not _GUARD_FAREWELL.search(a) else 1
         best = max(best, run)
-        if run == 2:
-            rephrase += 1
-        elif run == 3:
+        if run - 1 >= LOOP_GUARD_HANDOFF_AFTER:
             handoff += 1
             break
+        if run >= 2:
+            rephrase += 1
     return {"rephrase": rephrase, "handoff": handoff, "max_streak": best}
 
 
@@ -988,7 +994,8 @@ def buckets_report(
         f"times in a row; their max_turns failure is bucketed as harness): {len(stuck_callers)}"
         + ("".join(f"\n- {eid}: {why}" for eid, why in stuck_callers) if stuck_callers else ""),
         "",
-        f"Adapter repetition (S's loop guard would have intervened: first identical line rephrased, second a handoff; "
+        f"Adapter repetition (S's loop guard would have intervened: each identical line rephrased, the "
+        f"{LOOP_GUARD_HANDOFF_AFTER}rd consecutive repeat a handoff; "
         f"a repeated farewell is exempt; exact match after normalization, so one-word variants such as "
         f"'Which day' -> 'Which date' are not counted, same as the live guard): "
         f"{len(repeaters)} failing episodes, {sum(r['rephrase'] for _, r in repeaters)} rephrases, "
