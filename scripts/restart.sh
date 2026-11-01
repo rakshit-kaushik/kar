@@ -19,6 +19,20 @@ wait_for() { # url seconds label
   echo "  $3 FAILED to answer at $1 within $2 s"; return 1
 }
 
+# --- shared-stack guard: never restart under a session that holds the GPU/server lock (scripts/gpu_lock.sh)
+OWNER="${R3_OWNER:-S}"
+if ! "$(dirname "$0")/gpu_lock.sh" status >/dev/null 2>&1; then
+  holder="$("$(dirname "$0")/gpu_lock.sh" status 2>/dev/null || true)"
+  if ! echo "$holder" | grep -q "held by $OWNER "; then
+    if [ "${FORCE:-0}" != "1" ]; then echo "restart refused: $holder (set R3_OWNER to your lock owner, or FORCE=1 as the human)"; exit 3; fi
+    echo "FORCE=1: restarting despite lock: $holder"
+  fi
+  LOCK_WAS_MINE=1
+else
+  "$(dirname "$0")/gpu_lock.sh" acquire "$OWNER" 10 "restart" >/dev/null; LOCK_WAS_MINE=0
+fi
+trap '[ "${LOCK_WAS_MINE:-1}" = 0 ] && "$(dirname "$0")/gpu_lock.sh" release "$OWNER" >/dev/null 2>&1 || true' EXIT
+
 echo "[1/5] postgres"
 "$PSQL" "$DATABASE_URL" -tAc "select 1" >/dev/null && echo "  postgres ok ($DATABASE_URL)"
 
