@@ -18,6 +18,8 @@ import argparse
 import os
 import pathlib
 import re
+
+from services.common.claims import CLAIM_TOOLS, unsupported_claims  # noqa: E402,F401  (shared with services/demo/check.py)
 from collections import defaultdict
 
 import psycopg
@@ -40,30 +42,6 @@ def fmt(xs, unit="ms"):
     if not xs:
         return "n/a"
     return f"p50 {pct(xs, 0.5):.0f} {unit} · p95 {pct(xs, 0.95):.0f} {unit} · n={len(xs)}"
-
-
-CLAIM_TOOLS = {  # a spoken success claim is supported only by an earlier successful tool result of the matching write
-    "book": "book_appointment", "booked": "book_appointment", "rescheduled": "reschedule_appointment", "moved": "reschedule_appointment",
-    "cancelled": "cancel_appointment", "canceled": "cancel_appointment", "ticket": "create_ticket",
-}
-_CLAIM_RE = re.compile(r"\b(I(?:'ve| have)? (?:booked|rescheduled|moved|cancell?ed)|is (?:now )?(?:booked|rescheduled|cancell?ed)|(?:created|opened) a ticket)\b", re.I)
-
-
-def unsupported_claims(events) -> int:
-    """Assistant transcripts that claim a completed write (booked, rescheduled, cancelled, ticket) with no successful tool_end of the
-    matching tool earlier in the call: the contract's prohibited 'confirming anything a tool has not returned' (CONTRACT.md)."""
-    done: set[str] = set(); n = 0
-    for e in sorted(events, key=lambda e: e[4]):
-        p = e[5] or {}
-        if e[3] == "tool_end" and p.get("ok"):
-            done.add(p.get("name"))
-        elif e[3] == "transcript" and p.get("role") == "assistant":
-            m = _CLAIM_RE.search(p.get("text") or "")
-            if m:
-                word = next((w for w in CLAIM_TOOLS if w in m.group(0).lower()), None)
-                if word and CLAIM_TOOLS[word] not in done:
-                    n += 1
-    return n
 
 
 def filler_timing(turn_events, anchor):

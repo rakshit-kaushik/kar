@@ -34,7 +34,9 @@ from dotenv import load_dotenv
 from livekit import api, rtc
 
 from services.common.events import PostgresSink
-from services.sim.timeline import CallerTimeline, pct
+from services.sim.timeline import CallerTimeline
+from services.sim.naming import room_name as make_room_name
+from services.sim.recorder import CallRecorder, pct
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
@@ -133,6 +135,8 @@ class MicPump:
             frame = rtc.AudioFrame(data=chunk.tobytes(), sample_rate=SR, num_channels=1, samples_per_channel=len(chunk))
             if chunk is not silence and getattr(self, "first_audible_capture_ms", None) is None and float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2))) >= 300:
                 self.first_audible_capture_ms = now_ms()
+            if chunk is not silence and getattr(self, "on_frame", None) is not None:
+                self.on_frame(now_ms(), chunk)
             await self.source.capture_frame(frame)
             if is_last:
                 self.last_speech_capture_ms = now_ms()
@@ -205,6 +209,7 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
     audio_tasks: list[asyncio.Task] = []
     t_connect = now_ms()
     result: dict[str, Any] = {"call_id": room_name, "ok": False, "turns": 0, "notes": []}
+    rec = CallRecorder(SR) if getattr(args, "record_dir", None) else None
     frames_dump: list | None = [] if args.dump_frames else None
     caller_starts: list[int] = []
 
@@ -239,6 +244,8 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
                     rms = float(math.sqrt(np.mean(x * x))) if len(x) else 0.0
                     ts = now_ms()
                     tl.agent_audio(ts, rms)
+                    if rec is not None:
+                        rec.add("agent", ts, np.frombuffer(ev.frame.data, dtype=np.int16))
                     if frames_dump is not None:
                         frames_dump.append((ts, len(x), int(rms)))
             audio_tasks.append(asyncio.create_task(listen()))
@@ -288,6 +295,8 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
     track = rtc.LocalAudioTrack.create_audio_track("mic", source)
     await room.local_participant.publish_track(track, rtc.TrackPublishOptions(source=rtc.TrackSource.SOURCE_MICROPHONE))
     pump = MicPump(source)
+    if rec is not None:
+        pump.on_frame = lambda ts, chunk: rec.add("caller", ts, chunk)
     pump.start()
     try:
         try:
@@ -398,6 +407,10 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
             await listener.disconnect()
         if frames_dump is not None:
             result["frames"] = frames_dump
+        if rec is not None:
+            wav = pathlib.Path(args.record_dir) / f"{room_name}.wav"
+            rec.save(wav)
+            result["recording"] = str(wav)
         await emit("caller_summary", {**summary, "turns_spoken": result["turns"], "dispatch_ms": result.get("dispatch_ms"), "notes": result["notes"]})
         await room.disconnect()
     return result
@@ -421,6 +434,7 @@ async def main() -> int:
     ap.add_argument("--interrupt-turn", type=int, default=0, help="caller turn that cuts into the agent's reply instead of waiting for quiet (0 = never)")
     ap.add_argument("--interrupt-after-ms", type=int, default=2000, help="how long the agent must have been audibly speaking before the caller cuts in")
     ap.add_argument("--listener", action="store_true", help="second participant measures capture->heard delay of the caller's own speech (transport + receive buffer)")
+    ap.add_argument("--record-dir", default=None, help="write a two-channel wav per call (left caller, right agent) into this directory")
     ap.add_argument("--dump-frames", action="store_true", help="record (ts_ms, samples, rms) of every agent audio frame into the JSON")
     args = ap.parse_args()
 
@@ -441,7 +455,7 @@ async def main() -> int:
                 brain = FixedScript(json.loads(pathlib.Path(args.lines_file).read_text()))
             else:
                 brain = FixedScript(DANA_FIXED) if args.script == "fixed" else LLMCaller(DANA_GOAL, seed=i)
-            room_name = f"{args.prefix}-{batch}-{i + 1}"
+            room_name = make_room_name(args.prefix, batch, i + 1)  # keeps a --fault-... spec at the end, where the agent parses it
             t0 = time.perf_counter()
             try:
                 r = await run_call(room_name, brain, args, sink, model_id)
