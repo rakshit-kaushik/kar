@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # Lane S hand-back block (≤15 min under lock S): deploy a fused candidate, probe, verify the prefix trie hits on a 2-turn
 # request pair, 3 simulated calls + 1 interruption call, reports + cost into the ledger, release.
-# Usage: scripts/deploy_block.sh $R3_ARTIFACTS/models/r3-voice-<hash> [CALLS=3]   [INT_TURN=5: caller turn that cuts into the agent (5 = the read-back)]
+# Usage: scripts/deploy_block.sh $R3_ARTIFACTS/models/r3-voice-<hash> [CALLS=3] [INT_TURN=5] [TIMEOUT_CALL=1] [HANDOFF_CALL=1] [LOCK_MINUTES=20]
+#   INT_TURN: caller turn that cuts into the agent (5 = the read-back); TIMEOUT_CALL / HANDOFF_CALL: one scenario call each, scored by
+#   scripts/demo_check.py (the handoff call is the claim guard's live test); LOCK_MINUTES: ~13 min of work, 20 leaves margin
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$ROOT"; set -a; . ./.env; set +a
-ART="${R3_ARTIFACTS:-$HOME/r3-artifacts}"; DIR="${1:?model dir}"; ID="$(basename "$DIR")"; CALLS="${CALLS:-3}"
+ART="${R3_ARTIFACTS:-$HOME/r3-artifacts}"; DIR="${1:?model dir}"; ID="$(basename "$DIR")"; CALLS="${CALLS:-3}"; TIMEOUT_CALL="${TIMEOUT_CALL:-1}"; HANDOFF_CALL="${HANDOFF_CALL:-1}"; LOCK_MINUTES="${LOCK_MINUTES:-20}"
 RUN="deploy-$ID-$(date +%m%d-%H%M)"; OUT="$ART/runs/$RUN"; mkdir -p "$OUT"; LOG="$OUT/block.log"; BATCH="$(date +%H%M)"
 step() { echo; echo "=== $(date '+%H:%M:%S') $*" | tee -a "$LOG"; }
 run() { "$@" 2>&1 | tee -a "$LOG"; }
-scripts/gpu_lock.sh wait S 15 "$RUN" | tee -a "$LOG"
+scripts/gpu_lock.sh wait S "$LOCK_MINUTES" "$RUN" | tee -a "$LOG"
 trap 'scripts/gpu_lock.sh release S | tee -a "$LOG"' EXIT
 step "deploy $ID"
 R3_OWNER=S run scripts/deploy_model.sh "$DIR"
@@ -41,4 +43,15 @@ run uv run python scripts/sim_caller.py --calls 1 --interrupt-turn "${INT_TURN:-
 run uv run python scripts/g1_report.py --like "r3-dep-$BATCH-%" --ledger --run-id "g1-sim-$ID" --note "candidate $ID, sequential simulated calls, trie fix live" | tee "$OUT/g1_report.txt"
 run uv run python scripts/g1_report.py --like "r3-depint-$BATCH-%" --ledger --run-id "g1-interrupt-$ID" --note "candidate $ID interruption test" | tee "$OUT/interrupt_report.txt"
 run uv run python scripts/cost_report.py --like "r3-dep-$BATCH-%" --ledger --run-id "cost-$ID"
+if [ "$TIMEOUT_CALL" = "1" ]; then
+  step "timeout scenario on $ID: check_availability times out once (demo/scenarios.md #3)"
+  run uv run python scripts/sim_caller.py --calls 1 --lines-file demo/turns/timeout.json --prefix "demo-timeout-dep-$BATCH--fault-check_availability-timeout" --json "$OUT/timeout.json"
+  run uv run python scripts/demo_check.py --like "demo-timeout-dep-$BATCH%" --scenario timeout --ledger --run-id "deploy-$ID" | tee "$OUT/timeout.check.txt"
+fi
+if [ "$HANDOFF_CALL" = "1" ]; then
+  step "handoff scenario on $ID: unrecognized charge (demo/scenarios.md #5; the claim guard's live test)"
+  run uv run python scripts/sim_caller.py --calls 1 --lines-file demo/turns/handoff.json --prefix "demo-handoff-dep-$BATCH" --json "$OUT/handoff.json"
+  run uv run python scripts/demo_check.py --like "demo-handoff-dep-$BATCH%" --scenario handoff --ledger --run-id "deploy-$ID" | tee "$OUT/handoff.check.txt"
+  run uv run python scripts/g1_report.py --like "demo-handoff-dep-$BATCH%" | tee "$OUT/handoff_report.txt"
+fi
 step "done: $OUT"

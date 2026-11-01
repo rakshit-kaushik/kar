@@ -219,6 +219,9 @@ def create_app(
         if not body.get("stream"):
             try:
                 r = await upstream_client.post("/v1/chat/completions", json={**body, "model": await upstream_name(model_id)})
+                if r.status_code == 404 and upstream_name_cache["name"] and discover_upstream_model:
+                    upstream_name_cache["name"] = None
+                    r = await upstream_client.post("/v1/chat/completions", json={**body, "model": await upstream_name(model_id)})
             except httpx.HTTPError as e:
                 await emit(call_id, turn_idx, model_id, "llm_error", {"error": repr(e)})
                 return JSONResponse({"error": {"message": f"upstream unavailable: {e}", "type": "upstream_error"}}, status_code=502)
@@ -233,6 +236,14 @@ def create_app(
         started: set[str] = set()
 
         async def attempt(client: httpx.AsyncClient, mid: str, source: str) -> _Stream:
+            if source == "local":
+                try:
+                    return await open_stream(client, {**body, "model": await upstream_name(mid)}, mid, None)
+                except UpstreamStatus as e:
+                    if e.status != 404 or not upstream_name_cache["name"] or not discover_upstream_model:
+                        raise
+                    upstream_name_cache["name"] = None  # the server was redeployed under another name: discover it again, once
+                    return await open_stream(client, {**body, "model": await upstream_name(mid)}, mid, None)
             sent = {**body, "model": await upstream_name(mid)} if source == "local" else {k: v for k, v in body.items() if k not in HOSTED_DROP} | {"model": mid}
             return await open_stream(client, sent, mid, None)
 

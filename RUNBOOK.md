@@ -128,6 +128,10 @@ exercises the wiring in text. Not a guard case: the 16 one-strike handoffs in ru
 instead of a retry, request_handoff correctly called) are a missing example type, covered by E's v5.1 misstate-retry scenarios.
 
 ### Nov 1 05:01: loop guard; demo rehearsal tooling
+(07:33: escalation moved to the third exact repeat, AGENT_LOOP_GUARD_HANDOFF_AFTER=3, reviewer-approved; the motivating
+call and the reasoning are in the 07:11-07:31 section. E recounts the post-hoc interventions at 3 so the write-up's guard
+column is on one rule. Known turn-taking limitation, not tuned further: the 0.25-2.0 s endpointing window splits digit
+strings read with pauses; the demo scripts now read the phone number in one breath.)
 - Loop guard (services/agent/loopguard.py, in R3Agent.llm_node): a reply is held only while it is still identical to the previous
   assistant line; an exact repeat is swallowed and a rephrased re-ask is spoken, a second consecutive repeat becomes the handoff
   line plus request_handoff(out_of_scope) through the executor. `loop_guard` turn events {action, repeated, repeats}.

@@ -355,3 +355,38 @@ async def test_local_requests_carry_the_name_the_server_advertises_while_labels_
     assert events and {e["model_id"] for e in events} == {"r3-voice-206506525c"}
     h = await client.get("/health")
     assert h.json()["upstream_model"] == "r3-voice-base"
+
+
+def renaming_upstream(state: dict, received: list):
+    """A server whose served name can change between requests (a redeploy); it 404s any other name like vllm-mlx does."""
+    async def chat(request: Request):
+        body = await request.json()
+        received.append(body["model"])
+        if body["model"] != state["name"]:
+            return JSONResponse({"error": "model not found"}, status_code=404)
+
+        async def gen():
+            yield sse(chunk({"role": "assistant"}))
+            yield sse(chunk({"content": "Hello."}, finish="stop", usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12}))
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    async def models(_: Request):
+        return JSONResponse({"object": "list", "data": [{"id": state["name"], "object": "model"}]})
+
+    return Starlette(routes=[Route("/v1/chat/completions", chat, methods=["POST"]), Route("/v1/models", models)])
+
+
+async def test_a_server_redeployed_under_a_new_name_is_rediscovered_after_one_404():
+    state, received = {"name": "r3-voice-base"}, []
+    upstream = httpx.AsyncClient(transport=httpx.ASGITransport(app=renaming_upstream(state, received)), base_url="http://upstream")
+    app = create_app(upstream_client=upstream, event_sink=None)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
+    body = {**BODY, "model": "r3-voice-206506525c"}
+    assert (await client.post("/v1/chat/completions", json=body, headers={"X-R3-Call-Id": "c1"})).status_code == 200
+    state["name"] = "r3-voice-730f8ba68e"  # the deploy block restarted the server under the new candidate's id
+    r = await client.post("/v1/chat/completions", json=body, headers={"X-R3-Call-Id": "c2"})
+    assert r.status_code == 200
+    assert received == ["r3-voice-base", "r3-voice-base", "r3-voice-730f8ba68e"]
+    assert (await client.get("/health")).json()["upstream_model"] == "r3-voice-730f8ba68e"

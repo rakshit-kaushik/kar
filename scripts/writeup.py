@@ -109,7 +109,8 @@ def latency_table(con) -> str:
     return md_table(header, rows) + ("\n\n_Milliseconds (prompt tok = tokens). Caller-clock numbers include the Mac's network path; see RUNBOOK (hotspot). "
             "claims = calls with a spoken success claim and no matching tool result; loop guard = calls where the agent replaced a repeated line; "
             "claim guard = calls where the agent recorded request_handoff before a transfer the model announced without calling it "
-            "(both application interventions, identical for every model, never the model's own recovery)._")
+            "(both application interventions, identical for every model, never the model's own recovery). Known turn-taking limitation: the endpointing window "
+            "(0.25-2.0 s) splits digit strings read with pauses into two caller turns; not tuned further in this sprint._")
 
 
 def load_table(con) -> str:
