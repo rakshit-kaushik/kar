@@ -37,11 +37,13 @@ LOCK_OWNER = "T"
 
 
 def parse_candidate(spec: str) -> tuple[str, int, str]:
-    """`<model dir name>[:<repeats>[:<served name>]]` -> (dir name, repeats, served name)."""
+    """`<model dir name or path>[:<repeats>[:<served name>]]` -> (dir name or path, repeats, served name).
+    The served name defaults to the directory's base name, never a path (a path as the model id made the
+    07:13 batch's run ids and output dirs paths; it was killed and relaunched)."""
     parts = spec.split(":")
     d = parts[0]
     repeats = int(parts[1]) if len(parts) > 1 and parts[1] else 3
-    name = parts[2] if len(parts) > 2 and parts[2] else d
+    name = parts[2] if len(parts) > 2 and parts[2] else Path(d).name
     return d, repeats, name
 
 
@@ -66,10 +68,14 @@ def main(argv=None) -> int:
     artifacts = artifacts_dir()
     root = services_root(a.services_root)
     base = Path(a.base_model or artifacts / "models" / "Qwen3-4B-8bit")
+    cands = [parse_candidate(c) for c in a.candidates]
+    missing = [d for d, _, _ in cands if not (artifacts / "models" / d).is_dir()]
+    if missing or (a.gate and not (artifacts / "models" / a.gate / "adapter").is_dir()):
+        print(f"[batch] not found under {artifacts / 'models'}: {missing or [a.gate + '/adapter']}; nothing started, no lock taken", flush=True)
+        return 2
     batch_id = f"eval-batch-{time.strftime('%Y%m%d-%H%M%S')}"
     out = artifacts / "runs" / batch_id
     out.mkdir(parents=True, exist_ok=True)
-    cands = [parse_candidate(c) for c in a.candidates]
     minutes = a.lock_minutes or (10 + (8 if a.routing_data else 0) + sum(5 + 25 * r for _, r, _ in cands) + (30 if a.gate else 0) + int(a.base_minutes))
     record: dict = {"batch_id": batch_id, "candidates": cands, "steps": [], "started_at": time.time()}
 

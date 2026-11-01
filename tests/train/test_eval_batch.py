@@ -46,6 +46,18 @@ def test_candidate_spec_parses_dir_repeats_and_optional_served_name():
     assert parse_candidate("r3-voice-abc:3") == ("r3-voice-abc", 3, "r3-voice-abc")
     assert parse_candidate("Qwen3-4B-8bit:1:r3-voice-base") == ("Qwen3-4B-8bit", 1, "r3-voice-base")
     assert parse_candidate("r3-voice-abc") == ("r3-voice-abc", 3, "r3-voice-abc")
+    assert parse_candidate("/art/models/r3-voice-abc:2") == ("/art/models/r3-voice-abc", 2, "r3-voice-abc")  # id = base name, never a path
+
+
+def test_batch_refuses_a_missing_candidate_dir_before_taking_the_lock(tmp_path, monkeypatch):
+    from train.eval_batch import main
+
+    art = tmp_path / "art"
+    (art / "models").mkdir(parents=True)
+    monkeypatch.setenv("R3_ARTIFACTS", str(art))
+    rc = main(["--candidates", "r3-voice-nope:1", "--no-lock", "--no-db", "--services-root", str(tmp_path)])
+    assert rc == 2
+    assert not (art / "runs").exists() or not list((art / "runs").glob("eval-batch-*"))  # no batch dir, no lock
 
 
 def test_gate_step_scores_the_unfused_adapter_on_the_base_and_writes_the_precision_gate(tmp_path, monkeypatch):
