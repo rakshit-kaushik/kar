@@ -56,3 +56,17 @@ def test_agent_quiet_requires_listening_state_and_no_recent_audio():
     tl.caller_speech_end(800)
     assert tl.agent_quiet(now_ms=2000, quiet_ms=500) is False  # awaiting a reply: not quiet, waiting
 
+
+
+def test_reply_resolves_when_listening_arrives_without_an_observed_speaking_state():
+    """Attribute updates can coalesce: thinking -> listening with no 'speaking' seen. If audio was heard,
+    the reply is over when the agent reports listening again."""
+    tl = CallerTimeline()
+    tl.agent_state(0, "listening")
+    tl.caller_speech_end(1000)
+    tl.agent_state(1300, "thinking")
+    tl.agent_audio(2200, rms=900)
+    tl.agent_state(4000, "listening")
+    assert tl.agent_is_listening() is True
+    [t] = tl.latencies()
+    assert t["eos_to_first_audio_ms"] == 1200

@@ -23,6 +23,8 @@ import httpx
 import psycopg
 from dotenv import load_dotenv
 from livekit.agents import Agent, AgentServer, AgentSession, JobContext, JobProcess, cli
+from livekit.agents import EndpointingOptions, PreemptiveGenerationOptions, TurnHandlingOptions
+import numpy as np
 from livekit.agents.metrics import EOUMetrics, LLMMetrics, STTMetrics, TTSMetrics
 from livekit.plugins import cartesia, deepgram, silero
 from livekit.plugins import openai as lk_openai
@@ -43,6 +45,34 @@ log = logging.getLogger("r3.agent")
 SEED = json.loads((ROOT / "eval/sandbox/seed.json").read_text())
 SYSTEM_PROMPT = (ROOT / "schemas/system_prompt.md").read_text().replace("{today}", SEED["clock_spoken"])
 GREETING = "Thanks for calling Marlow Mutual Bank. Can I get the phone number on your account?"
+# Turn-taking knobs (AGENT_* in .env). Defaults are LiveKit's; .env carries the values chosen by measurement.
+TURN = {
+    "vad_min_silence_s": float(os.environ.get("AGENT_VAD_MIN_SILENCE", "0.55")),
+    "endpoint_min_s": float(os.environ.get("AGENT_ENDPOINT_MIN", "0.5")),
+    "endpoint_max_s": float(os.environ.get("AGENT_ENDPOINT_MAX", "3.0")),
+    "preemptive": os.environ.get("AGENT_PREEMPTIVE", "0") == "1",
+}
+AUDIBLE_RMS = 300.0
+
+
+class R3Agent(Agent):
+    """Agent with one measurement hook: the moment the first audible TTS frame leaves the TTS node, so the
+    agent-side clock has a 'first audio' timestamp to compare with what the caller hears."""
+
+    def __init__(self, *, on_first_audible, **kw) -> None:
+        super().__init__(**kw)
+        self._on_first_audible = on_first_audible
+
+    async def tts_node(self, text, model_settings):
+        t0, fired, frames = time.perf_counter(), False, 0
+        async for frame in Agent.default.tts_node(self, text, model_settings):
+            frames += 1
+            if not fired:
+                x = np.frombuffer(frame.data, dtype=np.int16).astype(np.float32)
+                if len(x) and float(np.sqrt(np.mean(x * x))) >= AUDIBLE_RMS:
+                    fired = True
+                    self._on_first_audible({"ms_since_tts_start": round((time.perf_counter() - t0) * 1000), "frames_before": frames - 1})
+            yield frame
 STRUCTURAL = ("<tool_call>", "</tool_call>", "<think>", "</think>", '{"name"', "<|im_", "[Calling tool", "[calling tool")
 
 
@@ -63,7 +93,9 @@ server = AgentServer(num_idle_processes=1)  # a warm job process: the agent join
 
 
 def prewarm(proc: JobProcess) -> None:
-    proc.userdata["vad"] = silero.VAD.load()
+    # VAD end-of-speech fires min_silence_duration after the caller stops; the LiveKit default 0.55 s is a large
+    # share of the 1.0 s end-of-speech -> first-audio budget. Tuned by measurement with scripts/sim_caller.py.
+    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=float(os.environ.get("AGENT_VAD_MIN_SILENCE", "0.55")))
 
 
 server.setup_fnc = prewarm
@@ -116,13 +148,19 @@ async def entrypoint(ctx: JobContext) -> None:
         llm=lk_openai.LLM(model=model_id, client=llm_client, parallel_tool_calls=False),
         tts=cartesia.TTS(model=os.environ.get("CARTESIA_MODEL", "sonic-3"), voice=os.environ["CARTESIA_VOICE"]),
         vad=ctx.proc.userdata["vad"],
-        turn_detection=EnglishModel(),
+        turn_handling=TurnHandlingOptions(
+            turn_detection=EnglishModel(),
+            endpointing=EndpointingOptions(min_delay=TURN["endpoint_min_s"], max_delay=TURN["endpoint_max_s"]),
+            preemptive_generation=PreemptiveGenerationOptions(enabled=TURN["preemptive"]),
+        ),
         userdata=data,
         max_tool_steps=3,
     )
 
     @session.on("user_state_changed")
     def _user_state(ev) -> None:
+        if ev.new_state == "speaking":
+            fire("speech_start")  # VAD onset: with the caller's own capture time this measures caller -> agent transport
         if ev.old_state == "speaking" and ev.new_state == "listening":
             data.turn_idx += 1
             executor.turn_idx = data.turn_idx
@@ -196,9 +234,9 @@ async def entrypoint(ctx: JobContext) -> None:
             fire("caller_left", {"identity": p.identity})
             ctx.shutdown(reason="caller left")
 
-    await session.start(agent=Agent(instructions=SYSTEM_PROMPT, tools=TOOLS), room=ctx.room)
+    await session.start(agent=R3Agent(instructions=SYSTEM_PROMPT, tools=TOOLS, on_first_audible=lambda p: fire("tts_first_audible", p)), room=ctx.room)
     await ctx.connect()
-    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": os.environ.get("CARTESIA_MODEL", "sonic-3")})
+    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": os.environ.get("CARTESIA_MODEL", "sonic-3"), "turn": TURN})
     session.say(GREETING, allow_interruptions=True)
 
 

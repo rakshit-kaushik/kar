@@ -52,7 +52,7 @@ class CallerTimeline:
                 t.thinking_ms = ts_ms
             elif state == "speaking" and t.speaking_ms is None:
                 t.speaking_ms = ts_ms
-            elif state == "listening" and prev == "speaking" and (t.speaking_ms is not None or t.first_audio_ms is not None):
+            elif state == "listening" and (t.speaking_ms is not None or t.first_audio_ms is not None):
                 t.agent_speech_end_ms = ts_ms
                 self._awaiting_reply = False
 

@@ -115,6 +115,7 @@ class MicPump:
         buf = np.concatenate([pad, pcm])
         frames = [buf[i:i + SAMPLES] for i in range(0, len(buf) - len(buf) % SAMPLES, SAMPLES)]
         self._speaking.clear()
+        self.first_audible_capture_ms = None
         self.queue.extend(frames)
         await self._speaking.wait()
         assert self.last_speech_capture_ms is not None
@@ -130,6 +131,8 @@ class MicPump:
             else:
                 chunk, is_last = silence, False
             frame = rtc.AudioFrame(data=chunk.tobytes(), sample_rate=SR, num_channels=1, samples_per_channel=len(chunk))
+            if chunk is not silence and getattr(self, "first_audible_capture_ms", None) is None and float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2))) >= 300:
+                self.first_audible_capture_ms = now_ms()
             await self.source.capture_frame(frame)
             if is_last:
                 self.last_speech_capture_ms = now_ms()
@@ -182,8 +185,8 @@ class LLMCaller:
 
 
 # ---- one call ------------------------------------------------------------------------------------------------
-def token(room: str) -> str:
-    return (api.AccessToken(os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"]).with_identity("caller").with_name("Caller")
+def token(room: str, identity: str = "caller") -> str:
+    return (api.AccessToken(os.environ["LIVEKIT_API_KEY"], os.environ["LIVEKIT_API_SECRET"]).with_identity(identity).with_name(identity.title())
             .with_ttl(dt.timedelta(minutes=30)).with_grants(api.VideoGrants(room_join=True, room=room, can_publish=True, can_subscribe=True)).to_jwt())
 
 
@@ -196,6 +199,7 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
     t_connect = now_ms()
     result: dict[str, Any] = {"call_id": room_name, "ok": False, "turns": 0, "notes": []}
     frames_dump: list | None = [] if args.dump_frames else None
+    caller_starts: list[int] = []
 
     async def emit(event: str, payload: dict, turn_idx: int = 0) -> None:
         ev = {"call_id": room_name, "turn_idx": turn_idx, "model_id": model_id, "event": event, "ts_ms": now_ms(), "payload": payload}
@@ -248,6 +252,30 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
 
     room.register_text_stream_handler("lk.transcription", _on_text)
 
+    listener: rtc.Room | None = None
+    heard_by_listener: list[int] = []  # ts of the first audible frame of each caller utterance, as a second client hears it
+    if args.listener:
+        listener = rtc.Room()
+        lst_state = {"quiet_since": None}
+
+        @listener.on("track_subscribed")
+        def _lsub(track: rtc.Track, pub: rtc.RemoteTrackPublication, p: rtc.RemoteParticipant) -> None:
+            if track.kind == rtc.TrackKind.KIND_AUDIO and p.identity == "caller":
+                async def llisten() -> None:
+                    stream = rtc.AudioStream(track, sample_rate=SR, num_channels=1)
+                    last_audible = None
+                    async for ev in stream:
+                        x = np.frombuffer(ev.frame.data, dtype=np.int16).astype(np.float32)
+                        rms = float(math.sqrt(np.mean(x * x))) if len(x) else 0.0
+                        ts = now_ms()
+                        if rms >= args.silence_rms:
+                            if last_audible is None or ts - last_audible > 1500:  # a new utterance after >1.5 s of silence
+                                heard_by_listener.append(ts)
+                            last_audible = ts
+                audio_tasks.append(asyncio.create_task(llisten()))
+
+        await listener.connect(os.environ["LIVEKIT_URL"], token(room_name, identity="listener"), options=rtc.RoomOptions(auto_subscribe=True))
+
     await room.connect(os.environ["LIVEKIT_URL"], token(room_name), options=rtc.RoomOptions(auto_subscribe=True))
     source = rtc.AudioSource(SR, 1, queue_size_ms=100)
     track = rtc.LocalAudioTrack.create_audio_track("mic", source)
@@ -292,9 +320,13 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
             if line is None:
                 break
             turn += 1
+            result["turns"] = turn
             pcm = await asyncio.to_thread(tts_cached, line)
             eos = await pump.speak(pcm)
             tl.caller_speech_end(eos)
+            if pump.first_audible_capture_ms is not None:
+                caller_starts.append(pump.first_audible_capture_ms)
+                await emit("caller_speech_start", {"turn": turn, "ts_capture_ms": pump.first_audible_capture_ms}, turn)
             transcript.append(("caller", line))
             await emit("caller_speech_end", {"turn": turn, "text": line, "audio_ms": int(len(pcm) * 1000 / SR)}, turn)
             # wait for the agent's first audio (or its state to flip) before the next line; the loop top waits for listening
@@ -319,6 +351,10 @@ async def run_call(room_name: str, brain, args, sink: PostgresSink | None, model
         result["summary"] = summary
         result["latencies"] = tl.latencies()
         result["transcript"] = transcript
+        if listener is not None:
+            pairs = list(zip(caller_starts, heard_by_listener))
+            result["loopback_ms"] = [h - s for s, h in pairs]
+            await listener.disconnect()
         if frames_dump is not None:
             result["frames"] = frames_dump
         await emit("caller_summary", {**summary, "turns_spoken": result["turns"], "dispatch_ms": result.get("dispatch_ms"), "notes": result["notes"]})
@@ -334,12 +370,13 @@ async def main() -> int:
     ap.add_argument("--script", choices=["fixed", "llm"], default="fixed")
     ap.add_argument("--prefix", default="r3-sim")
     ap.add_argument("--pause", type=float, default=0.6, help="seconds the caller waits after the agent stops before answering")
-    ap.add_argument("--reply-timeout", type=float, default=25.0)
+    ap.add_argument("--reply-timeout", type=float, default=45.0, help="the base model can talk for 26 s (it reads out every slot)")
     ap.add_argument("--dispatch-timeout", type=float, default=45.0)
     ap.add_argument("--silence-rms", type=float, default=300.0)
     ap.add_argument("--quiet-ms", type=int, default=700, help="agent audio must be silent this long before the caller speaks")
     ap.add_argument("--no-db", action="store_true")
     ap.add_argument("--json", default=None, help="write per-call results to this file")
+    ap.add_argument("--listener", action="store_true", help="second participant measures capture->heard delay of the caller's own speech (transport + receive buffer)")
     ap.add_argument("--dump-frames", action="store_true", help="record (ts_ms, samples, rms) of every agent audio frame into the JSON")
     args = ap.parse_args()
 
@@ -362,7 +399,7 @@ async def main() -> int:
             r = await run_call(room_name, brain, args, sink, model_id)
             r["wall_s"] = round(time.perf_counter() - t0, 1)
             s = r.get("summary", {}).get("eos_to_first_audio_ms")
-            print(f"[{room_name}] ok={r['ok']} turns={r['turns']} dispatch={r.get('dispatch_ms')} ms  first-audio p50={s['p50']:.0f} max={s['max']:.0f} ms" if s else f"[{room_name}] ok={r['ok']} turns={r['turns']} notes={r['notes']}", flush=True)
+            print(f"[{room_name}] ok={r['ok']} turns={r['turns']} dispatch={r.get('dispatch_ms')} ms  first-audio p50={s['p50']:.0f} max={s['max']:.0f} ms" + (f"  notes={r['notes']}" if r['notes'] else "") if s else f"[{room_name}] ok={r['ok']} turns={r['turns']} notes={r['notes']}", flush=True)
             return r
 
     results = await asyncio.gather(*(one(i) for i in range(args.calls)))
