@@ -1,0 +1,24 @@
+id: ordinary-01
+family: ordinary
+title: Dana books a mortgage consultation at her home branch
+today: 2026-11-02
+customer_id: C-1042
+known_facts:
+  name: Dana Whitfield
+  phone: "5550142219"
+  date_of_birth: "1988-03-12"
+  home_branch: Market Street
+persona: {name: Dana, age: 38, style: terse, notes: answers exactly what is asked}
+goal: >-
+  Book a mortgage consultation at Market Street on Wednesday, November fourth, in the morning.
+  Take the earliest morning time the agent offers. Nothing else.
+expected:
+  max_turns: 10
+  handoff: false
+  tool_steps:
+    - {name: lookup_account, args: {phone: "5550142219", date_of_birth: "1988-03-12"}}
+    - {name: check_availability, args: {branch_id: market_st, service_type: mortgage_consultation, date: "2026-11-04"}}
+    - {name: book_appointment, args: {customer_id: C-1042, branch_id: market_st, service_type: mortgage_consultation}}
+  final_state:
+    appointments:
+      - {customer_id: C-1042, branch_id: market_st, service_type: mortgage_consultation, date: "2026-11-04", status: booked}

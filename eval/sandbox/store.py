@@ -394,6 +394,18 @@ class Sandbox:
         self._log(name, args, result, ts, t0)
         return result
 
+    def reject(self, name: str, args: Any, message: str) -> dict:
+        """Log a call the harness could not dispatch (e.g. unparseable arguments)."""
+        result = err("invalid_argument", message)
+        self._log(
+            name,
+            args,
+            result,
+            datetime.now().isoformat(timespec="milliseconds"),
+            time.perf_counter(),
+        )
+        return result
+
     def _log(
         self,
         name: str,
