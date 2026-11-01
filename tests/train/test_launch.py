@@ -244,3 +244,23 @@ def test_sizing_counts_validation_passes_in_the_estimate():
     # 3 validation passes (it=1, midpoint, end) over 96 examples, forward-only at ~3x a training step's rate
     assert sizing["est_eval_seconds"] == round(3 * 96 * 1771.0 / 850.0 / 3, 1)
     assert sizing["est_total_seconds"] == round(sizing["est_train_seconds"] + sizing["est_eval_seconds"], 1)
+
+
+def test_start_server_drops_the_worktrees_env_values_so_restart_sh_reads_its_own(monkeypatch, tmp_path):
+    """Nov 1 07:10: the launcher's environment carried the worktree .env copy's LOCAL_LLM_MODEL=r3-voice-base and
+    restart.sh (which lets environment values win over kar/.env) advertised the deployed run-1 weights as r3-voice-base."""
+    import train.launch as launch
+
+    seen = tmp_path / "seen"
+    monkeypatch.setattr(launch, "env_file_keys", lambda: {"LOCAL_LLM_MODEL", "LLM_MODEL", "MODEL_DIR"})
+    monkeypatch.setenv("LOCAL_LLM_MODEL", "r3-voice-base")
+    monkeypatch.setenv("LLM_MODEL", "r3-voice-base")
+    monkeypatch.setenv("MODEL_DIR", "/stale/dir")
+    monkeypatch.setenv("R3_KEEP_ME", "yes")
+    monkeypatch.setenv("R3_SERVER_START_CMD",
+                       "printf '%s|%s|%s|%s|%s' \"${LOCAL_LLM_MODEL:-unset}\" \"${LLM_MODEL:-unset}\" \"$R3_OWNER\" "
+                       f"\"${{MODEL_DIR:-unset}}\" \"$R3_KEEP_ME\" > {seen}")
+    assert launch.start_server(model_dir="/m/r3-voice-x") == 0
+    assert seen.read_text() == "unset|unset|T|/m/r3-voice-x|yes"
+    assert launch.start_server() == 0
+    assert seen.read_text() == "unset|unset|T|unset|yes"

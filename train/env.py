@@ -30,3 +30,23 @@ def expand(value: str) -> str:
     """Expand `${VAR}` / `$VAR` / `~` in a config string after loading `.env`."""
     load_env()
     return os.path.expanduser(os.path.expandvars(value))
+
+
+def env_file_keys(path: Path | None = None) -> set[str]:
+    """The keys defined in this worktree's `.env` (Conductor's copy of session S's): values this process
+    carries that belong to the services' own `.env` in S's root and may be stale here."""
+    p = Path(path) if path else REPO_ROOT / ".env"
+    keys: set[str] = set()
+    try:
+        for line in p.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key = line.split("=", 1)[0].strip()
+            if key.startswith("export "):
+                key = key[len("export "):].strip()
+            if key:
+                keys.add(key)
+    except OSError:
+        pass
+    return keys

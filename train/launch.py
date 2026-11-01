@@ -40,7 +40,7 @@ from pathlib import Path
 import yaml
 from mlx_lm.lora import yaml_loader
 
-from train.env import REPO_ROOT, artifacts_dir, expand, load_env
+from train.env import REPO_ROOT, artifacts_dir, expand, load_env, env_file_keys
 from train.ledger import write_ledger, write_run_json
 from train.loader import check_dataset, load_manifest, load_tokenizer, manifest_hash, read_jsonl
 from train.runinfo import config_hash, git_info, model_id, new_run_id
@@ -55,11 +55,21 @@ def services_root(explicit: str | None = None) -> Path:
     return Path(explicit or os.environ.get("R3_SERVICES_ROOT") or REPO_ROOT).expanduser().resolve()
 
 
+def service_env(**extra: str) -> dict:
+    """Environment for session S's scripts (restart.sh, gpu_flip.sh, server_stop.sh, probe_dispatch.py) in S's
+    root: every key this worktree's .env defines is dropped, because this process loaded that (possibly stale)
+    copy and restart.sh lets environment values win over the .env it sources itself (a stale LOCAL_LLM_MODEL
+    once made :8000 advertise the deployed model as r3-voice-base). Only `extra` (R3_OWNER, MODEL_DIR) is added."""
+    env = {k: v for k, v in os.environ.items() if k not in env_file_keys()}
+    env.update({k: str(v) for k, v in extra.items() if v is not None})
+    return env
+
+
 def gpu_lock(root: Path, *args: str) -> tuple[int, str]:
     script = Path(root) / "scripts" / "gpu_lock.sh"
     if not script.exists():
         return 0, f"no {script}; GPU lock not enforced"
-    out = subprocess.run(["bash", str(script), *[str(a) for a in args]], cwd=root, capture_output=True, text=True)
+    out = subprocess.run(["bash", str(script), *[str(a) for a in args]], cwd=root, capture_output=True, text=True, env=service_env())
     return out.returncode, (out.stdout + out.stderr).strip()
 
 
@@ -96,7 +106,7 @@ def probe_stack(root: Path, attempts: int = 3, interval: float = 20.0) -> dict:
     outputs = []
     for i in range(1, attempts + 1):
         if custom:
-            proc = subprocess.run(custom, shell=True, cwd=root, capture_output=True, text=True)
+            proc = subprocess.run(custom, shell=True, cwd=root, capture_output=True, text=True, env=service_env())
         else:
             proc = subprocess.run([sys.executable, str(script)], cwd=root, capture_output=True, text=True)
         text = (proc.stdout + proc.stderr).strip()
@@ -359,7 +369,7 @@ def run_record(ctx: dict, status: str, **extra) -> dict:
 
 def flip(mode: str, root: Path = REPO_ROOT) -> None:
     print(f"[server] {root}/scripts/gpu_flip.sh {mode}", flush=True)
-    subprocess.run(["bash", "scripts/gpu_flip.sh", mode], cwd=root, check=True)
+    subprocess.run(["bash", "scripts/gpu_flip.sh", mode], cwd=root, check=True, env=service_env())
 
 
 def _listening_pids(port: int) -> list[int]:
@@ -377,7 +387,7 @@ def stop_server(port: int = SERVER_PORT, timeout: float = 30.0, root: Path = REP
         custom = f"bash {script}"
     if custom:
         print(f"[server] stop: {custom}", flush=True)
-        subprocess.run(custom, shell=True, cwd=root)
+        subprocess.run(custom, shell=True, cwd=root, env=service_env())
         return
     if os.environ.get("R3_NEVER_KILL_PORTS"):
         raise RuntimeError("R3_NEVER_KILL_PORTS is set (tests): refusing to kill whatever listens on the port")
@@ -400,9 +410,7 @@ def start_server(root: Path = REPO_ROOT, model_dir: str | None = None) -> int:
     """restart.sh (or $R3_SERVER_START_CMD) with R3_OWNER=T (it refuses while another owner holds the
     lock) and, for a deploy, MODEL_DIR=<versioned model dir> (restart.sh serves it as LOCAL_LLM_MODEL)."""
     cmd = os.environ.get("R3_SERVER_START_CMD") or "bash scripts/restart.sh"
-    env = {**os.environ, "R3_OWNER": LOCK_OWNER}
-    if model_dir:
-        env["MODEL_DIR"] = str(model_dir)
+    env = service_env(R3_OWNER=LOCK_OWNER, MODEL_DIR=str(model_dir) if model_dir else None)
     print(f"[server] start in {root}: R3_OWNER={LOCK_OWNER}{' MODEL_DIR=' + str(model_dir) if model_dir else ''} {cmd}", flush=True)
     rc = subprocess.run(cmd, shell=True, cwd=root, env=env).returncode
     if rc != 0:
