@@ -18,8 +18,15 @@ def select_candidates(tables: list[dict]) -> list[dict]:
         s = t.get("selection") or {}
         return (s.get("unsupported_success_claims") or 0, -(s.get("task_completion") or 0.0), -(s.get("tool_calls") or 0.0))
 
+    seen = set()
+    unique = []
+    for t in sorted(tables, key=key):  # the same model's table can sit in two run dirs; keep its best-ranked copy
+        if t.get("model") in seen:
+            continue
+        seen.add(t.get("model"))
+        unique.append(t)
     ranked = []
-    for rank, t in enumerate(sorted(tables, key=key), start=1):
+    for rank, t in enumerate(unique, start=1):
         s = t.get("selection") or {}
         claims = s.get("unsupported_success_claims") or 0
         reason = (f"{claims} unsupported success claim{'s' if claims != 1 else ''}; " if claims else "no unsupported success claims; ") + \

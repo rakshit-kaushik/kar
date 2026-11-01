@@ -276,3 +276,11 @@ def test_side_model_servers_run_with_queueing_admission(monkeypatch):
     assert server_env()["VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION"] == "wait"
     monkeypatch.setenv("VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION", "reject")
     assert server_env()["VLLM_MLX_SIMPLE_ENGINE_LOCK_ADMISSION"] == "reject"
+
+
+def test_select_candidates_dedupes_tables_of_the_same_model():
+    from train.select import select_candidates
+
+    t = {"model": "m", "selection": {"task_completion": 50.0, "unsupported_success_claims": 0, "tool_calls": 10.0, "episodes": 27}}
+    ranked = select_candidates([t, dict(t), {"model": "base", "selection": {"task_completion": 40.0, "unsupported_success_claims": 0, "tool_calls": 5.0, "episodes": 27}}])
+    assert [r["model"] for r in ranked] == ["m", "base"] and [r["rank"] for r in ranked] == [1, 2]
