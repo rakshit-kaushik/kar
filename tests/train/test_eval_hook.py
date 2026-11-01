@@ -53,14 +53,15 @@ def test_family_table_aggregates_pass_rates_per_family_and_scorer():
 
 def test_precision_gate_is_within_one_point_of_the_unfused_adapter():
     fused = family_table(ROWS)
-    adapter = family_table(ROWS[:3] + [{**ROWS[3], "pass": False}])  # 50% vs 75%
+    adapter = family_table(ROWS[:3] + [{**ROWS[3], "pass": False}])  # final_state 2/3 vs 1/3
     gate = precision_gate(fused, adapter, tolerance_points=1.0)
-    assert gate["fused_pass_rate"] == 75.0 and gate["adapter_pass_rate"] == 50.0
-    assert gate["delta_points"] == 25.0 and gate["pass"] is True  # fused better than adapter passes
+    assert gate["scorer"] == "final_state"  # task completion when the runner scored it
+    assert gate["fused_pass_rate"] == 66.67 and gate["adapter_pass_rate"] == 33.33
+    assert gate["delta_points"] == 33.34 and gate["pass"] is True  # fused better than adapter passes
     gate = precision_gate(adapter, fused, tolerance_points=1.0)
-    assert gate["delta_points"] == -25.0 and gate["pass"] is False
-    gate = precision_gate(fused, fused, tolerance_points=1.0, scorer="final_state")
-    assert gate["pass"] is True and gate["scorer"] == "final_state"
+    assert gate["delta_points"] == -33.34 and gate["pass"] is False
+    gate = precision_gate(fused, fused, tolerance_points=1.0, scorer="no_jargon")
+    assert gate["pass"] is True and gate["scorer"] == "no_jargon"
 
 
 def test_server_commands_use_the_installed_servers_with_thinking_off():
@@ -206,3 +207,50 @@ def test_serve_only_keeps_the_side_stack_up_until_the_stop_file(tmp_path, monkey
     served = json.loads((out / "serving.json").read_text())
     assert served["base_url"] == f"http://127.0.0.1:{port + 1}/v1"
     assert wait_for_health(info["proxy"]["base_url"], timeout=2) is False  # both are down again
+
+
+E_ROWS = [  # the shape eval/runner.py writes to scores.jsonl (one episode, two scorers + one advisory)
+    {"run_id": "r", "model_id": "m", "scenario_id": "ordinary_01", "episode_id": "e1", "repeat_seed": 1, "family": "ordinary",
+     "scorer": "final_state", "pass": True, "advisory": False, "turn_idx": None, "detail": {}},
+    {"run_id": "r", "model_id": "m", "scenario_id": "ordinary_01", "episode_id": "e1", "repeat_seed": 1, "family": "ordinary",
+     "scorer": "no_success_claim_before_result", "pass": False, "advisory": False, "turn_idx": 3, "detail": {}},
+    {"run_id": "r", "model_id": "m", "scenario_id": "ordinary_01", "episode_id": "e1", "repeat_seed": 1, "family": "ordinary",
+     "scorer": "brevity", "pass": False, "advisory": True, "turn_idx": 2, "detail": {}},
+    {"run_id": "r", "model_id": "m", "scenario_id": "correction_01", "episode_id": "e2", "repeat_seed": 1, "family": "correction",
+     "scorer": "final_state", "pass": False, "advisory": False, "turn_idx": None, "detail": {}},
+    {"run_id": "r", "model_id": "m", "scenario_id": "correction_01", "episode_id": "e2", "repeat_seed": 1, "family": "correction",
+     "scorer": "tool_calls", "pass": True, "advisory": False, "turn_idx": None, "detail": {}},
+]
+
+
+def test_collect_results_reads_the_runners_scores_jsonl(tmp_path):
+    out = tmp_path / "o"
+    out.mkdir()
+    (out / "scores.jsonl").write_text("\n".join(json.dumps(r) for r in E_ROWS) + "\n")
+    rows = collect_results(run_id="r", model_id="m", out_dir=out, database_url=None)
+    assert len(rows) == 5
+
+
+def test_family_table_excludes_advisory_rows_and_reports_the_selection_metrics():
+    t = family_table(E_ROWS)
+    assert t["overall"]["n"] == 4 and t["advisory"]["n"] == 1 and t["advisory"]["failed"] == 1
+    assert t["families"]["ordinary"]["n"] == 2 and "brevity" not in t["families"]["ordinary"]["scorers"]
+    sel = t["selection"]
+    assert sel["task_completion"] == 50.0 and sel["tool_calls"] == 100.0 and sel["unsupported_success_claims"] == 1
+    assert sel["episodes"] == 2
+
+
+def test_precision_gate_defaults_to_final_state_when_the_runner_scored_it():
+    gate = precision_gate(family_table(E_ROWS), family_table(E_ROWS))
+    assert gate["scorer"] == "final_state" and gate["pass"] is True and gate["delta_points"] == 0.0
+
+
+def test_select_candidate_prefers_zero_unsupported_claims_then_task_completion(tmp_path):
+    from train.select import select_candidates
+
+    def table(name, tc, claims, tools=100.0):
+        return {"model": name, "selection": {"task_completion": tc, "unsupported_success_claims": claims, "tool_calls": tools, "episodes": 27}}
+
+    ranked = select_candidates([table("base", 40.0, 0), table("run1", 70.0, 2), table("run2", 65.0, 0)])
+    assert [r["model"] for r in ranked] == ["run2", "base", "run1"]
+    assert ranked[0]["rank"] == 1 and ranked[2]["reason"].startswith("2 unsupported")

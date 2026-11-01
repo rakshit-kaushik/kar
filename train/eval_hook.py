@@ -169,11 +169,13 @@ def collect_results(run_id: str, model_id: str, out_dir: str | Path, database_ur
         except Exception as e:  # noqa: BLE001
             print(f"[eval] postgres eval_results unavailable ({type(e).__name__}: {e}); using jsonl", flush=True)
     if not rows:
-        p = Path(out_dir) / "eval_results.jsonl"
-        if p.exists():
-            rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
-            mine = [r for r in rows if r.get("run_id") == run_id]
-            rows = mine or rows
+        for name in ("scores.jsonl", "eval_results.jsonl"):  # E's runner writes scores.jsonl; the stub eval_results.jsonl
+            p = Path(out_dir) / name
+            if p.exists():
+                rows = [json.loads(l) for l in p.read_text().splitlines() if l.strip()]
+                mine = [r for r in rows if r.get("run_id") == run_id]
+                rows = mine or rows
+                break
     return rows
 
 
@@ -209,7 +211,17 @@ def _rate(passed: int, n: int) -> float:
     return round(100.0 * passed / n, 2) if n else 0.0
 
 
+TASK_COMPLETION = "final_state"
+TOOL_ARGS = "tool_calls"
+SUCCESS_CLAIM = "no_success_claim_before_result"
+
+
 def family_table(rows: list[dict]) -> dict:
+    """Pass rates per family and scorer over the non-advisory rows, plus the plan's selection metrics:
+    task completion (final_state), tool-argument accuracy (tool_calls) and the count of unsupported
+    success claims (failed no_success_claim_before_result rows). Advisory rows are counted apart."""
+    advisory = [r for r in rows if r.get("advisory")]
+    rows = [r for r in rows if not r.get("advisory")]
     fams: dict[str, dict] = {}
     for r in rows:
         fam = fams.setdefault(str(r.get("family")), {"n": 0, "passed": 0, "scorers": {}})
@@ -225,7 +237,19 @@ def family_table(rows: list[dict]) -> dict:
             sc["pass_rate"] = _rate(sc["passed"], sc["n"])
     n = len(rows)
     passed = sum(1 for r in rows if r.get("pass"))
-    return {"overall": {"n": n, "passed": passed, "pass_rate": _rate(passed, n)}, "families": dict(sorted(fams.items()))}
+    table = {"overall": {"n": n, "passed": passed, "pass_rate": _rate(passed, n)}, "families": dict(sorted(fams.items())),
+             "advisory": {"n": len(advisory), "failed": sum(1 for r in advisory if not r.get("pass"))}}
+    table["selection"] = {
+        "task_completion": _scorer_rate(table, TASK_COMPLETION) if _has_scorer(table, TASK_COMPLETION) else None,
+        "tool_calls": _scorer_rate(table, TOOL_ARGS) if _has_scorer(table, TOOL_ARGS) else None,
+        "unsupported_success_claims": sum(1 for r in rows if r.get("scorer") == SUCCESS_CLAIM and not r.get("pass")),
+        "episodes": len({r.get("episode_id") or (r.get("scenario_id"), r.get("repeat_seed")) for r in rows}),
+    }
+    return table
+
+
+def _has_scorer(table: dict, scorer: str) -> bool:
+    return any(scorer in f["scorers"] for f in table["families"].values())
 
 
 def format_family_table(table: dict) -> str:
@@ -238,6 +262,12 @@ def format_family_table(table: dict) -> str:
         lines.append("| " + " | ".join(cells) + " |")
     o = table["overall"]
     lines.append("| " + " | ".join(["**overall**", str(o["n"]), f"{o['pass_rate']:.1f}"] + ["" for _ in scorers]) + " |")
+    sel = table.get("selection")
+    if sel:
+        lines.append("")
+        lines.append(f"selection: task completion {sel['task_completion']} · tool calls {sel['tool_calls']} · "
+                     f"unsupported success claims {sel['unsupported_success_claims']} · episodes {sel['episodes']}"
+                     + (f" · advisory failures {table['advisory']['failed']}/{table['advisory']['n']}" if table.get("advisory") else ""))
     return "\n".join(lines)
 
 
@@ -251,7 +281,10 @@ def _scorer_rate(table: dict, scorer: str | None) -> float:
 
 def precision_gate(fused: dict, adapter: dict, tolerance_points: float = 1.0, scorer: str | None = None) -> dict:
     """G3: the fused, re-quantized artifact must be within `tolerance_points` of the unfused adapter on
-    the 8-bit base (the configuration that was trained). Better-than-adapter passes."""
+    the 8-bit base (the configuration that was trained), on task completion (final_state) when the
+    runner scored it. Better-than-adapter passes."""
+    if scorer is None and _has_scorer(fused, TASK_COMPLETION) and _has_scorer(adapter, TASK_COMPLETION):
+        scorer = TASK_COMPLETION
     f, a = _scorer_rate(fused, scorer), _scorer_rate(adapter, scorer)
     delta = round(f - a, 2)
     return {"scorer": scorer or "overall", "fused_pass_rate": f, "adapter_pass_rate": a, "delta_points": delta,
