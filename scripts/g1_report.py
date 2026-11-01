@@ -66,6 +66,15 @@ def unsupported_claims(events) -> int:
     return n
 
 
+def filler_timing(turn_events, anchor):
+    """For a turn that spoke a filler before a tool call: (eos -> filler audible, eos -> first audible reply) in ms on the agent
+    clock, each None when that audio never came; (None, None) for turns without a filler_start event."""
+    if not any(e[3] == "filler_start" for e in turn_events):
+        return (None, None)
+    audible = sorted(e[4] for e in turn_events if e[3] == "tts_first_audible")
+    return (audible[0] - anchor if audible else None, audible[1] - anchor if len(audible) > 1 else None)
+
+
 def turn_kind(llm_done_payload: dict) -> str:
     """'tool' when the model's reply was a tool call (vllm-mlx streams it only when complete, so its first token is the whole
     turn and the caller hears nothing until the tool ran and a second turn spoke), else 'spoken'."""
@@ -111,13 +120,16 @@ def main() -> None:
     M: dict[str, list] = defaultdict(list)  # metric name -> samples
     per_call = []
     simulated = 0
+    filler_turns = 0
+    tts_vendors: set[str] = set()
     for call_id, evs in by_call.items():
         model = evs[0][2]
         leaks = sum(1 for e in evs if e[3] == "transcript" and e[5].get("role") == "assistant" and e[5].get("structural"))
         lookup_ok = any(e[3] == "tool_end" and e[5].get("name") == "lookup_account" and e[5].get("ok") for e in evs)
         tools = [e[5].get("name") for e in evs if e[3] == "tool_end" and e[5].get("ok")]
         fallbacks = sum(1 for e in evs if e[3] == "llm_first_token" and e[5].get("source") == "hosted")
-        claims = unsupported_claims(evs)  # turns served by the hosted model (a hedge the local side won is not one)
+        claims = unsupported_claims(evs)
+        tts_vendors.update(str(e[5].get("tts_vendor")) for e in evs if e[3] == "call_end" and e[5].get("tts_vendor"))  # turns served by the hosted model (a hedge the local side won is not one)
         joined = next((e[5].get("ms") for e in evs if e[3] == "caller_agent_joined"), None)
         if joined is not None:
             M["agent_dispatch"].append(joined); simulated += 1
@@ -148,6 +160,11 @@ def main() -> None:
             if heard: M["eos_to_first_audio_heard"].append(heard - t)
             if heard and audible: M["transport"].append(heard - audible)
             if spk and not heard: M["eos_to_agent_speaking"].append(spk - t)
+            if any(e[3] == "filler_start" for e in window):
+                filler_turns += 1
+                f_aud, r_aud = filler_timing(window, t)
+                if f_aud is not None: M["eos_to_filler_audible"].append(f_aud)
+                if r_aud is not None: M["eos_to_reply_audible"].append(r_aud)
             for e in window:
                 if e[3] == "eou_metrics":
                     if e[5].get("end_of_utterance_delay") is not None: M["eou_delay"].append(e[5]["end_of_utterance_delay"] * 1000)
@@ -165,13 +182,15 @@ def main() -> None:
     print()
     print(f"end of speech -> first audio heard   {fmt(M['eos_to_first_audio_heard'])}   (target p50 ≤ 1000, p95 ≤ 1600)")
     print(f"end of speech -> first audible TTS   {fmt(M['eos_to_tts_audible'])}   (agent clock)")
+    if filler_turns:
+        print(f"  filler before tool calls           {filler_turns} turns · filler audible {fmt(M['eos_to_filler_audible'])} · first reply audible {fmt(M['eos_to_reply_audible'])}   (agent clock; 'first audio heard' includes the filler)")
     print(f"transport: audible -> heard          {fmt(M['transport'])}")
     print(f"turn-taking overhead -> LLM request  {fmt(M['turn_taking_overhead'])}   (VAD + STT final + endpointing)")
     print(f"  EOU delay (LiveKit)                {fmt(M['eou_delay'])}   STT final after VAD end {fmt(M['transcription_delay'])}")
     print(f"LLM TTFT (proxy)                     {fmt(M['llm_ttft'])}   local {fmt(M['llm_ttft_local'])}   hosted {fmt(M['llm_ttft_hosted'])}")
     print(f"  by turn type                       tool-call turns {fmt(M['llm_ttft_tool'])}   spoken turns {fmt(M['llm_ttft_spoken'])}   (tool-call turns: first token = whole call)")
     print(f"LLM decode                           {fmt(M['decode_tok_s'], 'tok/s')}")
-    print(f"TTS first byte (Cartesia)            {fmt(M['tts_ttfb'])}   (target ≤ 200)")
+    print(f"TTS first byte ({'/'.join(sorted(tts_vendors)) or 'vendor n/a':<9})   {fmt(M['tts_ttfb'])}   (target ≤ 200)")
     print(f"prompt / completion tokens           {fmt(M['prompt_tokens'], 'tok')} / {fmt(M['completion_tokens'], 'tok')}")
     if M["agent_dispatch"]:
         print(f"agent joined after caller            {fmt(M['agent_dispatch'])}")
@@ -182,8 +201,8 @@ def main() -> None:
 
     if args.ledger:
         note = args.note or f"{kind} matching {args.like}"
-        items = [("calls", len(per_call), "calls"), ("lookups_ok", ok_calls, "calls"), ("structural_leak_calls", leak_calls, "calls"), ("unsupported_claim_calls", claim_calls, "calls"), ("fallbacks", fb_total, "requests")]
-        for name in ("eos_to_first_audio_heard", "eos_to_tts_audible", "transport", "turn_taking_overhead", "eou_delay", "transcription_delay", "llm_ttft_local", "llm_ttft_hosted", "llm_ttft_tool", "llm_ttft_spoken", "decode_tok_s", "tts_ttfb", "prompt_tokens", "completion_tokens", "agent_dispatch"):
+        items = [("calls", len(per_call), "calls"), ("lookups_ok", ok_calls, "calls"), ("structural_leak_calls", leak_calls, "calls"), ("unsupported_claim_calls", claim_calls, "calls"), ("filler_turns", filler_turns, "turns"), ("fallbacks", fb_total, "requests")]
+        for name in ("eos_to_first_audio_heard", "eos_to_tts_audible", "eos_to_filler_audible", "eos_to_reply_audible", "transport", "turn_taking_overhead", "eou_delay", "transcription_delay", "llm_ttft_local", "llm_ttft_hosted", "llm_ttft_tool", "llm_ttft_spoken", "decode_tok_s", "tts_ttfb", "prompt_tokens", "completion_tokens", "agent_dispatch"):
             xs = M.get(name) or []
             unit = "tok/s" if name == "decode_tok_s" else ("tok" if "tokens" in name else "ms")
             if xs:

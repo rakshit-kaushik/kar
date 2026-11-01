@@ -41,3 +41,12 @@ def test_success_claims_without_a_tool_result_are_counted():
     failed_tool = [_ev("c", "tool_end", 1, {"name": "book_appointment", "ok": False}),
                    _ev("c", "transcript", 2, {"role": "assistant", "text": "Your appointment is booked."})]
     assert g1_report.unsupported_claims(failed_tool) == 1
+
+
+def test_filler_timing_splits_filler_audio_from_the_reply():
+    # a turn anchored at 0: filler spoken at 900 ms (audible 1150), the real reply audible at 1900
+    evs = [_ev("c", "filler_start", 900, {"tool": "lookup_account", "text": "One moment."}),
+           _ev("c", "tts_first_audible", 1150, {}), _ev("c", "tts_first_audible", 1900, {})]
+    assert g1_report.filler_timing(evs, 0) == (1150, 1900)
+    assert g1_report.filler_timing([_ev("c", "tts_first_audible", 700, {})], 0) == (None, None)  # no filler: nothing to split
+    assert g1_report.filler_timing([_ev("c", "filler_start", 900, {})], 0) == (None, None)  # filler never became audible

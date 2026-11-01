@@ -17,7 +17,7 @@ import os
 import pathlib
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 import psycopg
@@ -34,6 +34,7 @@ from psycopg.types.json import Jsonb
 
 from services.agent.state import CallState
 from services.agent.faults import faults_from_room_name
+from services.agent.filler import FillerPolicy, filler_text
 from services.agent.tts import make_tts, tts_vendor
 from services.common.events import PostgresSink
 from services.tools.executor import ToolExecutor
@@ -89,6 +90,8 @@ class CallData:
     turn_idx: int = 0
     structural_leaks: int = 0
     started: float = field(default_factory=time.time)
+    filler: FillerPolicy = field(default_factory=lambda: FillerPolicy(filler_text()))
+    fire: Callable[..., None] | None = None  # set per call: the turn-event emitter
 
 
 server = AgentServer(num_idle_processes=1)  # a warm job process: the agent joins ~1 s sooner
@@ -101,7 +104,20 @@ def prewarm(proc: JobProcess) -> None:
 
 
 server.setup_fnc = prewarm
-TOOLS = build_livekit_tools(lambda ctx: ctx.userdata.executor)
+def _tool_start(ctx, tool_name: str) -> None:
+    """The moment a tool starts: speak the filler (services/agent/filler.py) and log it as `filler_start`. Not added to
+    the chat context, so the model never sees it. Never lets an error reach the tool call."""
+    d: CallData = ctx.userdata
+    try:
+        text = d.filler.decide(d.turn_idx, str(ctx.session.agent_state), tool_name)
+        if text and d.fire is not None:
+            d.fire("filler_start", {"tool": tool_name, "text": text})
+            ctx.session.say(text, allow_interruptions=True, add_to_chat_ctx=False)
+    except Exception as e:  # a filler must never cost the tool call
+        log.warning("filler skipped: %r", e)
+
+
+TOOLS = build_livekit_tools(lambda ctx: ctx.userdata.executor, on_tool_start=_tool_start)
 
 
 async def db_exec(sql: str, params: tuple) -> None:
@@ -138,6 +154,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     def fire(event: str, payload: dict[str, Any] | None = None) -> None:
         asyncio.create_task(emit(event, payload))
+
+    data.fire = fire
 
     await db_exec(
         "insert into sessions(call_id, model_id, started_at, state) values (%s, %s, now(), %s) on conflict (call_id) do nothing",
@@ -241,7 +259,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     await session.start(agent=R3Agent(instructions=SYSTEM_PROMPT, tools=TOOLS, on_first_audible=lambda p: fire("tts_first_audible", p)), room=ctx.room)
     await ctx.connect()
-    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": os.environ.get("CARTESIA_MODEL", "sonic-3"), "turn": TURN})
+    await emit("call_start", {"llm_base_url": base_url, "stt": "deepgram/nova-3", "tts": tts_vendor(), "filler": filler_text(), "turn": TURN})
     session.say(GREETING, allow_interruptions=True)
 
 
