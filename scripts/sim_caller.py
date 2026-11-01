@@ -417,6 +417,7 @@ async def main() -> int:
     ap.add_argument("--quiet-ms", type=int, default=700, help="agent audio must be silent this long before the caller speaks")
     ap.add_argument("--no-db", action="store_true")
     ap.add_argument("--json", default=None, help="write per-call results to this file")
+    ap.add_argument("--lines-file", default=None, help="JSON list of caller lines to speak instead of the fixed Dana script (demo/turns/*.json)")
     ap.add_argument("--interrupt-turn", type=int, default=0, help="caller turn that cuts into the agent's reply instead of waiting for quiet (0 = never)")
     ap.add_argument("--interrupt-after-ms", type=int, default=2000, help="how long the agent must have been audibly speaking before the caller cuts in")
     ap.add_argument("--listener", action="store_true", help="second participant measures capture->heard delay of the caller's own speech (transport + receive buffer)")
@@ -436,10 +437,16 @@ async def main() -> int:
 
     async def one(i: int) -> dict:
         async with sem:
-            brain = FixedScript(DANA_FIXED) if args.script == "fixed" else LLMCaller(DANA_GOAL, seed=i)
+            if args.lines_file:
+                brain = FixedScript(json.loads(pathlib.Path(args.lines_file).read_text()))
+            else:
+                brain = FixedScript(DANA_FIXED) if args.script == "fixed" else LLMCaller(DANA_GOAL, seed=i)
             room_name = f"{args.prefix}-{batch}-{i + 1}"
             t0 = time.perf_counter()
-            r = await run_call(room_name, brain, args, sink, model_id)
+            try:
+                r = await run_call(room_name, brain, args, sink, model_id)
+            except Exception as e:  # e.g. the LLM caller's hosted model refusing (credits): end this call, keep the batch
+                r = {"call_id": room_name, "ok": False, "turns": 0, "notes": [f"call aborted: {e!r}"[:200]], "transcript": []}
             r["wall_s"] = round(time.perf_counter() - t0, 1)
             s = r.get("summary", {}).get("eos_to_first_audio_ms")
             print(f"[{room_name}] ok={r['ok']} turns={r['turns']} dispatch={r.get('dispatch_ms')} ms  first-audio p50={s['p50']:.0f} max={s['max']:.0f} ms" + (f"  notes={r['notes']}" if r['notes'] else "") if s else f"[{room_name}] ok={r['ok']} turns={r['turns']} notes={r['notes']}", flush=True)
