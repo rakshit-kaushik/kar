@@ -2,19 +2,17 @@
   "type": "function",
   "function": {
     "name": "cancel_appointment",
-    "description": "Cancel an existing appointment after read-back confirmation. Errors: not_found, timeout.",
+    "description": "Cancel an appointment after the caller confirmed the read-back.",
     "parameters": {
       "type": "object",
       "properties": {
         "appointment_id": {
-          "type": "string",
-          "description": "From lookup_account"
+          "type": "string"
         }
       },
       "required": [
         "appointment_id"
-      ],
-      "additionalProperties": false
+      ]
     }
   }
 }
