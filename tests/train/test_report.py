@@ -94,3 +94,10 @@ def test_report_ranks_on_the_caller_fault_excluded_tables_when_any_exist_and_kee
     assert rep["runs"][0]["eval"]["all_pass"] == 23.6 and rep["runs"][0]["eval_run_id"] == "r3-voice-bbb-eval-20261101-073000-localcaller"
     md = render_report(rep)
     assert "caller-fault-excluded" in md and "| 1 | r3-voice-bbb | 23.6 | 6 |" in md
+    # a paired precision gate next to the selected model's table is quoted
+    gate_dir = tmp_path / "runs" / "r3-voice-bbb-eval-20261101-073000-localcaller" / "eval"
+    (gate_dir / "precision_gate.json").write_text(json.dumps({"paired": True, "episodes_paired": 17, "fused": {"final_state": 14, "all_pass": 10, "unsupported_success_claims": 0},
+                                                             "adapter": {"final_state": 14, "all_pass": 12, "unsupported_success_claims": 0}, "pass": True, "rule": "r"}))
+    rep = build_report(tmp_path)
+    assert rep["selection"]["gate"]["episodes_paired"] == 17
+    assert "Precision gate (paired on 17" in render_report(rep) and "**PASS**" in render_report(rep)

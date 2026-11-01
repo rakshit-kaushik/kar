@@ -123,8 +123,13 @@ def build_report(artifacts: Path, extra_tables: list[Path] | None = None, tasks:
         })
     ranked = select_candidates(tables) if tables else []
     excluded = next((t.get("excluded") for t in tables if t.get("excluded")), None) if basis == "caller-fault-excluded" else None
+    gate = None
+    if ranked:  # the precision gate written next to the selected model's eval table (paired when eval_hook --paired-gate ran)
+        sel_table = by_model.get(ranked[0]["model"])
+        gp = Path(sel_table["_path"]).with_name("precision_gate.json") if sel_table and sel_table.get("_path") else None
+        gate = _load(gp) if gp and gp.exists() else None
     return {"generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "artifacts": str(artifacts), "runs": runs,
-            "selection": {"selected": ranked[0] if ranked else None, "ranked": ranked, "basis": basis,
+            "selection": {"selected": ranked[0] if ranked else None, "ranked": ranked, "basis": basis, "gate": gate,
                           "excluded_prefixes": len((excluded or {}).get("prefixes") or []), "exclude_file": (excluded or {}).get("file"),
                           "tables": [{"model": t.get("model"), "run_id": t.get("run_id"), "path": t.get("_path")} for t in tables]},
             "routing": routing_rows(artifacts, runs, ledger_reader)}
@@ -157,6 +162,15 @@ def render_report(rep: dict) -> str:
                 for c in sel["ranked"]]
         s = sel["selected"]
         out += ["", f"**Selected: {s['model']}** ({s['reason']}); model dir `{s.get('model_dir')}`."]
+        g = sel.get("gate")
+        if g and g.get("paired"):
+            out += ["", f"Precision gate (paired on {g['episodes_paired']} scenario x seed episodes both runs scored, same exclusions): fused final_state "
+                    f"{g['fused']['final_state']} vs unfused adapter on the base {g['adapter']['final_state']}, all-pass {g['fused']['all_pass']} vs "
+                    f"{g['adapter']['all_pass']}, unsupported claims {g['fused']['unsupported_success_claims']} vs {g['adapter']['unsupported_success_claims']}: "
+                    f"**{'PASS' if g['pass'] else 'FAIL'}** ({g['rule']})."]
+        elif g:
+            out += ["", f"Precision gate (unpaired, {g.get('scorer')}): fused {g.get('fused_pass_rate')} vs adapter {g.get('adapter_pass_rate')}: "
+                    f"**{'PASS' if g.get('pass') else 'FAIL'}**."]
     else:
         out.append("No scored candidates yet.")
     if rep.get("routing"):
