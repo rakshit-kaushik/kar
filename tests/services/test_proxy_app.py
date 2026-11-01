@@ -298,3 +298,48 @@ async def test_admission_limit_without_hosted_available_queues_locally():
     assert len(hosted_received) == 1
     r3 = await client.post("/v1/chat/completions", json=BODY, headers={"X-R3-Call-Id": "q3"})
     assert r3.headers["X-R3-Model"] == "r3-voice-base" and len(hosted_received) == 1  # breaker open: no routing to hosted
+
+
+# ---- hedged fallback: when the first-token timeout fires the local request keeps running and races the hosted one;
+# the first stream to produce a token is served and the other is cancelled. (Nov 1: cancelling the local request and
+# re-issuing it after a hosted 400 cost 5-8 s per turn while the engine finished the orphaned request first.)
+
+def slow_hosted_upstream(received: list, delay_s: float):
+    import asyncio
+
+    async def chat(request: Request):
+        received.append(await request.json())
+
+        async def gen():
+            await asyncio.sleep(delay_s)
+            yield sse({**chunk({"role": "assistant"}), "model": "claude-sonnet-5-5"})
+            yield sse({**chunk({"content": "Hello from hosted."}, finish="stop"), "model": "claude-sonnet-5-5"})
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    return Starlette(routes=[Route("/v1/chat/completions", chat, methods=["POST"])])
+
+
+async def test_local_keeps_running_after_the_timeout_and_wins_against_a_slower_hosted_reply():
+    hosted_received, events = [], []
+    upstream = httpx.AsyncClient(transport=httpx.ASGITransport(app=slow_or_dead_upstream("slow")), base_url="http://upstream")  # first token at 0.5 s
+    hosted = httpx.AsyncClient(transport=httpx.ASGITransport(app=slow_hosted_upstream(hosted_received, 2.0)), base_url="http://hosted")
+
+    async def sink(ev):
+        events.append(ev)
+
+    app = create_app(upstream_client=upstream, event_sink=sink, fallback_client=hosted, fallback_model="claude-sonnet-5-5", first_token_timeout=0.1)
+    client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
+    import time
+    t0 = time.perf_counter()
+    r = await client.post("/v1/chat/completions", json=BODY, headers={"X-R3-Call-Id": "h1"})
+    elapsed = time.perf_counter() - t0
+    assert r.headers["X-R3-Model"] == "r3-voice-base"
+    assert "".join(c["choices"][0]["delta"].get("content") or "" for c in parse_sse(r.text) if c != "[DONE]") == "late"
+    assert elapsed < 1.5, f"local should win at ~0.5 s, not wait for hosted: {elapsed:.2f}s"
+    assert len(hosted_received) == 1  # hosted was tried (fallback event), then cancelled
+    kinds = [e["event"] for e in events]
+    assert "fallback" in kinds and events[-1]["event"] == "llm_done" and events[-1]["model_id"] == "r3-voice-base"
+    ft = [e for e in events if e["event"] == "llm_first_token"]
+    assert ft and ft[0]["payload"]["source"] == "local"

@@ -74,3 +74,11 @@ routing track → speculative decoding → run 2 → Next.js/Astra UI extras →
 - Rollback a model: point the server at the previous `models/r3-voice-<hash>` directory and restart.
 - Fallback on the fly: `scripts/gpu_flip.sh hosted`.
 - Postgres reset of sandbox tables only: `eval/sandbox/reset.py` (E fills in).
+
+### Hosted fallback is a hedge (Nov 1, 02:20)
+A local turn with no first token after `PROXY_FIRST_TOKEN_TIMEOUT_MS` (3000) no longer gets cancelled: the proxy starts the
+hosted request beside it and serves whichever streams a token first (`fallback` event with `hedged: true`, then
+`fallback_cancelled` on the loser). Reason: the engine finishes a dropped request anyway, so the old cancel-and-reissue
+cost 5-8 s per turn when the hosted side then failed (credits exhausted, call r3-g1-0145-015841-1 turn 3). With the
+breaker open (hosted 4xx) the proxy simply waits for local. `g1_report` counts a fallback only when the hosted stream was
+served (`llm_first_token.source = hosted`).

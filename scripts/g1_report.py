@@ -74,7 +74,7 @@ def main() -> None:
         leaks = sum(1 for e in evs if e[3] == "transcript" and e[5].get("role") == "assistant" and e[5].get("structural"))
         lookup_ok = any(e[3] == "tool_end" and e[5].get("name") == "lookup_account" and e[5].get("ok") for e in evs)
         tools = [e[5].get("name") for e in evs if e[3] == "tool_end" and e[5].get("ok")]
-        fallbacks = sum(1 for e in evs if e[3] == "fallback")
+        fallbacks = sum(1 for e in evs if e[3] == "llm_first_token" and e[5].get("source") == "hosted")  # turns served by the hosted model (a hedge the local side won is not one)
         joined = next((e[5].get("ms") for e in evs if e[3] == "caller_agent_joined"), None)
         if joined is not None:
             M["agent_dispatch"].append(joined); simulated += 1
