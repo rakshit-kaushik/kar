@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Streamed chat completion with the eight tools against LLM_BASE_URL.
+"""Streamed chat completion with the contract tools against LLM_BASE_URL.
 
 Prints every delta kind as it arrives and reports: TTFT, whether tool calls came as OpenAI
 `tool_calls` deltas or as raw text, any `<think>`/`<tool_call>` leakage, token usage.
@@ -21,7 +21,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 load_dotenv(ROOT / ".env")
 
 TOOLS = [json.loads(p.read_text()) for p in sorted((ROOT / "schemas/tools").glob("*.json"))]
-SYSTEM = (ROOT / "services/agent/system_prompt.md").read_text().replace("{today}", "Monday, November second, 2026, ten in the morning")
+SYSTEM = (ROOT / "schemas/system_prompt.md").read_text().replace("{today}", json.loads((ROOT / "eval/sandbox/seed.json").read_text())["clock_spoken"])
 
 
 def messages(turn2: bool) -> list[dict]:
@@ -55,7 +55,7 @@ def main() -> int:
     usage = None
     stream = client.chat.completions.create(
         model=args.model, messages=messages(args.turn2), tools=TOOLS, tool_choice="auto",
-        stream=True, max_tokens=200, temperature=0.2, stream_options={"include_usage": True},
+        stream=True, max_tokens=200, stream_options={"include_usage": True},
     )
     for chunk in stream:
         n_chunks += 1

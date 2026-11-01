@@ -1,6 +1,5 @@
 """The proxy on 8001: forwards chat completions to the model server, normalizes the SSE stream,
 emits llm_request / llm_first_token / llm_done turn events keyed by the caller's X-R3-Call-Id."""
-
 import json
 
 import httpx
@@ -20,24 +19,14 @@ def sse(obj):
 
 
 def chunk(delta=None, finish=None, usage=None):
-    c = {
-        "id": "cmpl-1",
-        "object": "chat.completion.chunk",
-        "model": "r3-voice-base",
-        "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish}],
-    }
+    c = {"id": "cmpl-1", "object": "chat.completion.chunk", "model": "r3-voice-base", "choices": [{"index": 0, "delta": delta or {}, "finish_reason": finish}]}
     if usage:
         c["usage"] = usage
     return c
 
 
 def tool(id_):
-    return {
-        "index": 0,
-        "id": id_,
-        "type": "function",
-        "function": {"name": "lookup_account", "arguments": ARGS},
-    }
+    return {"index": 0, "id": id_, "type": "function", "function": {"name": "lookup_account", "arguments": ARGS}}
 
 
 def fake_upstream(received: list):
@@ -48,33 +37,21 @@ def fake_upstream(received: list):
         async def gen():
             yield sse(chunk({"role": "assistant"}))
             yield sse(chunk({"tool_calls": [tool("call_a")]}))
-            yield sse(
-                chunk(
-                    {"tool_calls": [tool("call_b")]},
-                    finish="tool_calls",
-                    usage={"prompt_tokens": 2023, "completion_tokens": 46, "total_tokens": 2069},
-                )
-            )
+            yield sse(chunk({"tool_calls": [tool("call_b")]}, finish="tool_calls", usage={"prompt_tokens": 2023, "completion_tokens": 46, "total_tokens": 2069}))
             yield "data: [DONE]\n\n"
 
         return StreamingResponse(gen(), media_type="text/event-stream")
 
     async def models(_: Request):
-        return JSONResponse(
-            {"object": "list", "data": [{"id": "r3-voice-base", "object": "model"}]}
-        )
+        return JSONResponse({"object": "list", "data": [{"id": "r3-voice-base", "object": "model"}]})
 
-    return Starlette(
-        routes=[Route("/v1/chat/completions", chat, methods=["POST"]), Route("/v1/models", models)]
-    )
+    return Starlette(routes=[Route("/v1/chat/completions", chat, methods=["POST"]), Route("/v1/models", models)])
 
 
 @pytest.fixture
 def harness():
     received, events = [], []
-    upstream = httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=fake_upstream(received)), base_url="http://upstream"
-    )
+    upstream = httpx.AsyncClient(transport=httpx.ASGITransport(app=fake_upstream(received)), base_url="http://upstream")
 
     async def sink(ev):
         events.append(ev)
@@ -93,12 +70,7 @@ def parse_sse(text: str):
     return out
 
 
-BODY = {
-    "model": "r3-voice-base",
-    "messages": [{"role": "user", "content": "hi"}],
-    "tools": [],
-    "stream": True,
-}
+BODY = {"model": "r3-voice-base", "messages": [{"role": "user", "content": "hi"}], "tools": [], "stream": True}
 
 
 async def test_streamed_tool_call_is_deduplicated_end_to_end(harness):
@@ -123,14 +95,8 @@ async def test_turn_events_emitted_with_tokens_and_call_id(harness):
     assert kinds == ["llm_request", "llm_first_token", "llm_done"]
     assert all(e["call_id"] == "call-7" and e["model_id"] == "r3-voice-base" for e in events)
     assert events[0]["payload"]["messages"] == 1
-    assert (
-        events[2]["payload"]["prompt_tokens"] == 2023
-        and events[2]["payload"]["completion_tokens"] == 46
-    )
-    assert (
-        events[2]["payload"]["tool_calls"] == 1
-        and events[2]["payload"]["dropped_duplicate_tool_calls"] == 1
-    )
+    assert events[2]["payload"]["prompt_tokens"] == 2023 and events[2]["payload"]["completion_tokens"] == 46
+    assert events[2]["payload"]["tool_calls"] == 1 and events[2]["payload"]["dropped_duplicate_tool_calls"] == 1
     assert events[0]["ts_ms"] <= events[1]["ts_ms"] <= events[2]["ts_ms"]
 
 
@@ -155,3 +121,83 @@ async def test_health_reports_upstream(harness):
     r = await client.get("/health")
     assert r.status_code == 200
     assert r.json()["upstream"] == "ok"
+
+
+# ---- hosted fallback at a turn boundary (CONTRACT §7 / plan T+13.5): on upstream error or no first
+# token within the timeout, the same request is re-issued to the hosted model before any token has
+# been sent to the client, and a `fallback` event is logged.
+
+def slow_or_dead_upstream(mode: str):
+    import asyncio
+
+    async def chat(request: Request):
+        if mode == "dead":
+            return JSONResponse({"error": "engine crashed"}, status_code=500)
+
+        async def gen():
+            await asyncio.sleep(0.5)  # first token far later than the test's timeout
+            yield sse(chunk({"content": "late"}, finish="stop"))
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    return Starlette(routes=[Route("/v1/chat/completions", chat, methods=["POST"])])
+
+
+def hosted_upstream(received: list):
+    async def chat(request: Request):
+        received.append(await request.json())
+
+        async def gen():
+            yield sse({**chunk({"role": "assistant"}), "model": "claude-sonnet-5-5"})
+            yield sse({**chunk({"content": "Hello from hosted."}, finish="stop", usage={"prompt_tokens": 900, "completion_tokens": 5}), "model": "claude-sonnet-5-5"})
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    return Starlette(routes=[Route("/v1/chat/completions", chat, methods=["POST"])])
+
+
+def fallback_harness(mode: str):
+    hosted_received, events = [], []
+    upstream = httpx.AsyncClient(transport=httpx.ASGITransport(app=slow_or_dead_upstream(mode)), base_url="http://upstream")
+    hosted = httpx.AsyncClient(transport=httpx.ASGITransport(app=hosted_upstream(hosted_received)), base_url="http://hosted")
+
+    async def sink(ev):
+        events.append(ev)
+
+    app = create_app(upstream_client=upstream, event_sink=sink, fallback_client=hosted, fallback_model="claude-sonnet-5-5", first_token_timeout=0.1)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy"), hosted_received, events
+
+
+async def test_upstream_server_error_falls_back_to_hosted_before_any_token():
+    client, hosted_received, events = fallback_harness("dead")
+    r = await client.post("/v1/chat/completions", json={**BODY, "temperature": 0.2, "top_p": 1.0}, headers={"X-R3-Call-Id": "c1"})
+    assert r.status_code == 200
+    chunks = [c for c in parse_sse(r.text) if c != "[DONE]"]
+    assert "".join(c["choices"][0]["delta"].get("content") or "" for c in chunks) == "Hello from hosted."
+    assert hosted_received[0]["model"] == "claude-sonnet-5-5" and hosted_received[0]["messages"] == BODY["messages"]
+    # Claude 5.5's OpenAI-compatible endpoint rejects sampling knobs with 400 ("`temperature` is deprecated for this model")
+    assert "temperature" not in hosted_received[0] and "top_p" not in hosted_received[0]
+    fb = [e for e in events if e["event"] == "fallback"]
+    assert len(fb) == 1 and fb[0]["payload"]["reason"] == "upstream_error" and fb[0]["payload"]["to_model"] == "claude-sonnet-5-5"
+    assert events[-1]["event"] == "llm_done" and events[-1]["model_id"] == "claude-sonnet-5-5"
+
+
+async def test_first_token_timeout_falls_back_to_hosted():
+    client, hosted_received, events = fallback_harness("slow")
+    r = await client.post("/v1/chat/completions", json=BODY, headers={"X-R3-Call-Id": "c2"})
+    chunks = [c for c in parse_sse(r.text) if c != "[DONE]"]
+    assert "".join(c["choices"][0]["delta"].get("content") or "" for c in chunks) == "Hello from hosted."
+    assert len(hosted_received) == 1
+    fb = [e for e in events if e["event"] == "fallback"]
+    assert fb[0]["payload"]["reason"] == "first_token_timeout"
+
+
+async def test_without_fallback_configured_upstream_error_is_a_502(harness):
+    client, _, _ = harness
+    dead = httpx.AsyncClient(transport=httpx.ASGITransport(app=slow_or_dead_upstream("dead")), base_url="http://upstream")
+    app = create_app(upstream_client=dead, event_sink=None)
+    c = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://proxy")
+    r = await c.post("/v1/chat/completions", json=BODY)
+    assert r.status_code == 500 or r.status_code == 502

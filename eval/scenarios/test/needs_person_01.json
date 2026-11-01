@@ -47,7 +47,6 @@
       "book_appointment",
       "reschedule_appointment",
       "cancel_appointment",
-      "block_card",
       "create_ticket"
     ]
   }

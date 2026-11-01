@@ -16,8 +16,6 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 MESSAGES = {"timeout": "the request timed out", "unavailable": "the service is unavailable", "conflict": "conflict", "not_found": "not found", "invalid_argument": "invalid argument", "not_verified": "not verified"}
-CARD_REASONS = ("lost", "stolen", "damaged")
-REPLACEMENTS = ("none", "standard", "express")
 HANDOFF_REASONS = ("suspected_fraud", "verification_failed", "caller_requested", "out_of_scope", "tool_failure")
 
 
@@ -46,7 +44,7 @@ def _slot(s: Any) -> dt.datetime | None:
 
 
 class Sandbox:
-    TOOLS = ("lookup_account", "check_availability", "book_appointment", "reschedule_appointment", "cancel_appointment", "block_card", "create_ticket", "request_handoff")
+    TOOLS = ("lookup_account", "check_availability", "book_appointment", "reschedule_appointment", "cancel_appointment", "create_ticket", "request_handoff")
 
     def __init__(self, seed: dict) -> None:
         self.seed = seed
@@ -67,7 +65,6 @@ class Sandbox:
                 self.appointments[a["appointment_id"]] = {**a, "customer_id": cid}
             self.customers[cid] = c
         self._seed_appts = copy.deepcopy(self.appointments)
-        self._seed_cards = copy.deepcopy(self.cards)
         self.tickets: list[dict] = []
         self.handoff: dict | None = None
         self.taxonomy = set(json.loads((ROOT / "schemas/tools/create_ticket.json").read_text())["function"]["parameters"]["properties"]["category"]["enum"])
@@ -225,26 +222,6 @@ class Sandbox:
 
         return self._idempotent("cancel_appointment", idempotency_key, do)
 
-    def block_card(self, customer_id: Any = None, card_last4: Any = None, reason: Any = None, replacement: Any = "none", idempotency_key: Any = None, **_: Any) -> dict:
-        if (f := self._fault("block_card")):
-            return f
-
-        def do() -> dict:
-            if customer_id not in self.customers:
-                return err("not_found", "customer not found")
-            card = self.cards.get(f"{customer_id}:{_digits(card_last4)}")
-            if card is None:
-                return err("not_found", "no card ending in those digits on this account")
-            if reason not in CARD_REASONS or (replacement or "none") not in REPLACEMENTS:
-                return err("invalid_argument", "reason must be lost|stolen|damaged; replacement none|standard|express")
-            if card["status"] == "blocked":
-                return err("conflict", "that card is already blocked")
-            card["status"] = "blocked"
-            card["replacement"] = replacement or "none"
-            return {"card_last4": card["card_last4"], "status": "blocked", "replacement": card["replacement"]}
-
-        return self._idempotent("block_card", idempotency_key, do)
-
     def create_ticket(self, customer_id: Any = None, category: Any = None, summary: Any = None, idempotency_key: Any = None, **_: Any) -> dict:
         if (f := self._fault("create_ticket")):
             return f
@@ -277,7 +254,5 @@ class Sandbox:
                for aid, a in self.appointments.items() if aid not in self._seed_appts and a["status"] == "booked"]
         changed = [{"appointment_id": aid, "status": a["status"], "slot_start": a["slot_start"]}
                    for aid, a in self.appointments.items() if aid in self._seed_appts and (a["status"], a["slot_start"]) != (self._seed_appts[aid]["status"], self._seed_appts[aid]["slot_start"])]
-        cards = [{"card_last4": k["card_last4"], "status": k["status"], "replacement": k.get("replacement", "none")}
-                 for key, k in self.cards.items() if (k["status"], k.get("replacement", "none")) != (self._seed_cards[key]["status"], self._seed_cards[key].get("replacement", "none"))]
         tickets = [{"customer_id": t["customer_id"], "category": t["category"]} for t in self.tickets]
-        return {"appointments_new": new, "appointments_changed": changed, "cards": cards, "tickets": tickets}
+        return {"appointments_new": new, "appointments_changed": changed, "tickets": tickets}

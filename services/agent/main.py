@@ -41,7 +41,7 @@ load_dotenv(ROOT / ".env")
 log = logging.getLogger("r3.agent")
 
 SEED = json.loads((ROOT / "eval/sandbox/seed.json").read_text())
-SYSTEM_PROMPT = (ROOT / "services/agent/system_prompt.md").read_text().replace("{today}", SEED["clock_spoken"])
+SYSTEM_PROMPT = (ROOT / "schemas/system_prompt.md").read_text().replace("{today}", SEED["clock_spoken"])
 GREETING = "Thanks for calling Marlow Mutual Bank. Can I get the phone number on your account?"
 STRUCTURAL = ("<tool_call>", "</tool_call>", "<think>", "</think>", '{"name"', "<|im_", "[Calling tool", "[calling tool")
 
@@ -112,7 +112,8 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session: AgentSession[CallData] = AgentSession(
         stt=deepgram.STT(model="nova-3", language="en-US", interim_results=True, punctuate=True, smart_format=False, filler_words=True),
-        llm=lk_openai.LLM(model=model_id, client=llm_client, temperature=0.2, parallel_tool_calls=False),
+        # no sampling knobs: the local server defaults to temperature 0.2 (restart.sh) and Claude 5.5's endpoint rejects temperature/top_p
+        llm=lk_openai.LLM(model=model_id, client=llm_client, parallel_tool_calls=False),
         tts=cartesia.TTS(model=os.environ.get("CARTESIA_MODEL", "sonic-3"), voice=os.environ["CARTESIA_VOICE"]),
         vad=ctx.proc.userdata["vad"],
         turn_detection=EnglishModel(),

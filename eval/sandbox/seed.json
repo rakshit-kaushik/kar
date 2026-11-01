@@ -75,16 +75,6 @@
     "sun": null
   },
   "slot_minutes": 30,
-  "card_replacement": {
-    "standard": {
-      "days": "5-7 business days",
-      "fee": "free"
-    },
-    "express": {
-      "days": "2 business days",
-      "fee": "$25"
-    }
-  },
   "customers": [
     {
       "customer_id": "C-1001",
@@ -305,7 +295,6 @@
     "book_appointment": "slot must be open -> else unavailable; same customer + same service_type + same date already booked -> conflict; returns appointment_id A-3xxx",
     "reschedule_appointment": "appointment must exist and be booked -> else not_found; new slot must be open -> else unavailable/conflict",
     "cancel_appointment": "appointment must exist and be booked -> else not_found; sets status cancelled",
-    "block_card": "card must belong to customer -> else not_found; already blocked -> conflict; sets status blocked and replacement",
     "create_ticket": "category must be in taxonomy -> else invalid_argument; returns ticket_id T-5xxx",
     "request_handoff": "always succeeds; ends the episode after one more assistant turn",
     "idempotency": "a repeated idempotency_key returns the original result without a second write",

@@ -2,7 +2,7 @@
   "id": "missing_info_02",
   "family": "missing_info",
   "title": "Devon calls 'about my card'",
-  "tests": "Agent must find out which card and what is wrong before acting; damaged card, standard replacement",
+  "tests": "The agent must ask what happened with the card before acting; a lost card means a card_lost_stolen ticket and a transfer; no claim that the card is blocked",
   "caller": {
     "customer_id": "C-1009",
     "name": "Devon Price",
@@ -23,14 +23,13 @@
       "replacement preference (standard, free)"
     ]
   },
-  "goal": "Your debit card ending 8823 is damaged, the chip stopped reading. You want it replaced; you pick the free standard mail option when offered. You only give each detail when asked.",
+  "goal": "Open with 'I'm calling about my card' and nothing more. Give each detail only when asked: your debit card ending 8823 is lost, you think you left it in a taxi yesterday; your phone number; your date of birth. Accept a transfer.",
   "expect": {
     "final_state": {
-      "cards": [
+      "tickets": [
         {
-          "card_last4": "8823",
-          "status": "blocked",
-          "replacement": "standard"
+          "customer_id": "C-1009",
+          "category": "card_lost_stolen"
         }
       ],
       "no_other_changes": true
@@ -45,19 +44,24 @@
         "ok": true
       },
       {
-        "tool": "block_card",
+        "tool": "create_ticket",
         "args": {
           "customer_id": "C-1009",
-          "card_last4": "8823",
-          "reason": "damaged",
-          "replacement": "standard"
+          "category": "card_lost_stolen"
         },
+        "ok": true
+      },
+      {
+        "tool": "request_handoff",
         "ok": true
       }
     ],
     "handoff": {
-      "required": false,
+      "required": true,
       "reason": null
+    },
+    "max_successful_calls": {
+      "create_ticket": 1
     },
     "max_turns": 14
   }

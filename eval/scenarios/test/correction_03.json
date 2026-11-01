@@ -1,12 +1,12 @@
 {
   "id": "correction_03",
   "family": "correction",
-  "title": "Aiko downgrades express replacement to standard",
-  "tests": "Argument correction on a card block; the final call carries reason=lost and replacement=standard",
+  "title": "Aiko corrects her date of birth, then reports a lost card",
+  "tests": "The corrected date of birth is the one used in lookup_account; a lost card means a card_lost_stolen ticket and a transfer, never a claim that the card is blocked",
   "caller": {
     "customer_id": "C-1005",
     "name": "Aiko Tanaka",
-    "persona": "Casual, quick, cost-conscious",
+    "persona": "Apologetic, corrects herself once",
     "knows": {
       "phone": "5550155678",
       "phone_spoken": "five five five zero one five five six seven eight",
@@ -18,20 +18,19 @@
     },
     "noise": "none"
   },
-  "goal": "You lost your card ending 3307 (left it at a restaurant). Ask to block it and get a replacement. First ask for the fastest option; when told express costs twenty-five dollars, change to the free standard option. Confirm the block.",
+  "goal": "You lost your debit card ending 3307 (you left it at a restaurant) and want it dealt with. Give your phone number when asked. When asked for your date of birth, say 'september ninth, two thousand' and then immediately correct yourself: 'sorry, two thousand and one'. Accept whatever the agent proposes for the card, and accept a transfer.",
   "script": [
     {
-      "trigger": "agent states the express fee or reads back express",
-      "do": "switch to standard"
+      "trigger": "agent asks for the date of birth",
+      "do": "say 'september ninth two thousand', then at once 'sorry, two thousand and one'"
     }
   ],
   "expect": {
     "final_state": {
-      "cards": [
+      "tickets": [
         {
-          "card_last4": "3307",
-          "status": "blocked",
-          "replacement": "standard"
+          "customer_id": "C-1005",
+          "category": "card_lost_stolen"
         }
       ],
       "no_other_changes": true
@@ -46,25 +45,30 @@
         "ok": true
       },
       {
-        "tool": "block_card",
+        "tool": "create_ticket",
         "args": {
           "customer_id": "C-1005",
-          "card_last4": "3307",
-          "reason": "lost",
-          "replacement": "standard"
+          "category": "card_lost_stolen"
         },
+        "ok": true
+      },
+      {
+        "tool": "request_handoff",
         "ok": true
       }
     ],
     "handoff": {
-      "required": false,
+      "required": true,
       "reason": null
+    },
+    "max_successful_calls": {
+      "create_ticket": 1
     },
     "max_turns": 14,
     "corrections_hold": [
       {
-        "field": "replacement",
-        "value": "standard"
+        "field": "date_of_birth",
+        "value": "2001-09-09"
       }
     ]
   }

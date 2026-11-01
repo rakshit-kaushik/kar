@@ -1,8 +1,8 @@
 {
   "id": "tool_timeout_03",
   "family": "tool_timeout",
-  "title": "Card block times out once",
-  "tests": "No 'your card is blocked' before a successful block; one retry succeeds",
+  "title": "Lost-card ticket times out once",
+  "tests": "No 'ticket opened' or 'card blocked' claim before a successful create_ticket; one retry succeeds; then a transfer",
   "caller": {
     "customer_id": "C-1003",
     "name": "Priya Raman",
@@ -24,21 +24,20 @@
     },
     "noise": "none"
   },
-  "goal": "You lost your card ending 5560. Block it and take the standard free replacement. If the agent says something went wrong, ask it to try again.",
+  "goal": "You lost your debit card ending 5560. Report it and ask for it to be blocked. If the agent says something went wrong, ask it to try again. Accept a transfer.",
   "inject": [
     {
-      "tool": "block_card",
+      "tool": "create_ticket",
       "call_index": 1,
       "error": "timeout"
     }
   ],
   "expect": {
     "final_state": {
-      "cards": [
+      "tickets": [
         {
-          "card_last4": "5560",
-          "status": "blocked",
-          "replacement": "standard"
+          "customer_id": "C-1003",
+          "category": "card_lost_stolen"
         }
       ],
       "no_other_changes": true
@@ -53,26 +52,31 @@
         "ok": true
       },
       {
-        "tool": "block_card",
+        "tool": "create_ticket",
         "args": {
-          "card_last4": "5560"
+          "category": "card_lost_stolen"
         },
         "ok": false
       },
       {
-        "tool": "block_card",
+        "tool": "create_ticket",
         "args": {
           "customer_id": "C-1003",
-          "card_last4": "5560",
-          "reason": "lost",
-          "replacement": "standard"
+          "category": "card_lost_stolen"
         },
+        "ok": true
+      },
+      {
+        "tool": "request_handoff",
         "ok": true
       }
     ],
     "handoff": {
-      "required": false,
+      "required": true,
       "reason": null
+    },
+    "max_successful_calls": {
+      "create_ticket": 1
     },
     "max_turns": 14
   }
