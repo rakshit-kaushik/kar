@@ -4,10 +4,15 @@
   deltas, strips `<think>`, converts leaked raw `<tool_call>` text).
 - Emits `llm_request`, `llm_first_token`, `llm_done` turn events (CONTRACT.md §6), keyed by the
   `X-R3-Call-Id` header the agent sets; turn index increments per call id.
+- Hosted fallback at a turn boundary (plan T+13.5): if the local server errors or produces no first
+  token within `first_token_timeout` seconds, the same request is re-issued to `fallback_client` as
+  `fallback_model` before any byte has reached the client, and a `fallback` event is logged. The agent
+  never notices; its chat context is the same, so call state is preserved.
 - Passes everything else through (`/v1/models`, non-streaming completions).
 """
 from __future__ import annotations
 
+import asyncio
 import collections
 import json
 import logging
@@ -36,7 +41,101 @@ def sse(obj: dict) -> str:
     return f"data: {json.dumps(obj, separators=(',', ':'))}\n\n"
 
 
-def create_app(upstream_client: httpx.AsyncClient, event_sink: EventSink | None = None) -> Starlette:
+# Claude 5.5's OpenAI-compatible endpoint returns 400 for sampling knobs ("`temperature` is deprecated for this model"),
+# so a request re-issued to the hosted model goes without them; the local server keeps its own defaults.
+HOSTED_DROP = ("temperature", "top_p")
+
+
+class UpstreamStatus(Exception):
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"upstream status {status}")
+        self.status, self.body = status, body
+
+
+class _Stream:
+    """One upstream SSE response being normalized. `prime()` reads up to the first token so the
+    caller can decide to fall back before anything reaches the client; `rest()` replays what was
+    buffered and continues."""
+
+    def __init__(self, resp: httpx.Response, model_id: str) -> None:
+        self.resp, self.model_id = resp, model_id
+        self.lines = resp.aiter_lines()
+        self.tr = StreamTransformer()
+        self.usage: dict = {}
+        self.first_token_ms: int | None = None
+        self.done = False
+        self.buffered: list[str] = []
+
+    def process(self, line: str) -> list[str]:
+        if not line.startswith("data:"):
+            return []
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            self.done = True
+            return [sse(c) for c in self.tr.finish()] + ["data: [DONE]\n\n"]
+        try:
+            obj = json.loads(payload)
+        except json.JSONDecodeError:
+            return [f"{line}\n\n"]
+        if obj.get("usage"):
+            self.usage = obj["usage"]
+        out = []
+        for c in self.tr.feed(obj):
+            if self.first_token_ms is None and c.get("choices"):
+                d = c["choices"][0].get("delta") or {}
+                if d.get("content") or d.get("tool_calls"):
+                    self.first_token_ms = now_ms()
+            out.append(sse(c))
+        return out
+
+    async def prime(self) -> None:
+        while self.first_token_ms is None and not self.done:
+            try:
+                line = await self.lines.__anext__()
+            except StopAsyncIteration:
+                self.done = True
+                break
+            self.buffered.extend(self.process(line))
+
+    async def rest(self):
+        for s in self.buffered:
+            yield s
+        if not self.done:
+            async for line in self.lines:
+                for s in self.process(line):
+                    yield s
+                if self.done:
+                    break
+
+
+async def open_stream(client: httpx.AsyncClient, body: dict, model_id: str, timeout: float | None) -> _Stream:
+    """POST the request, check the status, read up to the first token. `timeout` bounds the whole
+    thing (connect + headers + first token); None means no bound beyond the client's own."""
+
+    async def go() -> _Stream:
+        resp = await client.send(client.build_request("POST", "/v1/chat/completions", json=body), stream=True)
+        if resp.status_code != 200:
+            text = (await resp.aread()).decode(errors="replace")
+            await resp.aclose()
+            raise UpstreamStatus(resp.status_code, text)
+        s = _Stream(resp, model_id)
+        try:
+            await s.prime()
+        except BaseException:
+            await resp.aclose()
+            raise
+        return s
+
+    return await asyncio.wait_for(go(), timeout)
+
+
+def create_app(
+    upstream_client: httpx.AsyncClient,
+    event_sink: EventSink | None = None,
+    fallback_client: httpx.AsyncClient | None = None,
+    fallback_model: str | None = None,
+    first_token_timeout: float = 2.0,
+) -> Starlette:
     turn_counters: dict[str, int] = collections.defaultdict(int)
 
     async def emit(call_id: str, turn_idx: int, model_id: str, event: str, payload: dict | None = None) -> None:
@@ -68,54 +167,45 @@ def create_app(upstream_client: httpx.AsyncClient, event_sink: EventSink | None 
             await emit(call_id, turn_idx, model_id, "llm_done", {"ms": now_ms() - t0, "prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens"), "stream": False})
             return JSONResponse(data, status_code=r.status_code)
 
-        try:
-            upstream_req = upstream_client.build_request("POST", "/v1/chat/completions", json=body)
-            upstream_resp = await upstream_client.send(upstream_req, stream=True)
-        except httpx.HTTPError as e:
-            await emit(call_id, turn_idx, model_id, "llm_error", {"error": repr(e)})
-            return JSONResponse({"error": {"message": f"upstream unavailable: {e}", "type": "upstream_error"}}, status_code=502)
-        if upstream_resp.status_code != 200:
-            text = (await upstream_resp.aread()).decode(errors="replace")
-            await upstream_resp.aclose()
-            await emit(call_id, turn_idx, model_id, "llm_error", {"status": upstream_resp.status_code, "body": text[:500]})
-            return Response(text, status_code=upstream_resp.status_code, media_type=upstream_resp.headers.get("content-type", "application/json"))
+        attempts: list[tuple[httpx.AsyncClient, str, str]] = [(upstream_client, model_id, "local")]
+        if fallback_client is not None and fallback_model:
+            attempts.append((fallback_client, fallback_model, "hosted"))
+
+        s: _Stream | None = None
+        for i, (client, mid, source) in enumerate(attempts):
+            has_next = i + 1 < len(attempts)
+            try:
+                sent = {**body, "model": mid} if source == "local" else {k: v for k, v in body.items() if k not in HOSTED_DROP} | {"model": mid}
+                s = await open_stream(client, sent, mid, first_token_timeout if has_next else None)
+                break
+            except (httpx.HTTPError, UpstreamStatus, asyncio.TimeoutError) as e:
+                reason = "first_token_timeout" if isinstance(e, asyncio.TimeoutError) else "upstream_error"
+                detail = {"status": e.status, "body": e.body[:500]} if isinstance(e, UpstreamStatus) else {"error": repr(e)}
+                await emit(call_id, turn_idx, mid, "llm_error", {"reason": reason, "source": source, **detail})
+                if has_next:
+                    await emit(call_id, turn_idx, mid, "fallback", {"reason": reason, "from_model": mid, "to_model": attempts[i + 1][1], "ms": now_ms() - t0})
+                    continue
+                if isinstance(e, UpstreamStatus):
+                    return Response(e.body, status_code=e.status, media_type="application/json")
+                return JSONResponse({"error": {"message": f"upstream unavailable: {e}", "type": "upstream_error"}}, status_code=502)
+        assert s is not None
+        served = s
+        if served.first_token_ms is not None:
+            await emit(call_id, turn_idx, served.model_id, "llm_first_token", {"ms": served.first_token_ms - t0, "source": attempts[len(attempts) - 1][2] if served.model_id != model_id else "local"})
 
         async def stream():
-            tr = StreamTransformer()
-            first = False
-            usage: dict = {}
             try:
-                async for line in upstream_resp.aiter_lines():
-                    if not line.startswith("data:"):
-                        continue
-                    payload = line[5:].strip()
-                    if payload == "[DONE]":
-                        for c in tr.finish():
-                            yield sse(c)
-                        yield "data: [DONE]\n\n"
-                        break
-                    try:
-                        obj = json.loads(payload)
-                    except json.JSONDecodeError:
-                        yield f"{line}\n\n"
-                        continue
-                    if obj.get("usage"):
-                        usage = obj["usage"]
-                    for c in tr.feed(obj):
-                        if not first and c.get("choices"):
-                            d = c["choices"][0].get("delta") or {}
-                            if d.get("content") or d.get("tool_calls"):
-                                first = True
-                                await emit(call_id, turn_idx, model_id, "llm_first_token", {"ms": now_ms() - t0})
-                        yield sse(c)
+                async for piece in served.rest():
+                    yield piece
             finally:
-                await upstream_resp.aclose()
-                await emit(call_id, turn_idx, model_id, "llm_done", {
-                    "ms": now_ms() - t0, "prompt_tokens": usage.get("prompt_tokens"), "completion_tokens": usage.get("completion_tokens"),
-                    "stream": True, "first_token": first, **tr.stats,
+                await served.resp.aclose()
+                await emit(call_id, turn_idx, served.model_id, "llm_done", {
+                    "ms": now_ms() - t0, "prompt_tokens": served.usage.get("prompt_tokens"), "completion_tokens": served.usage.get("completion_tokens"),
+                    "stream": True, "first_token": served.first_token_ms is not None, **served.tr.stats,
                 })
 
-        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-R3-Call-Id": call_id, "X-R3-Turn": str(turn_idx)})
+        headers = {"Cache-Control": "no-cache", "X-R3-Call-Id": call_id, "X-R3-Turn": str(turn_idx), "X-R3-Model": served.model_id}
+        return StreamingResponse(stream(), media_type="text/event-stream", headers=headers)
 
     async def passthrough(request: Request) -> Response:
         try:
@@ -130,7 +220,10 @@ def create_app(upstream_client: httpx.AsyncClient, event_sink: EventSink | None 
             up = "ok" if r.status_code == 200 else f"status {r.status_code}"
         except httpx.HTTPError as e:
             up = f"down: {type(e).__name__}"
-        return JSONResponse({"status": "ok", "upstream": up, "upstream_base_url": str(upstream_client.base_url)})
+        return JSONResponse({
+            "status": "ok", "upstream": up, "upstream_base_url": str(upstream_client.base_url),
+            "fallback": {"model": fallback_model, "first_token_timeout_s": first_token_timeout} if fallback_client is not None else None,
+        })
 
     return Starlette(routes=[
         Route("/v1/chat/completions", chat_completions, methods=["POST"]),

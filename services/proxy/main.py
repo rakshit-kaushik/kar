@@ -1,5 +1,7 @@
 """Run the proxy: `uv run python -m services.proxy.main`. Config from .env:
-PROXY_UPSTREAM (default http://127.0.0.1:8000), PROXY_PORT (default 8001), DATABASE_URL (optional)."""
+PROXY_UPSTREAM (default http://127.0.0.1:8000), PROXY_PORT (default 8001), DATABASE_URL (optional),
+PROXY_FALLBACK (default 1; 0 disables), PROXY_FIRST_TOKEN_TIMEOUT_MS (default 2000),
+HOSTED_LLM_BASE_URL / HOSTED_LLM_API_KEY / HOSTED_LLM_MODEL (the fallback target; all three required)."""
 from __future__ import annotations
 
 import logging
@@ -23,8 +25,18 @@ def build_app():
     client = httpx.AsyncClient(base_url=upstream, timeout=httpx.Timeout(300.0, connect=5.0))
     dsn = os.environ.get("DATABASE_URL")
     sink = PostgresSink(dsn) if dsn else None
-    logging.getLogger("r3.proxy").info("upstream=%s turn_events=%s", upstream, "postgres" if sink else "log only")
-    return create_app(upstream_client=client, event_sink=sink)
+
+    fallback_client = fallback_model = None
+    hosted_url, hosted_key, hosted_model = (os.environ.get(k) for k in ("HOSTED_LLM_BASE_URL", "HOSTED_LLM_API_KEY", "HOSTED_LLM_MODEL"))
+    if os.environ.get("PROXY_FALLBACK", "1") != "0" and hosted_url and hosted_key and hosted_model:
+        # the proxy posts to /v1/chat/completions itself, so the base is the host without /v1
+        base = hosted_url.rstrip("/").removesuffix("/v1")
+        fallback_client = httpx.AsyncClient(base_url=base, headers={"Authorization": f"Bearer {hosted_key}"}, timeout=httpx.Timeout(120.0, connect=5.0))
+        fallback_model = hosted_model
+    timeout_s = float(os.environ.get("PROXY_FIRST_TOKEN_TIMEOUT_MS", "2000")) / 1000
+
+    logging.getLogger("r3.proxy").info("upstream=%s turn_events=%s fallback=%s first_token_timeout=%.1fs", upstream, "postgres" if sink else "log only", fallback_model or "off", timeout_s)
+    return create_app(upstream_client=client, event_sink=sink, fallback_client=fallback_client, fallback_model=fallback_model, first_token_timeout=timeout_s)
 
 
 def main() -> None:

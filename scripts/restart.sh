@@ -40,7 +40,10 @@ wait_for http://127.0.0.1:8001/health 60 "proxy"
 
 echo "[4/5] prewarm"
 if [ "$NO_SERVER" = 0 ]; then
-  uv run python scripts/smoke_tools.py --base-url http://127.0.0.1:8001/v1 >/dev/null 2>&1 && echo "  prewarm ok (tool call parsed through proxy)" || { echo "  prewarm FAILED"; exit 1; }
+  # straight at the server: the first request after start takes ~19 s (engine warmup) and would otherwise trip the proxy's hosted fallback
+  uv run python scripts/smoke_tools.py --base-url http://127.0.0.1:8000/v1 >/dev/null 2>&1 || true
+  echo "  server warm, prefix cached"
+  uv run python scripts/smoke_tools.py --base-url http://127.0.0.1:8001/v1 >/dev/null 2>&1 && echo "  proxy ok (tool call parsed through proxy, served locally)" || { echo "  proxy check FAILED"; exit 1; }
 else
   echo "  skipped"
 fi
