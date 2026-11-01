@@ -588,6 +588,7 @@ def failures_report(run_dir: str | Path) -> str:
     n = 0
     causes: Counter[tuple[str, str]] = Counter()
     fields: Counter[str] = Counter()
+    claims: Counter[str] = Counter()
     body: list[str] = []
     for p in sorted((Path(run_dir) / "episodes").glob("*.json")):
         ep = json.loads(p.read_text())
@@ -614,6 +615,9 @@ def failures_report(run_dir: str | Path) -> str:
             out.append(
                 f"- **{sc['scorer']}** at turn {turn if turn is not None else '-'}: {detail[:300]}"
             )
+            if sc["scorer"] == "no_success_claim_before_result":
+                for v in (sc.get("detail") or {}).get("violations") or []:
+                    claims["transfer" if v.get("action") == "handoff" else "write"] += 1
             if sc["scorer"] == "tool_calls":
                 cause = tool_calls_cause(sc.get("detail") or {}, ep.get("tool_log") or [])
                 if cause:
@@ -649,6 +653,12 @@ def failures_report(run_dir: str | Path) -> str:
                 "Wrong-args fields: " + ", ".join(f"{f} {k}" for f, k in fields.most_common()),
             ]
         head.append("")
+    if claims:
+        head += [
+            "**success claims by claimed action**: "
+            + ", ".join(f"{k} {claims[k]}" for k in ("transfer", "write") if claims.get(k)),
+            "",
+        ]
     out = head + body
     if n == 0:
         out.append("no failing episodes")
@@ -812,8 +822,12 @@ def agent_repeats(ep: dict) -> dict:
     return {"rephrase": rephrase, "handoff": handoff, "max_streak": best}
 
 
-def bucket_for(score: dict, ep_info: dict, target_counts: dict | None) -> str:
-    """First-pass label for one failing scorer of one episode, from scorer evidence alone."""
+def bucket_for(
+    score: dict, ep_info: dict, target_counts: dict | None, prefix_counts: dict | None = None
+) -> str:
+    """First-pass label for one failing scorer of one episode, from scorer evidence alone.
+    `target_counts` / `prefix_counts`: how often each tool was the trained target / appeared in a
+    training prefix (the dataset the candidate trained on)."""
     if ep_info.get("outcome") == "error":
         return "harness"
     if ep_info.get("caller_fault"):
@@ -828,6 +842,10 @@ def bucket_for(score: dict, ep_info: dict, target_counts: dict | None) -> str:
     if name == "tool_calls":
         tool = (d.get("first_missing") or {}).get("tool")
         if tool and target_counts is not None and target_counts.get(tool, 0) < LOW_TARGETS:
+            # the teacher made the call all the time but the selection never trained it: the data
+            # that exists taught the wrong thing (target mix), not a type of example that is absent
+            if prefix_counts and prefix_counts.get(tool, 0) >= LOW_TARGETS:
+                return "bad data"
             return "missing example type"
         return "model capability"
     if name == "final_state":
@@ -851,14 +869,62 @@ def target_counts_from_dataset(dataset_dir: str | Path) -> dict[str, int]:
     return dict(counts)
 
 
+def prefix_counts_from_dataset(dataset_dir: str | Path) -> dict[str, int]:
+    """How often each tool is called inside a training prefix (context the model saw, not a target)."""
+    counts: Counter[str] = Counter()
+    for split in ("train", "valid"):
+        f = Path(dataset_dir) / f"{split}.jsonl"
+        if not f.exists():
+            continue
+        for line in f.read_text().splitlines():
+            if not line.strip():
+                continue
+            for m in json.loads(line)["messages"][:-1]:
+                for tc in m.get("tool_calls") or []:
+                    counts[(tc.get("function") or {}).get("name") or "?"] += 1
+    return dict(counts)
+
+
+_TRANSFER_LINE = re.compile(
+    r"\b(transferring you|transfer you to|connect you (to|with) a person)\b", re.IGNORECASE
+)
+
+
+def one_strike_handoff(ep: dict) -> bool:
+    """The agent handed off (or said it was transferring) after a single not_verified lookup. The
+    contract asks for a second attempt first; the generated data never produced not_verified, so this
+    is a model gap that data can fix even when the caller caused the failed lookup."""
+    lookups = [
+        t
+        for t in ep.get("tool_log") or []
+        if t.get("tool") == "lookup_account" and not t.get("replay")
+    ]
+    if len(lookups) != 1 or lookups[0].get("ok"):
+        return False
+    err = lookups[0].get("error") or (lookups[0].get("result") or {}).get("error")
+    if err != "not_verified":
+        return False
+    if any(t.get("tool") == "request_handoff" for t in ep.get("tool_log") or []):
+        return True
+    return any(
+        _TRANSFER_LINE.search(m.get("content") or "")
+        for m in ep.get("messages") or []
+        if m.get("role") == "assistant"
+    )
+
+
 def buckets_report(
     run_dir: str | Path, target_counts: dict | None = None, dataset_dir: str | Path | None = None
 ) -> str:
-    if dataset_dir is not None and target_counts is None:
-        target_counts = target_counts_from_dataset(dataset_dir)
+    prefix_counts = None
+    if dataset_dir is not None:
+        prefix_counts = prefix_counts_from_dataset(dataset_dir)
+        if target_counts is None:
+            target_counts = target_counts_from_dataset(dataset_dir)
     rows = []
     caller_faults: list[tuple[str, str]] = []
     stuck_callers: list[tuple[str, str]] = []
+    one_strikes: list[str] = []
     repeaters: list[tuple[str, dict]] = []
     counts: Counter[str] = Counter()
     for p in sorted((Path(run_dir) / "episodes").glob("*.json")):
@@ -878,7 +944,10 @@ def buckets_report(
             "long_context": bool(fail_turn and fail_turn >= 8),
             "caller_fault": caller_fault(ep),
             "caller_stuck": caller_stuck(ep),
+            "one_strike_handoff": one_strike_handoff(ep),
         }
+        if info["one_strike_handoff"]:
+            one_strikes.append(ep["episode_id"])
         if info["caller_stuck"] and any(sc["scorer"] == "max_turns" for sc in fails):
             stuck_callers.append((ep["episode_id"], info["caller_stuck"]))
         rep = agent_repeats(ep)
@@ -887,15 +956,24 @@ def buckets_report(
         if info["caller_fault"]:
             caller_faults.append((ep["episode_id"], info["caller_fault"]))
         labelled = [
-            (sc["scorer"], bucket_for(sc, info, target_counts), sc.get("turn_idx")) for sc in fails
+            (sc["scorer"], bucket_for(sc, info, target_counts, prefix_counts), sc.get("turn_idx"))
+            for sc in fails
         ]
         primary = max(labelled, key=lambda x: WEIGHTS.get(x[0], 0))[1]
+        if info["one_strike_handoff"]:
+            primary = "missing example type"  # root cause: no retry after not_verified
         counts[primary] += 1
         rows.append((ep["episode_id"], ep["family"], primary, labelled))
     lines = [
         f"# Failure buckets — `{Path(run_dir).name}` (first pass by session E from scorer evidence; the human's labels win)",
         "",
-        f"Failing episodes: {len(rows)}. Target counts per tool from the training set: {target_counts or 'n/a'}",
+        f"Failing episodes: {len(rows)}. Target counts per tool from the training set: {target_counts or 'n/a'}; "
+        f"calls inside training prefixes: {prefix_counts or 'n/a'}",
+        "",
+        f"One-strike handoffs (the agent transferred after a single not_verified lookup; the contract wants a second "
+        f"attempt and the training data never produced not_verified, so the episode is bucketed as missing example "
+        f"type even when the caller caused the failed lookup): {len(one_strikes)}"
+        + ("".join(f"\n- {eid}" for eid in one_strikes) if one_strikes else ""),
         "",
         f"Caller faults (the simulated caller mis-stated its own phone or date of birth, so verification failed "
         f"before the agent could be judged; bucketed as harness): {len(caller_faults)}"

@@ -912,3 +912,140 @@ def test_caller_fault_when_the_caller_never_gives_a_phone_number_at_all():
     # but a missing date of birth with no lookup attempted may be the agent never asking: not the caller's fault
     ep = _ep_for_caller_fault(["five five five zero one nine eight eight two three", "hello"], [])
     assert caller_fault(ep) is None
+
+
+def test_missing_call_is_bad_data_when_the_tool_was_common_in_prefixes_but_rare_as_a_target():
+    from eval.runner import bucket_for
+
+    score = {"scorer": "tool_calls", "detail": {"first_missing": {"tool": "check_availability"}}}
+    # v2: the teacher called check_availability in 500 prefixes but it was the trained target 3 times
+    assert (
+        bucket_for(score, {}, {"check_availability": 3}, {"check_availability": 500}) == "bad data"
+    )
+    assert (
+        bucket_for(score, {}, {"check_availability": 3}, {"check_availability": 4})
+        == "missing example type"
+    )
+    assert bucket_for(score, {}, {"check_availability": 3}, None) == "missing example type"
+
+
+def test_prefix_counts_from_dataset(tmp_path):
+    from eval.runner import prefix_counts_from_dataset
+
+    call = {"function": {"name": "check_availability", "arguments": "{}"}}
+    ex = {
+        "messages": [
+            {"role": "assistant", "tool_calls": [call]},
+            {"role": "tool", "content": "{}"},
+            {
+                "role": "assistant",
+                "tool_calls": [{"function": {"name": "book_appointment", "arguments": "{}"}}],
+            },
+        ]
+    }
+    (tmp_path / "train.jsonl").write_text(json.dumps(ex) + "\n" + json.dumps(ex) + "\n")
+    assert prefix_counts_from_dataset(tmp_path) == {"check_availability": 2}
+
+
+def test_one_strike_handoff_detects_a_transfer_after_a_single_not_verified():
+    from eval.runner import one_strike_handoff
+
+    def ep(lookups, handoff=True, line=""):
+        log = [
+            {"idx": i, "tool": "lookup_account", "args": {}, "ok": False, "error": "not_verified"}
+            for i in range(lookups)
+        ]
+        if handoff:
+            log.append(
+                {
+                    "idx": len(log),
+                    "tool": "request_handoff",
+                    "args": {"reason": "verification_failed"},
+                    "ok": True,
+                }
+            )
+        return {"tool_log": log, "messages": [{"role": "assistant", "content": line}]}
+
+    assert one_strike_handoff(ep(1)) is True
+    assert (
+        one_strike_handoff(ep(1, handoff=False, line="I'm transferring you to a person now."))
+        is True
+    )
+    assert one_strike_handoff(ep(2)) is False
+    assert (
+        one_strike_handoff(ep(1, handoff=False, line="Could you repeat your date of birth?"))
+        is False
+    )
+
+
+def test_buckets_report_counts_one_strike_handoffs_as_a_data_gap(tmp_path):
+    from eval.runner import buckets_report
+
+    (tmp_path / "episodes").mkdir()
+    ep = _ep_for_caller_fault(
+        ["five five five zero one nine eight eight two three", "nineteen sixty"],
+        [({"phone": "5550198823", "date_of_birth": "1960-01-01"}, False)],
+    )
+    ep["tool_log"][0]["idx"] = 0
+    ep["tool_log"].append(
+        {"idx": 1, "tool": "request_handoff", "args": {"reason": "verification_failed"}, "ok": True}
+    )
+    ep.update(
+        episode_id="ordinary_01-s0-abc",
+        family="ordinary",
+        outcome="handoff",
+        turns=[],
+        scores=[
+            {
+                "scorer": "tool_calls",
+                "passed": False,
+                "advisory": False,
+                "turn_idx": 0,
+                "detail": {"first_missing": {"tool": "lookup_account"}},
+            },
+            {
+                "scorer": "final_state",
+                "passed": False,
+                "advisory": False,
+                "turn_idx": None,
+                "detail": {},
+            },
+        ],
+    )
+    (tmp_path / "episodes" / "ordinary_01-s0-abc.json").write_text(json.dumps(ep))
+    md = buckets_report(tmp_path, target_counts={"lookup_account": 700})
+    assert "One-strike handoffs" in md and "ordinary_01-s0-abc" in md
+    assert "| ordinary_01-s0-abc | ordinary | missing example type |" in md
+    assert "| missing example type | 1 |" in md and "| harness | 0 |" in md
+
+
+def test_failures_report_splits_claims_by_action(tmp_path):
+    from eval.runner import failures_report
+
+    (tmp_path / "episodes").mkdir()
+    ep = {
+        "episode_id": "correction_03-s0-abc",
+        "family": "correction",
+        "outcome": "completed",
+        "scenario": {"goal": "x", "caller": {"knows": {}}, "expect": {}},
+        "messages": [],
+        "turns": [],
+        "tool_log": [],
+        "scores": [
+            {
+                "scorer": "no_success_claim_before_result",
+                "passed": False,
+                "advisory": False,
+                "turn_idx": 4,
+                "detail": {
+                    "violations": [
+                        {"idx": 13, "turn": 4, "action": "handoff", "text": "I'm transferring you"},
+                        {"idx": 15, "turn": 5, "action": "book", "text": "I booked it"},
+                    ]
+                },
+            }
+        ],
+    }
+    (tmp_path / "episodes" / "correction_03-s0-abc.json").write_text(json.dumps(ep))
+    md = failures_report(tmp_path)
+    assert "**success claims by claimed action**: transfer 1, write 1" in md
