@@ -185,8 +185,7 @@ def test_write_db_inserts_eval_results_sessions_and_ledger(rollback_conn):
 
 
 def test_validate_dir_reports_problems_per_file(tmp_path):
-    known = validate_dir(TEST_DIR)  # only the human's block_card scenarios, until rewritten
-    assert all("block_card" in " ".join(v) for v in known.values())
+    assert validate_dir(TEST_DIR) == {}
     bad = json.loads((TEST_DIR / "ordinary_01.json").read_text())
     bad["caller"]["customer_id"] = "C-9999"
     (tmp_path / "ordinary_01.json").write_text(json.dumps(bad))

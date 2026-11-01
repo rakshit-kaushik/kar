@@ -44,7 +44,7 @@ def final_state(ep: Episode, sc: Scenario) -> ScorerResult:
     diff = ep.final_state.get("diff") or {}
     missing: dict[str, list] = {}
     unexpected: dict[str, list] = {}
-    for key in ("appointments_new", "appointments_changed", "cards", "tickets"):
+    for key in ("appointments_new", "appointments_changed", "tickets"):
         pool = list(diff.get(key, []))
         for e in getattr(exp, key):
             m = next((a for a in pool if _entry_matches(e, a)), None)

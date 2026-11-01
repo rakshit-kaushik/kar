@@ -99,4 +99,4 @@ DEFAULT_CLOCK = datetime.fromisoformat(_DEFAULT["clock"])
 DEFAULT_TODAY = DEFAULT_CLOCK.date()
 BRANCHES: dict[str, str] = {k: v["name"] for k, v in _DEFAULT["branches"].items()}
 SERVICES: dict[str, dict] = _DEFAULT["services"]
-CARD_REPLACEMENT: dict[str, dict] = _DEFAULT["card_replacement"]
+CARD_REPLACEMENT: dict[str, dict] = _DEFAULT.get("card_replacement", {})  # removed with block_card

@@ -73,7 +73,6 @@ class Inject(_Strict):
 class FinalState(_Strict):
     appointments_new: list[dict[str, Any]] = []
     appointments_changed: list[dict[str, Any]] = []
-    cards: list[dict[str, Any]] = []
     tickets: list[dict[str, Any]] = []
     no_other_changes: bool = False
 
@@ -160,7 +159,7 @@ def load_scenarios(directory: str | Path) -> list[Scenario]:
 
 
 def validate_against_seed(s: Scenario, sb: Sandbox) -> list[str]:
-    """Human-readable problems: customer/phone/dob, tool names, slots open, ids exist, cards."""
+    """Human-readable problems: customer/phone/dob, tool names, slots open, ids exist."""
     problems: list[str] = []
     cust = None
     if s.caller.customer_id is not None:
@@ -219,13 +218,6 @@ def validate_against_seed(s: Scenario, sb: Sandbox) -> list[str]:
                 problems.append(
                     f"appointments_changed: {a['slot_start']} is not open at {ap.branch_id}"
                 )
-    for c in s.expect.final_state.cards:
-        owner = cust.customer_id if cust else None
-        cards = sb.customer_cards(owner) if owner else sb.cards
-        if not any(k.card_last4 == str(c.get("card_last4")) for k in cards):
-            problems.append(
-                f"cards: card ending {c.get('card_last4')} is not on the caller's account"
-            )
     if (
         s.expect.handoff.required
         and s.expect.handoff.reason

@@ -493,7 +493,6 @@ def test_diff_against_seed_and_dump_state(sb):
         "appointments_changed": [
             {"appointment_id": "A-2002", "status": "cancelled", "slot_start": "2026-11-10T11:00"}
         ],
-        "cards": [],
         "tickets": [{"customer_id": "C-1005", "category": "card_lost_stolen"}],
     }
     st = sb.dump_state()
@@ -510,7 +509,6 @@ def test_reset_restores_seed_and_clears_log_and_counters(sb):
     assert sb.tool_log == [] and sb.diff() == {
         "appointments_new": [],
         "appointments_changed": [],
-        "cards": [],
         "tickets": [],
     }
     assert (

@@ -347,7 +347,7 @@ class Sandbox:
 
     # ----- export ------------------------------------------------------------------------
     def diff(self) -> dict:
-        """What changed against the seed, in the shape of expect.final_state."""
+        """What changed against the seed, in the shape of expect.final_state (no cards: block_card is cut)."""
         new = [
             {
                 "customer_id": a.customer_id,
@@ -364,18 +364,8 @@ class Sandbox:
             if a.appointment_id in self._seed_appts
             and (a.status, a.slot) != self._seed_appts[a.appointment_id]
         ]
-        cards = [
-            {"card_last4": k.card_last4, "status": k.status, "replacement": k.replacement}
-            for k in self.cards
-            if (k.status, k.replacement) != self._seed_cards.get((k.customer_id, k.card_last4))
-        ]
         tickets = [{"customer_id": t.customer_id, "category": t.category} for t in self.tickets]
-        return {
-            "appointments_new": new,
-            "appointments_changed": changed,
-            "cards": cards,
-            "tickets": tickets,
-        }
+        return {"appointments_new": new, "appointments_changed": changed, "tickets": tickets}
 
     def dump_state(self) -> dict:
         return {
