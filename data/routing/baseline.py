@@ -20,7 +20,15 @@ from dotenv import load_dotenv
 from openai import AsyncOpenAI
 
 from data.routing.prompt import ROUTING_SYSTEM_PROMPT
-from data.routing.score import parse_label, score_predictions
+from data.routing.score import NEEDS_REVIEW, parse_label, score_predictions
+
+MAX_RETRY_TOKENS = 512
+
+
+def needs_retry(finish_reason: str | None, content: str) -> bool:
+    """Cut off by max_tokens before a label appeared (hidden output ate the budget)."""
+    return finish_reason == "length" and parse_label(content) == NEEDS_REVIEW
+
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -30,19 +38,26 @@ async def classify(
 ) -> list[str]:
     sem = asyncio.Semaphore(parallel)
 
+    async def request(text: str, budget: int):
+        return await client.chat.completions.create(
+            model=model,
+            max_tokens=budget,
+            messages=[
+                {"role": "system", "content": ROUTING_SYSTEM_PROMPT},
+                {"role": "user", "content": text},
+            ],
+        )
+
     async def one(text: str) -> str:
         async with sem:
             for attempt in range(4):
                 try:
-                    r = await client.chat.completions.create(
-                        model=model,
-                        max_tokens=max_tokens,
-                        messages=[
-                            {"role": "system", "content": ROUTING_SYSTEM_PROMPT},
-                            {"role": "user", "content": text},
-                        ],
-                    )
-                    return r.choices[0].message.content or ""
+                    r = await request(text, max_tokens)
+                    content = r.choices[0].message.content or ""
+                    if needs_retry(r.choices[0].finish_reason, content):
+                        r = await request(text, min(MAX_RETRY_TOKENS, max_tokens * 4))
+                        content = r.choices[0].message.content or ""
+                    return content
                 except Exception as e:  # noqa: BLE001 — retry, then count as needs_review
                     if attempt == 3:
                         print(f"request failed: {e}", file=sys.stderr)

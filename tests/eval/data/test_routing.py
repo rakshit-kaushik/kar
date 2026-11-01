@@ -190,3 +190,11 @@ def test_extend_keeps_the_test_split_and_appends_train_tickets():
         "split": "train",
     }
     assert [t["split"] for t in out[:2]] == ["test", "train"]  # untouched
+
+
+def test_baseline_retries_when_the_reply_is_cut_before_a_label():
+    from data.routing.baseline import needs_retry
+
+    assert needs_retry("length", "") is True and needs_retry("length", "compla") is True
+    assert needs_retry("length", "fee_dispute") is False  # a full label survived the cut
+    assert needs_retry("stop", "") is False and needs_retry("stop", "fee_dispute") is False
