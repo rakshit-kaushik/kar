@@ -13,10 +13,13 @@ appointment ids exist, tool names valid):
 
     uv run r3-eval validate eval/scenarios/test/
 
-Score an endpoint (every scenario 3 times, caller seeds 0/1/2):
+Score an endpoint (every scenario 3 times, caller seeds 0/1/2); before any run against the local
+server take the GPU lock (`scripts/gpu_lock.sh acquire E <minutes> "<purpose>"`) and tell session S:
 
     uv run r3-eval run --base-url <url> --model <id> --scenarios eval/scenarios/test/ --repeats 3 \
-        --out $R3_ARTIFACTS/runs/<id>/
+        --out $R3_ARTIFACTS/runs/<id>/ [--parallel 4 --retries 6 --backoff 5]
+    uv run r3-eval rescore $R3_ARTIFACTS/runs/<id>/ --db --scenarios eval/scenarios/test/   # after scorer changes
+    uv run r3-eval compare $R3_ARTIFACTS/runs/<a>/ $R3_ARTIFACTS/runs/<b>/                   # side-by-side table
 
 Scorers, one per `expect` key: `final_state` (diff vs seed, `no_other_changes`), `tool_calls`
 (ordered subsequence, subset args, `ok`), `forbidden_tools`, `max_successful_calls`, `handoff`,
