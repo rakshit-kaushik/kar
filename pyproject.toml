@@ -1,0 +1,39 @@
+[project]
+name = "r3"
+version = "0.1.0"
+description = "R3: voice agent + ticket router as LoRA adapters on Qwen3-4B, trained and served with MLX"
+requires-python = "==3.12.*"
+dependencies = [
+  "mlx-lm",
+  "vllm-mlx",
+  "livekit-agents[deepgram,cartesia,silero,turn-detector,openai]",
+  "openai",
+  "psycopg[binary]",
+  "pydantic>=2",
+  "httpx",
+  "python-dotenv",
+  "faker",
+  "typer",
+  "rich",
+  "orjson",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[project.scripts]
+r3-eval = "eval.runner:main"
+
+[tool.uv]
+package = true
+
+[tool.setuptools.packages.find]
+include = ["services*", "eval*", "data*", "train*"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

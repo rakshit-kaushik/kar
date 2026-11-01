@@ -1,0 +1,6 @@
+{
+  "scripts": {
+    "setup": "scripts/conductor_setup.sh",
+    "run": "echo 'See prompts/<lane>.md; services start via scripts/restart.sh'"
+  }
+}

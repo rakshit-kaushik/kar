@@ -1,0 +1,25 @@
+{
+  "type": "function",
+  "function": {
+    "name": "cancel_appointment",
+    "description": "Cancel an existing appointment after read-back confirmation. Errors: not_found, timeout.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "appointment_id": {
+          "type": "string",
+          "description": "From lookup_account"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "description": "Caller-generated UUID; repeat returns the original result"
+        }
+      },
+      "required": [
+        "appointment_id",
+        "idempotency_key"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

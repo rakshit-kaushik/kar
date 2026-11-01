@@ -1,0 +1,51 @@
+{
+  "table": "turn_events",
+  "columns": {
+    "call_id": "text",
+    "turn_idx": "int",
+    "model_id": "text",
+    "event": "text",
+    "ts_ms": "bigint monotonic",
+    "wall_ts": "timestamptz",
+    "payload": "jsonb"
+  },
+  "events": {
+    "call_start": {},
+    "speech_end": {},
+    "stt_final": {
+      "transcript": "text"
+    },
+    "llm_request": {
+      "prompt_tokens": "int"
+    },
+    "llm_first_token": {},
+    "tool_start": {
+      "name": "text"
+    },
+    "tool_end": {
+      "name": "text",
+      "ok": "bool",
+      "ms": "int"
+    },
+    "llm_done": {
+      "completion_tokens": "int"
+    },
+    "tts_first_audio": {},
+    "playback_end": {},
+    "interruption": {
+      "truncated_text": "text"
+    },
+    "fallback": {
+      "reason": "text",
+      "from_model": "text",
+      "to_model": "text"
+    },
+    "call_end": {
+      "outcome": "completed|handoff|abandoned|turn_cap"
+    }
+  },
+  "derived": {
+    "eos_to_first_audio_ms": "tts_first_audio - speech_end",
+    "ttft_ms": "llm_first_token - llm_request"
+  }
+}

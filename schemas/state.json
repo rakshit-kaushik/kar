@@ -1,0 +1,63 @@
+{
+  "verified": {
+    "customer_id": "string|null",
+    "first_name": "string|null",
+    "branch_id": "string|null",
+    "appointments": [
+      {
+        "appointment_id": "string",
+        "service_type": "string",
+        "branch_id": "string",
+        "slot_start": "string"
+      }
+    ],
+    "cards": [
+      {
+        "card_last4": "string",
+        "status": "active|blocked"
+      }
+    ]
+  },
+  "claimed": {
+    "phone": "string|null",
+    "date_of_birth": "string|null",
+    "service_type": "string|null",
+    "branch_id": "string|null",
+    "date": "string|null",
+    "time": "string|null",
+    "card_last4": "string|null",
+    "appointment_ref": "string|null"
+  },
+  "stage": [
+    "greeting",
+    "identifying",
+    "intent",
+    "collecting",
+    "confirming",
+    "executing",
+    "closing",
+    "handoff"
+  ],
+  "pending": {
+    "tool": "string",
+    "args": "object",
+    "read_back_spoken": "bool",
+    "confirmed": "bool"
+  },
+  "completed": [
+    {
+      "tool": "string",
+      "args": "object",
+      "result": "object",
+      "ts": "string"
+    }
+  ],
+  "handoff": {
+    "requested": "bool",
+    "reason": "string|null",
+    "ts": "string|null"
+  },
+  "model_id": "string",
+  "call_id": "string",
+  "started_at": "string"
+}

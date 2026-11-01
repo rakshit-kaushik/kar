@@ -1,0 +1,49 @@
+{
+  "type": "function",
+  "function": {
+    "name": "create_ticket",
+    "description": "Open a service ticket in one taxonomy category with a one-sentence summary. Errors: invalid_argument, timeout.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "customer_id": {
+          "type": "string",
+          "description": "From lookup_account"
+        },
+        "category": {
+          "type": "string",
+          "description": "Taxonomy label",
+          "enum": [
+            "card_lost_stolen",
+            "card_declined",
+            "unauthorized_transaction",
+            "fee_dispute",
+            "account_access",
+            "statement_document",
+            "profile_change",
+            "loan_mortgage",
+            "appointment",
+            "transfer_payment",
+            "complaint",
+            "other"
+          ]
+        },
+        "summary": {
+          "type": "string",
+          "description": "One sentence, no PII beyond last4"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "description": "Caller-generated UUID; repeat returns the original result"
+        }
+      },
+      "required": [
+        "customer_id",
+        "category",
+        "summary",
+        "idempotency_key"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

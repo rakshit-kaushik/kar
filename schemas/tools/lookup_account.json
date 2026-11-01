@@ -1,0 +1,25 @@
+{
+  "type": "function",
+  "function": {
+    "name": "lookup_account",
+    "description": "Verify a customer by phone and date of birth; returns verified profile with upcoming appointments and cards. Errors: not_found, not_verified, timeout.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "phone": {
+          "type": "string",
+          "description": "Digits only, 10 digits"
+        },
+        "date_of_birth": {
+          "type": "string",
+          "description": "YYYY-MM-DD"
+        }
+      },
+      "required": [
+        "phone",
+        "date_of_birth"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
