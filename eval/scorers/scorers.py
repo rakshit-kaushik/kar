@@ -9,12 +9,13 @@ import re
 from collections import Counter
 
 from eval.sandbox import TOOL_NAMES
+from eval.sandbox.seed import BRANCHES, DEFAULT_TODAY
 from eval.scorers.base import ScorerResult
 from eval.scorers.normalize import WRITE_TOOLS, args_match, norm_value, slot_of
 from eval.scorers.timeline import Evidence, message_turn, tool_log_turn, walk
 from eval.simulator.episode import Episode
 from eval.simulator.scenario import Scenario
-from eval.simulator.stt_shape import spell_digits
+from eval.simulator.stt_shape import cardinal, ordinal, spell_digits, time_words
 
 
 def _na(name: str) -> ScorerResult:
@@ -661,6 +662,149 @@ def brevity(ep: Episode, sc: Scenario) -> ScorerResult:
         "brevity",
         not violations,
         {"applicable": True, "violations": violations, "max_words": MAX_WORDS, "max_sentences": 2},
+        turn_idx=violations[0]["turn"] if violations else None,
+        advisory=True,
+    )
+
+
+# ----- advisory: re-asked a slot the caller had already given ---------------------------------------
+
+_SLOT_QUESTIONS = {
+    "branch": re.compile(
+        r"\b(which|what) (branch|location)\b|\bwhich of our branches\b", re.IGNORECASE
+    ),
+    "date": re.compile(r"\b(which|what) (day|date)\b|\bwhen would you like\b", re.IGNORECASE),
+    "time": re.compile(
+        r"\b(which|what) time\b|\btime (works|would you like|suits)\b", re.IGNORECASE
+    ),
+    "service": re.compile(
+        r"\b(which|what) (service|type of appointment|kind of appointment)\b", re.IGNORECASE
+    ),
+}
+_LONG_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+_MONTH_NAMES = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+]
+
+
+def _slot_truth(sc: Scenario) -> dict[str, str]:
+    """Expected branch / service / date / time, merged over the booking-type expected steps."""
+    truth: dict[str, str] = {}
+    for step in sc.expect.tool_calls:
+        if step.tool not in ("book_appointment", "check_availability", "reschedule_appointment"):
+            continue
+        a = step.args or {}
+        slot = a.get("slot_start") or a.get("new_slot_start") or ""
+        if a.get("branch_id"):
+            truth["branch"] = a["branch_id"]
+        if a.get("service_type"):
+            truth["service"] = a["service_type"]
+        if a.get("date") or len(slot) >= 10:
+            truth["date"] = a.get("date") or slot[:10]
+        if a.get("time") or len(slot) >= 16:
+            truth["time"] = a.get("time") or slot[11:16]
+    return truth
+
+
+def _spoken_forms(slot: str, value: str) -> set[str]:
+    """How a caller says the slot's value, lowercase, as substrings of the STT-shaped caller text."""
+    if slot == "branch":
+        name = BRANCHES.get(value, value.replace("_", " ")).lower()
+        return {name, value.replace("_", " ")}
+    if slot == "service":
+        phrase = value.replace("_", " ")
+        first = phrase.split()[0]
+        return {phrase} | ({first} if len(first) >= 6 and first != "account" else set())
+    if slot == "date":
+        from datetime import date
+
+        d = date.fromisoformat(value)
+        forms = {
+            _LONG_WEEKDAYS[d.weekday()],
+            f"{_MONTH_NAMES[d.month - 1]} {ordinal(d.day)}",
+            f"{ordinal(d.day)} of {_MONTH_NAMES[d.month - 1]}",
+        }
+        if (d - DEFAULT_TODAY).days == 1:
+            forms.add("tomorrow")
+        return forms
+    h, m = int(value[:2]), int(value[3:5])
+    h12 = h % 12 or 12
+    part = "morning" if h < 12 else "afternoon"
+    base = time_words(h, m)
+    forms = {base, base.replace(" o'clock", ""), f"{cardinal(h12)} {'a m' if h < 12 else 'p m'}"}
+    if m == 0:
+        forms |= {
+            f"{cardinal(h12)} o'clock",
+            f"{cardinal(h12)} in the {part}",
+            f"{cardinal(h12)} {'am' if h < 12 else 'pm'}",
+        }
+    if m == 30:
+        forms |= {f"{cardinal(h12)} thirty", f"half past {cardinal(h12)}"}
+    return forms
+
+
+def _mentions(text: str, forms: set[str]) -> bool:
+    t = " " + re.sub(r"[^a-z0-9' ]+", " ", text.lower()) + " "
+    t = re.sub(r"\s+", " ", t)
+    return any(f" {f} " in t for f in forms)
+
+
+def _is_disambiguation(slot: str, question: str, truth_value: str) -> bool:
+    """A question that lists two or more candidate values is a legitimate clarification."""
+    q = question.lower()
+    if slot == "branch":
+        return sum(1 for name in BRANCHES.values() if name.lower() in q) >= 2
+    if slot == "date":
+        return sum(1 for w in _LONG_WEEKDAYS if w in q) >= 2
+    if slot == "time":
+        return (
+            len(
+                re.findall(
+                    r"\b(?:[a-z]+ )?(?:o'clock|thirty|fifteen|forty five|a m|p m|am|pm)\b", q
+                )
+            )
+            >= 2
+        )
+    return False
+
+
+def reasked_given_slot(ep: Episode, sc: Scenario) -> ScorerResult:
+    """Advisory: the agent asked for a booking detail (branch, day, time, service) that the caller had
+    already stated in an earlier or the same turn. Over-asking otherwise only shows up as max_turns or a
+    missing check_availability call. Questions offering two or more candidates are clarifications."""
+    truth = _slot_truth(sc)
+    if not truth:
+        return ScorerResult("reasked_given_slot", True, {"applicable": False}, advisory=True)
+    forms = {slot: _spoken_forms(slot, v) for slot, v in truth.items()}
+    given: dict[str, int] = {}
+    violations = []
+    for t in ep.turns:
+        for slot, fs in forms.items():
+            if slot not in given and _mentions(t.get("caller_text") or "", fs):
+                given[slot] = t["idx"]
+        reply = t.get("assistant_text") or ""
+        for slot, rx in _SLOT_QUESTIONS.items():
+            if slot in given and slot in truth and rx.search(reply):
+                if _is_disambiguation(slot, reply, truth[slot]):
+                    continue
+                violations.append(
+                    {"turn": t["idx"], "slot": slot, "given_turn": given[slot], "text": reply[:120]}
+                )
+    return ScorerResult(
+        "reasked_given_slot",
+        not violations,
+        {"applicable": True, "violations": violations, "given": given},
         turn_idx=violations[0]["turn"] if violations else None,
         advisory=True,
     )

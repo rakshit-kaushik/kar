@@ -49,8 +49,9 @@ def test_registry_weights_and_advisory():
         "brevity",
         "valid_tool_calls",
         "calendar_consistency",
+        "reasked_given_slot",
     }
-    assert set(WEIGHTS) == set(SCORERS) and ADVISORY == {"brevity"}
+    assert set(WEIGHTS) == set(SCORERS) and ADVISORY == {"brevity", "reasked_given_slot"}
     assert (
         WEIGHTS["no_success_claim_before_result"] >= WEIGHTS["final_state"] > WEIGHTS["no_jargon"]
     )
@@ -792,3 +793,55 @@ async def test_calendar_consistency_catches_wrong_weekday_and_past_dates():
     ) in kinds
     assert len(kinds) == 2
     assert "calendar_consistency" in WEIGHTS and WEIGHTS["calendar_consistency"] >= 2
+
+
+@pytest.mark.asyncio
+async def test_reasked_given_slot_is_advisory_and_flags_questions_about_details_the_caller_gave():
+    scen = scenario()
+    ep = await make_episode(
+        scen,
+        VERIFY
+        + [
+            say(
+                "Which day would you like the mortgage consultation?"
+            ),  # the caller just said tuesday
+            say("What time works for you on Tuesday?"),  # and nine thirty
+            say(
+                "Which branch do you mean: Market Street or Marker Street?"
+            ),  # disambiguation: allowed
+            say(
+                "To confirm: Tuesday, November third, at nine thirty at Market Street. Shall I book it?"
+            ),
+            say("Bye."),
+        ],
+        VERIFY_LINES
+        + [
+            "i'd like a mortgage consultation at market street on tuesday november third at nine thirty",
+            "tuesday",
+            "nine thirty",
+            "market street",
+            "yes",
+            ("bye", True),
+        ],
+    )
+    r = results(ep, scen)["reasked_given_slot"]
+    assert r.advisory is True and r.passed is False
+    assert [v["slot"] for v in r.detail["violations"]] == ["date", "time"]
+    assert r.detail["violations"][0]["given_turn"] <= r.detail["violations"][0]["turn"]
+
+
+@pytest.mark.asyncio
+async def test_reasked_given_slot_not_applicable_without_a_booking_expectation():
+    scen = scenario(
+        expect={
+            "tool_calls": [{"tool": "lookup_account", "args": DANA_LOOKUP, "ok": True}],
+            "final_state": {"no_other_changes": True},
+        }
+    )
+    ep = await make_episode(
+        scen,
+        VERIFY + [say("Which day would you like?"), say("Bye.")],
+        VERIFY_LINES + ["tuesday", ("bye", True)],
+    )
+    r = results(ep, scen)["reasked_given_slot"]
+    assert r.passed is True and r.detail["applicable"] is False

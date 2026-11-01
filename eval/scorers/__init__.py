@@ -22,6 +22,7 @@ SCORERS: dict[str, Scorer] = {
     "valid_tool_calls": _s.valid_tool_calls,
     "calendar_consistency": _s.calendar_consistency,
     "brevity": _s.brevity,
+    "reasked_given_slot": _s.reasked_given_slot,
 }
 
 # Cost of one failure, for the ranked failure list (frequency x cost). Set from CONTRACT §1
@@ -41,8 +42,9 @@ WEIGHTS: dict[str, int] = {
     "valid_tool_calls": 3,
     "calendar_consistency": 2,
     "brevity": 0,
+    "reasked_given_slot": 0,
 }
-ADVISORY: set[str] = {"brevity"}
+ADVISORY: set[str] = {"brevity", "reasked_given_slot"}
 
 
 def score_episode(ep: Episode, sc: Scenario) -> list[ScorerResult]:
