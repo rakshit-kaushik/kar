@@ -97,8 +97,10 @@ def mlx_generator(model_dir: str, batch_size: int = 16) -> Callable[[list[list[d
 
 
 # ---- storage ---------------------------------------------------------------------------------------------
-def fetch_unlabeled(con, limit: int) -> list[dict]:
-    rows = con.execute("select ticket_id, summary from tickets where label is null order by created_at limit %s", (limit,)).fetchall()
+def fetch_unlabeled(con, limit: int, relabel: bool = False) -> list[dict]:
+    """Unlabeled tickets (the scheduled job) or, with relabel, every ticket (a comparison run that overwrites labels)."""
+    where = "" if relabel else "where label is null "
+    rows = con.execute(f"select ticket_id, summary from tickets {where}order by ticket_id limit %s", (limit,)).fetchall()
     return [{"ticket_id": r[0], "text": r[1]} for r in rows]
 
 
@@ -140,6 +142,7 @@ def main() -> int:
     ap.add_argument("--limit", type=int, default=500)
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--dry-run", action="store_true", help="label but do not write back")
+    ap.add_argument("--relabel", action="store_true", help="label every ticket, overwriting existing labels (comparison runs: base vs adapter on the same tickets)")
     ap.add_argument("--no-lock", action="store_true")
     args = ap.parse_args()
     from dotenv import load_dotenv
@@ -159,7 +162,7 @@ def main() -> int:
         return 3
     try:
         with psycopg.connect(os.environ["DATABASE_URL"], autocommit=True) as con:
-            tickets = fetch_unlabeled(con, args.limit)
+            tickets = fetch_unlabeled(con, args.limit, relabel=args.relabel)
             if not tickets:
                 print("no unlabeled tickets"); return 0
             t0 = time.perf_counter()
